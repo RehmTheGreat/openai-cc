@@ -8,6 +8,7 @@ export interface ModelRoute {
   provider: ProviderKind;
   model: string;
   credentialId?: string;
+  maxOutputTokens: number;
 }
 
 export interface ModelConfig {
@@ -15,14 +16,22 @@ export interface ModelConfig {
   routes: Record<ModelSlot, ModelRoute>;
 }
 
+export const DEFAULT_MAX_OUTPUT_TOKENS: Record<ModelSlot, number> = {
+  default: 128000,
+  fable: 128000,
+  opus: 128000,
+  sonnet: 128000,
+  haiku: 64000,
+};
+
 const DEFAULTS: ModelConfig = {
   contextWindow: 700000,
   routes: {
-    default: { provider: "chatgpt", model: "gpt-5.6-terra" },
-    fable: { provider: "chatgpt", model: "gpt-5.6-terra" },
-    opus: { provider: "zen", model: "deepseek-v4-flash-free" },
-    sonnet: { provider: "google", model: "gemini-3.6-flash" },
-    haiku: { provider: "google", model: "gemini-3.6-flash" },
+    default: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.default },
+    fable: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.fable },
+    opus: { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.opus },
+    sonnet: { provider: "google", model: "gemini-3.6-flash", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.sonnet },
+    haiku: { provider: "google", model: "gemini-3.6-flash", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.haiku },
   },
 };
 
@@ -49,7 +58,11 @@ export class ModelConfigStore {
   }
 
   async update(input: Partial<ModelConfig>): Promise<ModelConfig> {
-    this.state = normalize({ ...this.state, ...input, routes: { ...this.state.routes, ...(input.routes ?? {}) } });
+    const routes = Object.fromEntries(MODEL_SLOTS.map((slot) => [
+      slot,
+      { ...this.state.routes[slot], ...(input.routes?.[slot] ?? {}) },
+    ])) as Record<ModelSlot, ModelRoute>;
+    this.state = normalize({ ...this.state, ...input, routes });
     await this.persist();
     return this.snapshot();
   }
@@ -97,7 +110,9 @@ function normalize(input: Partial<ModelConfig>): ModelConfig {
     const provider = isProvider(candidate?.provider) ? candidate.provider : DEFAULTS.routes[slot].provider;
     const model = String(candidate?.model ?? DEFAULTS.routes[slot].model).trim() || DEFAULTS.routes[slot].model;
     const credentialId = String(candidate?.credentialId ?? "").trim() || undefined;
-    routes[slot] = { provider, model, credentialId };
+    const rawMaxOutputTokens = Number(candidate?.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS[slot]);
+    const maxOutputTokens = Math.max(1, Math.min(1000000, Number.isFinite(rawMaxOutputTokens) ? Math.floor(rawMaxOutputTokens) : DEFAULT_MAX_OUTPUT_TOKENS[slot]));
+    routes[slot] = { provider, model, credentialId, maxOutputTokens };
   }
   return { contextWindow, routes };
 }

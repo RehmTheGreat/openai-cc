@@ -6,6 +6,7 @@ import OpenAI from "openai";
 import { createOpenAIOAuthTransport } from "@openai-oauth/core";
 import { openaiCredentials } from "@openai-oauth/local";
 import { AccountRecord, AccountStore, ProviderKind, readAuthEmail, validateId } from "./account-store.js";
+import { claudeDesktopModel, claudeDesktopModelList } from "./claude-desktop.js";
 import { AnthropicRequest, AnthropicSseTranslator, anthropicToResponses, estimateAnthropicTokens, responsesToAnthropic } from "./translator.js";
 import { AnthropicChatSseTranslator, anthropicToChatCompletions, chatCompletionToAnthropic } from "./chat-translator.js";
 import { ModelConfigStore } from "./model-config.js";
@@ -45,7 +46,17 @@ export class Dispatcher {
         return void json(res, 200, { ok: true, contextWindow: this.models.snapshot().contextWindow });
       }
       if (req.method === "GET" && url.pathname === "/v1/models") {
-        return void json(res, 200, { object: "list", data: modelAliases().map((id) => ({ id, object: "model", created: 0, owned_by: "openai-cc" })) });
+        const limit = url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : undefined;
+        return void json(res, 200, claudeDesktopModelList(this.models.snapshot(), {
+          afterId: url.searchParams.get("after_id") ?? undefined,
+          beforeId: url.searchParams.get("before_id") ?? undefined,
+          limit,
+        }));
+      }
+      if (req.method === "GET" && /^\/v1\/models\/[^/]+$/.test(url.pathname)) {
+        const modelId = decodeURIComponent(url.pathname.slice("/v1/models/".length));
+        const model = claudeDesktopModel(this.models.snapshot(), modelId);
+        return void json(res, model ? 200 : 404, model ?? { error: { type: "not_found_error", message: `Model not found: ${modelId}` } });
       }
       if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
         const body = await readJson<AnthropicRequest>(req);
@@ -91,6 +102,11 @@ export class Dispatcher {
   private async handleMessages(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await readJson<AnthropicRequest>(req);
     const route = this.models.routeForRequestedModel(body.model);
+    const requestedMaxTokens = Number(body.max_tokens) || route.maxOutputTokens;
+    const routedBody: AnthropicRequest = {
+      ...body,
+      max_tokens: Math.max(1, Math.min(Math.floor(requestedMaxTokens), route.maxOutputTokens)),
+    };
     const attempted = new Set<string>();
     let account = this.models.credentialForRequestedModel(body.model, attempted);
     if (!account) {
@@ -104,7 +120,7 @@ export class Dispatcher {
       const model = route.model || account.model || body.model;
       try {
         if (usesResponsesApi(account)) {
-          const upstream = { ...anthropicToResponses(body), model } as any;
+          const upstream = { ...anthropicToResponses(routedBody), model } as any;
           if (body.stream) {
             const stream = await client.responses.create({ ...upstream, stream: true });
             beginSse(res);
@@ -117,7 +133,7 @@ export class Dispatcher {
           return void json(res, 200, responsesToAnthropic(response, body.model));
         }
 
-        const upstream = anthropicToChatCompletions(body, model) as any;
+        const upstream = anthropicToChatCompletions(routedBody, model) as any;
         if (body.stream) {
           const stream = await client.chat.completions.create({ ...upstream, stream: true });
           beginSse(res);
@@ -261,17 +277,16 @@ async function readJson<T>(req: IncomingMessage): Promise<T> {
 function send(res: ServerResponse, status: number, body: string): void { res.statusCode = status; res.end(body); }
 function json(res: ServerResponse, status: number, body: unknown): void { res.statusCode = status; res.setHeader("Content-Type", "application/json; charset=utf-8"); res.end(JSON.stringify(body)); }
 function html(res: ServerResponse, body: string): void { res.statusCode = 200; res.setHeader("Content-Type", "text/html; charset=utf-8"); res.end(body); }
-function setCors(res: ServerResponse): void { res.setHeader("Access-Control-Allow-Origin", "http://127.0.0.1"); res.setHeader("Access-Control-Allow-Headers", "content-type,x-api-key,anthropic-version,anthropic-beta"); res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS"); }
-function modelAliases(): string[] { return ["Default", "Fable", "Opus", "Sonnet", "Haiku"]; }
+function setCors(res: ServerResponse): void { res.setHeader("Access-Control-Allow-Origin", "http://127.0.0.1"); res.setHeader("Access-Control-Allow-Headers", "authorization,content-type,x-api-key,anthropic-version,anthropic-beta"); res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS"); }
 
 function adminHtml(): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenAI-CC</title><style>
-body{font:14px system-ui;margin:0;background:#0e1116;color:#e8edf3}.wrap{max-width:1050px;margin:36px auto;padding:0 18px}h1{font-size:24px}.note,.add{background:#171c24;padding:14px;border-radius:10px;margin:16px 0}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:7px 0}.card{display:grid;grid-template-columns:1fr auto;gap:12px;background:#171c24;margin:10px 0;padding:14px;border-radius:10px}.muted{color:#9aa6b2}.ready{color:#73d69c}.exhausted{color:#ff8f8f}button{background:#2b66d9;color:white;border:0;border-radius:7px;padding:8px 12px;cursor:pointer}button.secondary{background:#39414d}input,select{background:#0e1116;color:#e8edf3;border:1px solid #39414d;border-radius:7px;padding:9px;margin:4px 6px 4px 0;min-width:0}.toast{position:fixed;right:20px;bottom:20px;background:#242b36;padding:14px;border-radius:10px;max-width:420px;display:none}@media(max-width:800px){.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><h1>OpenAI-CC</h1><div class="note">Claude Code is exposed only as <b>Default, Fable, Opus, Sonnet, Haiku</b>. Each slot routes to the provider/model below. Default context window: 700,000 tokens.</div><div class="add"><b>Model config</b><div class="muted">Choose a provider, exact upstream model id, and optionally pin a credential id. Leave credential blank to use the first ready credential for that provider.</div><div id="model-config"></div><button onclick="saveModels()">Save model config</button><div id="model-status" class="muted"></div></div><div class="add"><b>Add teammate with ChatGPT OAuth</b><form onsubmit="startOAuth(event)"><input id="oauth-id" required pattern="[A-Za-z0-9._-]{1,64}" placeholder="credential id"><input id="oauth-name" required placeholder="display name"><button type="submit">Add ChatGPT account</button></form><div id="oauth-status" class="muted"></div></div><div class="add"><b>Add API key</b><form onsubmit="addKey(event)"><select id="key-provider"><option value="zen">OpenCode Zen</option><option value="nvidia">NVIDIA NIM</option><option value="google">Google AI Studio</option></select><input id="key-id" required pattern="[A-Za-z0-9._-]{1,64}" placeholder="credential id"><input id="key-name" required placeholder="display name"><input id="key-model" required placeholder="provider model id"><input id="key-value" required type="password" autocomplete="off" placeholder="API key"><button type="submit">Add API key</button></form><div id="key-status" class="muted"></div></div><div id="status" class="muted"></div><div id="accounts"></div></div><div id="toast" class="toast"></div><script>
+body{font:14px system-ui;margin:0;background:#0e1116;color:#e8edf3}.wrap{max-width:1150px;margin:36px auto;padding:0 18px}h1{font-size:24px}.note,.add{background:#171c24;padding:14px;border-radius:10px;margin:16px 0}.grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:7px 0}.card{display:grid;grid-template-columns:1fr auto;gap:12px;background:#171c24;margin:10px 0;padding:14px;border-radius:10px}.muted{color:#9aa6b2}.ready{color:#73d69c}.exhausted{color:#ff8f8f}button{background:#2b66d9;color:white;border:0;border-radius:7px;padding:8px 12px;cursor:pointer}button.secondary{background:#39414d}input,select{background:#0e1116;color:#e8edf3;border:1px solid #39414d;border-radius:7px;padding:9px;margin:4px 6px 4px 0;min-width:0}.toast{position:fixed;right:20px;bottom:20px;background:#242b36;padding:14px;border-radius:10px;max-width:420px;display:none}@media(max-width:900px){.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><h1>OpenAI-CC</h1><div class="note">Claude Code uses <b>Default, Fable, Opus, Sonnet, Haiku</b>. Claude Desktop exposes only Claude-safe aliases for Fable, Opus, Sonnet and Haiku and routes them to the same configured upstream slots.</div><div class="add"><b>Model config</b><div class="muted">Choose a provider, exact upstream model id, output ceiling, and optionally pin a credential id. Leave credential blank to use the first ready credential for that provider.</div><div id="model-config"></div><button onclick="saveModels()">Save model config</button><div id="model-status" class="muted"></div></div><div class="add"><b>Add teammate with ChatGPT OAuth</b><form onsubmit="startOAuth(event)"><input id="oauth-id" required pattern="[A-Za-z0-9._-]{1,64}" placeholder="credential id"><input id="oauth-name" required placeholder="display name"><button type="submit">Add ChatGPT account</button></form><div id="oauth-status" class="muted"></div></div><div class="add"><b>Add API key</b><form onsubmit="addKey(event)"><select id="key-provider"><option value="zen">OpenCode Zen</option><option value="nvidia">NVIDIA NIM</option><option value="google">Google AI Studio</option></select><input id="key-id" required pattern="[A-Za-z0-9._-]{1,64}" placeholder="credential id"><input id="key-name" required placeholder="display name"><input id="key-model" required placeholder="provider model id"><input id="key-value" required type="password" autocomplete="off" placeholder="API key"><button type="submit">Add API key</button></form><div id="key-status" class="muted"></div></div><div id="status" class="muted"></div><div id="accounts"></div></div><div id="toast" class="toast"></div><script>
 const slots=['default','fable','opus','sonnet','haiku'];let currentState=null;
 async function load(){const s=await fetch('/admin/state').then(r=>r.json());currentState=s;render(s)}
 function render(s){document.querySelector('#status').textContent='Credentials: '+s.accounts.length+' · Context: '+s.modelConfig.contextWindow.toLocaleString();document.querySelector('#accounts').innerHTML=s.accounts.map(a=>'<div class="card"><div><b>'+esc(a.name)+'</b> <span class="muted">('+esc(a.id)+')</span><div>'+esc(providerName(a.provider||'chatgpt'))+(a.model?' · '+esc(a.model):'')+(a.email?' · '+esc(a.email):'')+'</div><div class="'+a.status+'">'+a.status+'</div><div class="muted">'+esc(a.lastError||'')+'</div></div><div>'+(a.status==='ready'?'<button onclick="post(\'/admin/accounts/'+encodeURIComponent(a.id)+'/activate\')">Activate</button>':'<button class="secondary" onclick="post(\'/admin/accounts/'+encodeURIComponent(a.id)+'/reset\')">Reset</button>')+'</div></div>').join('');renderModels(s)}
-function renderModels(s){const c=s.modelConfig;document.querySelector('#model-config').innerHTML='<div class="grid"><label>Context window<input id="context-window" type="number" min="200000" max="1000000" value="'+c.contextWindow+'"></label></div>'+slots.map(slot=>{const r=c.routes[slot];return '<div class="grid"><b>'+slot[0].toUpperCase()+slot.slice(1)+'</b><select id="p-'+slot+'">'+['chatgpt','zen','nvidia','google'].map(p=>'<option value="'+p+'" '+(p===r.provider?'selected':'')+'>'+providerName(p)+'</option>').join('')+'</select><input id="m-'+slot+'" value="'+esc(r.model)+'" placeholder="upstream model id"><input id="c-'+slot+'" value="'+esc(r.credentialId||'')+'" placeholder="credential id (optional)"></div>'}).join('')}
-async function saveModels(){const routes={};for(const slot of slots)routes[slot]={provider:document.querySelector('#p-'+slot).value,model:document.querySelector('#m-'+slot).value.trim(),credentialId:document.querySelector('#c-'+slot).value.trim()||undefined};const r=await fetch('/admin/model-config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({contextWindow:Number(document.querySelector('#context-window').value),routes})});document.querySelector('#model-status').textContent=r.ok?'Saved. Restart server to re-apply Claude Code local settings.':'Save failed';await load()}
+function renderModels(s){const c=s.modelConfig;document.querySelector('#model-config').innerHTML='<div class="grid"><label>Context window<input id="context-window" type="number" min="200000" max="1000000" value="'+c.contextWindow+'"></label></div>'+slots.map(slot=>{const r=c.routes[slot];return '<div class="grid"><b>'+slot[0].toUpperCase()+slot.slice(1)+'</b><select id="p-'+slot+'">'+['chatgpt','zen','nvidia','google'].map(p=>'<option value="'+p+'" '+(p===r.provider?'selected':'')+'>'+providerName(p)+'</option>').join('')+'</select><input id="m-'+slot+'" value="'+esc(r.model)+'" placeholder="upstream model id"><input id="o-'+slot+'" type="number" min="1" max="1000000" value="'+Number(r.maxOutputTokens||64000)+'" placeholder="max output"><input id="c-'+slot+'" value="'+esc(r.credentialId||'')+'" placeholder="credential id (optional)"></div>'}).join('')}
+async function saveModels(){const routes={};for(const slot of slots)routes[slot]={provider:document.querySelector('#p-'+slot).value,model:document.querySelector('#m-'+slot).value.trim(),maxOutputTokens:Number(document.querySelector('#o-'+slot).value),credentialId:document.querySelector('#c-'+slot).value.trim()||undefined};const r=await fetch('/admin/model-config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({contextWindow:Number(document.querySelector('#context-window').value),routes})});document.querySelector('#model-status').textContent=r.ok?'Saved. Model discovery updates immediately; restart the proxy to refresh Claude Desktop profile labels.':'Save failed';await load()}
 function providerName(p){return p==='chatgpt'?'ChatGPT OAuth':p==='zen'?'OpenCode Zen':p==='nvidia'?'NVIDIA NIM':'Google AI Studio'}
 async function post(url){await fetch(url,{method:'POST'});load()}
 async function addKey(e){e.preventDefault();const provider=document.querySelector('#key-provider').value,id=document.querySelector('#key-id').value.trim(),name=document.querySelector('#key-name').value.trim(),model=document.querySelector('#key-model').value.trim(),apiKey=document.querySelector('#key-value').value.trim(),status=document.querySelector('#key-status');const r=await fetch('/admin/keys',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({provider,id,name,model,apiKey})});const d=await r.json().catch(()=>({}));status.textContent=r.ok?'Added '+name+'.':(d.error?.message||'Could not add key');if(r.ok)document.querySelector('#key-value').value='';await load()}

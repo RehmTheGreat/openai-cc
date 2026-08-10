@@ -1,5 +1,6 @@
 import { AccountStore } from "./account-store.js";
 import { configureClaudeCode } from "./claude-config.js";
+import { configureClaudeDesktop } from "./claude-desktop.js";
 import { createServer } from "./dispatcher.js";
 import { ModelConfigStore } from "./model-config.js";
 
@@ -17,6 +18,13 @@ try {
   console.log(`Claude Code configured: ${configured.settingsFile}`);
 } catch (error: any) {
   console.warn(`Claude Code auto-config failed: ${error?.message ?? String(error)}`);
+}
+
+try {
+  const configured = await configureClaudeDesktop(baseUrl, modelConfig.snapshot());
+  if (configured.supported) console.log(`Claude Desktop configured: ${configured.profileFile}`);
+} catch (error: any) {
+  console.warn(`Claude Desktop auto-config failed: ${error?.message ?? String(error)}`);
 }
 
 const server = createServer(store, modelConfig);

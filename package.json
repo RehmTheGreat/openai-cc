@@ -3,11 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Loopback Anthropic-compatible proxy for one explicitly active ChatGPT/Codex account at a time.",
+  "description": "Loopback Anthropic-compatible gateway for Claude Code and Claude Desktop with routed upstream credentials.",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/tests/claude-desktop.test.js",
     "start": "node dist/src/index.js",
+    "desktop:configure": "tsx scripts/configure-claude-desktop.ts",
     "account:add": "tsx scripts/account-add.ts",
     "account:list": "tsx scripts/account-list.ts"
   },
