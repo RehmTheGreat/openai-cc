@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - agent/auth-admin-control-plane
+  pull_request:
 
 permissions:
   contents: write
