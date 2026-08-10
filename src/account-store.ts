@@ -3,14 +3,19 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export type AccountStatus = "ready" | "exhausted" | "disabled";
+export type ProviderKind = "chatgpt" | "zen" | "nvidia" | "google";
 
 export const LIMIT_WINDOW_MS = 5 * 60 * 60 * 1000;
+export const DEFAULT_API_KEY_COOLDOWN_MS = 15 * 60 * 1000;
 
 export interface AccountRecord {
   id: string;
   name: string;
+  provider?: ProviderKind;
   email?: string;
-  authFile: string;
+  authFile?: string;
+  apiKey?: string;
+  model?: string;
   status: AccountStatus;
   createdAt: string;
   updatedAt: string;
@@ -58,7 +63,11 @@ export class AccountStore extends EventEmitter {
     let changed = false;
     const now = Date.now();
     for (const account of this.state.accounts) {
-      if (!account.email) {
+      if (!account.provider) {
+        account.provider = "chatgpt";
+        changed = true;
+      }
+      if (account.provider === "chatgpt" && account.authFile && !account.email) {
         const email = await readAuthEmail(account.authFile);
         if (email) {
           account.email = email;
@@ -76,7 +85,7 @@ export class AccountStore extends EventEmitter {
   }
 
   list(): AccountRecord[] {
-    return this.state.accounts.map((a) => ({ ...a }));
+    return this.state.accounts.map((a) => this.publicRecord(a));
   }
 
   get(id: string): AccountRecord | undefined {
@@ -95,7 +104,7 @@ export class AccountStore extends EventEmitter {
     if (!afterId) return { ...ready[0] };
     const start = this.state.accounts.findIndex((a) => a.id === afterId);
     for (let offset = 1; offset <= this.state.accounts.length; offset++) {
-      const candidate = this.state.accounts[(start + offset) % this.state.accounts.length];
+      const candidate = this.state.accounts[(Math.max(start, -1) + offset) % this.state.accounts.length];
       if (candidate?.status === "ready") return { ...candidate };
     }
     return undefined;
@@ -113,7 +122,10 @@ export class AccountStore extends EventEmitter {
     const email = input.email ?? await readAuthEmail(authFile);
     if (existing) {
       existing.name = input.name;
+      existing.provider = "chatgpt";
       existing.authFile = authFile;
+      delete existing.apiKey;
+      delete existing.model;
       if (email) existing.email = email;
       existing.updatedAt = now;
       if (existing.status === "disabled") existing.status = "ready";
@@ -125,8 +137,50 @@ export class AccountStore extends EventEmitter {
     const record: AccountRecord = {
       id: input.id,
       name: input.name,
+      provider: "chatgpt",
       email,
       authFile,
+      status: "ready",
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.state.accounts.push(record);
+    if (!this.state.activeAccountId) this.state.activeAccountId = record.id;
+    await this.persist();
+    this.emitChanged();
+    return { ...record };
+  }
+
+  async upsertApiKey(input: { id: string; name: string; provider: Exclude<ProviderKind, "chatgpt">; apiKey: string; model: string }): Promise<AccountRecord> {
+    validateId(input.id);
+    if (!isApiProvider(input.provider)) throw new Error(`Unsupported API provider: ${input.provider}`);
+    const apiKey = String(input.apiKey ?? "").trim();
+    const model = String(input.model ?? "").trim();
+    if (!apiKey) throw new Error("API key is required.");
+    if (!model) throw new Error("Provider model id is required.");
+
+    const now = new Date().toISOString();
+    const existing = this.state.accounts.find((a) => a.id === input.id);
+    if (existing) {
+      existing.name = input.name;
+      existing.provider = input.provider;
+      existing.apiKey = apiKey;
+      existing.model = model;
+      delete existing.authFile;
+      delete existing.email;
+      existing.updatedAt = now;
+      if (existing.status === "disabled") existing.status = "ready";
+      await this.persist();
+      this.emitChanged();
+      return { ...existing };
+    }
+
+    const record: AccountRecord = {
+      id: input.id,
+      name: input.name,
+      provider: input.provider,
+      apiKey,
+      model,
       status: "ready",
       createdAt: now,
       updatedAt: now,
@@ -141,9 +195,7 @@ export class AccountStore extends EventEmitter {
   async activate(id: string): Promise<AccountRecord> {
     const account = this.state.accounts.find((a) => a.id === id);
     if (!account) throw new Error(`Unknown account: ${id}`);
-    if (account.limitResetsAt && Date.parse(account.limitResetsAt) <= Date.now()) {
-      this.clearUsageWindow(account);
-    }
+    if (account.limitResetsAt && Date.parse(account.limitResetsAt) <= Date.now()) this.clearUsageWindow(account);
     if (account.status !== "ready") throw new Error(`Account ${id} is ${account.status}; it will be ready at ${account.limitResetsAt ?? "its next reset"}.`);
     this.state.activeAccountId = id;
     account.updatedAt = new Date().toISOString();
@@ -151,7 +203,7 @@ export class AccountStore extends EventEmitter {
     this.scheduleReset(account);
     this.emit("event", {
       type: "activated",
-      account: { ...account },
+      account: this.publicRecord(account),
       activeAccountId: id,
       suggestedNextAccountId: this.suggestedNext(id)?.id ?? null,
     } satisfies StoreEvent);
@@ -164,10 +216,9 @@ export class AccountStore extends EventEmitter {
     if (account.status !== "ready") throw new Error(`Account ${id} is ${account.status}.`);
 
     const nowMs = Date.now();
-    if (account.limitResetsAt && Date.parse(account.limitResetsAt) <= nowMs) {
-      this.clearUsageWindow(account);
-    }
-    if (!account.firstRequestAt) {
+    if (account.limitResetsAt && Date.parse(account.limitResetsAt) <= nowMs) this.clearUsageWindow(account);
+
+    if ((account.provider ?? "chatgpt") === "chatgpt" && !account.firstRequestAt) {
       const firstRequestAt = new Date(nowMs);
       account.firstRequestAt = firstRequestAt.toISOString();
       account.limitResetsAt = new Date(nowMs + LIMIT_WINDOW_MS).toISOString();
@@ -179,14 +230,21 @@ export class AccountStore extends EventEmitter {
     return { ...account };
   }
 
-  async markRateLimited(id: string, message: string, activateNext = false): Promise<AccountRecord | undefined> {
+  async markRateLimited(id: string, message: string, activateNext = false, cooldownMs?: number): Promise<AccountRecord | undefined> {
     const account = this.state.accounts.find((a) => a.id === id);
     if (!account) return undefined;
     const now = new Date();
-    if (!account.firstRequestAt) {
-      account.firstRequestAt = now.toISOString();
-      account.limitResetsAt = new Date(now.getTime() + LIMIT_WINDOW_MS).toISOString();
+    const provider = account.provider ?? "chatgpt";
+
+    if (provider === "chatgpt") {
+      if (!account.firstRequestAt) account.firstRequestAt = now.toISOString();
+      if (!account.limitResetsAt) account.limitResetsAt = new Date(Date.parse(account.firstRequestAt) + LIMIT_WINDOW_MS).toISOString();
+    } else {
+      account.firstRequestAt = account.firstRequestAt ?? now.toISOString();
+      const delay = Math.max(1000, cooldownMs ?? Number(process.env.API_KEY_RATE_LIMIT_COOLDOWN_MS || DEFAULT_API_KEY_COOLDOWN_MS));
+      account.limitResetsAt = new Date(now.getTime() + delay).toISOString();
     }
+
     account.status = "exhausted";
     account.exhaustedAt = now.toISOString();
     account.lastError = message.slice(0, 1000);
@@ -204,14 +262,15 @@ export class AccountStore extends EventEmitter {
     this.scheduleReset(account);
     this.emit("event", {
       type: "rate_limit",
-      account: { ...account },
+      account: this.publicRecord(account),
       activeAccountId: this.state.activeAccountId,
       suggestedNextAccountId: this.suggestedNext(this.state.activeAccountId ?? id)?.id ?? null,
     } satisfies StoreEvent);
     if (next) {
+      const nextRecord = this.state.accounts.find((a) => a.id === next.id);
       this.emit("event", {
         type: "activated",
-        account: this.get(next.id),
+        account: nextRecord ? this.publicRecord(nextRecord) : undefined,
         activeAccountId: next.id,
         suggestedNextAccountId: this.suggestedNext(next.id)?.id ?? null,
       } satisfies StoreEvent);
@@ -239,6 +298,12 @@ export class AccountStore extends EventEmitter {
       accounts: this.list(),
       suggestedNextAccountId: this.suggestedNext(this.state.activeAccountId ?? undefined)?.id ?? null,
     };
+  }
+
+  private publicRecord(account: AccountRecord): AccountRecord {
+    const copy = { ...account };
+    if (copy.apiKey) copy.apiKey = "********";
+    return copy;
   }
 
   private clearUsageWindow(account: AccountRecord): void {
@@ -353,6 +418,10 @@ function findJwtEmail(value: unknown, depth = 0): string | undefined {
 
 function looksLikeEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function isApiProvider(provider: string): provider is Exclude<ProviderKind, "chatgpt"> {
+  return provider === "zen" || provider === "nvidia" || provider === "google";
 }
 
 export function validateId(id: string): void {
