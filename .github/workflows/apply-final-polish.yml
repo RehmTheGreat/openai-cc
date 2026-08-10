@@ -1,9 +1,7 @@
 name: Apply Final Control Plane Polish
 
 on:
-  push:
-    branches:
-      - agent/auth-admin-final-polish
+  pull_request:
 
 permissions:
   contents: write
