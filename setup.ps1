@@ -14,18 +14,11 @@ function Write-Step([string]$Message) {
 }
 
 function Invoke-NativeConsole([string]$Command, [string[]]$Arguments) {
-  # Windows PowerShell 5.1 turns native stderr redirected with 2>&1 into
-  # non-terminating ErrorRecords. With the installer's global Stop preference,
-  # ordinary progress such as Git's "Cloning into..." can otherwise abort setup.
-  # Temporarily use Continue here and decide success only from the process exit code.
-  $previousErrorActionPreference = $ErrorActionPreference
-  try {
-    $ErrorActionPreference = "Continue"
-    & $Command @Arguments 2>&1 | Out-Host
-    return [int]$LASTEXITCODE
-  } finally {
-    $ErrorActionPreference = $previousErrorActionPreference
-  }
+  # Do not redirect native stderr in Windows PowerShell 5.1. Redirecting 2>&1
+  # converts ordinary native stderr progress into ErrorRecords. With the
+  # installer's global Stop preference that can abort on harmless Git output.
+  & $Command @Arguments
+  return [int]$LASTEXITCODE
 }
 
 function Clear-PendingConsoleInput {
@@ -33,9 +26,7 @@ function Clear-PendingConsoleInput {
     if (-not [Console]::IsInputRedirected) {
       while ([Console]::KeyAvailable) { [void][Console]::ReadKey($true) }
     }
-  } catch {
-    # Some hosts do not expose KeyAvailable. Read-YesNo still rejects blank input.
-  }
+  } catch { }
 }
 
 function Read-YesNo([string]$Prompt) {
@@ -51,39 +42,34 @@ function Read-YesNo([string]$Prompt) {
           }
           if ($key.Key -eq [ConsoleKey]::Y) { Write-Host "Y"; return $true }
           if ($key.Key -eq [ConsoleKey]::N) { Write-Host "N"; return $false }
-          # Ignore Enter and every other buffered/accidental key. Only Y or N completes the prompt.
+          # Ignore Enter and all other buffered keys. Only Y or N completes this prompt.
         }
       }
     } catch [System.OperationCanceledException] {
       throw
-    } catch {
-      # Fall back for hosts such as ISE or redirected terminals.
-    }
+    } catch { }
 
     $answer = (Read-Host).Trim()
     if ($answer -match '^(?i:y|yes)$') { return $true }
     if ($answer -match '^(?i:n|no)$') { return $false }
-    # Empty strings (including stray Enter presses) are intentionally ignored.
   }
 }
 
 function Refresh-ProcessPath {
   $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
   $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-  $parts = @($machinePath, $userPath) | Where-Object { $_ }
-  $env:Path = ($parts -join ";")
+  $env:Path = (@($machinePath, $userPath) | Where-Object { $_ }) -join ";"
 }
 
-function Add-UserPath([string]$Directory) {
+function Add-UserPath([string]$Directory, [switch]$Prepend) {
   if (-not $Directory) { return }
   $Directory = [IO.Path]::GetFullPath($Directory)
   $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
   $entries = @()
   if ($userPath) { $entries = @($userPath -split ';' | Where-Object { $_ }) }
-  if (-not ($entries | Where-Object { $_.TrimEnd('\') -ieq $Directory.TrimEnd('\') })) {
-    $newPath = (@($entries) + $Directory) -join ";"
-    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-  }
+  $entries = @($entries | Where-Object { $_.TrimEnd('\') -ine $Directory.TrimEnd('\') })
+  if ($Prepend) { $entries = @($Directory) + $entries } else { $entries += $Directory }
+  [Environment]::SetEnvironmentVariable("Path", ($entries -join ";"), "User")
   Refresh-ProcessPath
 }
 
@@ -94,8 +80,8 @@ function Set-PersistentEnvironment([string]$Name, [string]$Value) {
 
 function Remove-OldOpenAICCContextOverrides {
   foreach ($name in @("CLAUDE_CODE_CONTEXT_WINDOW", "CLAUDE_CODE_MAX_CONTEXT_TOKENS")) {
-    $value = [Environment]::GetEnvironmentVariable($name, "User")
-    if ($value -eq [string]$ContextWindow) {
+    $userValue = [Environment]::GetEnvironmentVariable($name, "User")
+    if ($userValue -eq [string]$ContextWindow) {
       [Environment]::SetEnvironmentVariable($name, $null, "User")
     }
     $current = Get-Item -Path "Env:$name" -ErrorAction SilentlyContinue
@@ -116,30 +102,53 @@ function Get-Winget {
 function Invoke-WingetInstall([string]$Id, [string]$Label) {
   $winget = Get-Winget
   Write-Host "Installing $Label..."
-  & $winget install --id $Id --exact --source winget --accept-package-agreements --accept-source-agreements --silent --disable-interactivity
-  if ($LASTEXITCODE -ne 0) { throw "$Label installation failed (WinGet exit code $LASTEXITCODE)." }
+  $exitCode = Invoke-NativeConsole $winget @("install", "--id", $Id, "--exact", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements", "--silent", "--disable-interactivity")
+  if ($exitCode -ne 0) { throw "$Label installation failed (WinGet exit code $exitCode)." }
   Refresh-ProcessPath
 }
 
 function Invoke-WingetUpgrade([string]$Id, [string]$Label) {
   $winget = Get-Winget
   Write-Host "Upgrading $Label because the installed version is below the required minimum..."
-  & $winget upgrade --id $Id --exact --source winget --accept-package-agreements --accept-source-agreements --silent --disable-interactivity
-  if ($LASTEXITCODE -ne 0) { throw "$Label upgrade failed (WinGet exit code $LASTEXITCODE)." }
+  $exitCode = Invoke-NativeConsole $winget @("upgrade", "--id", $Id, "--exact", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements", "--silent", "--disable-interactivity")
+  if ($exitCode -ne 0) { throw "$Label upgrade failed (WinGet exit code $exitCode)." }
   Refresh-ProcessPath
 }
 
+function Test-WingetPackageInstalled([string]$Id) {
+  $winget = Get-Command winget -ErrorAction SilentlyContinue
+  if (-not $winget) { return $false }
+
+  $stdout = Join-Path ([IO.Path]::GetTempPath()) ("openai-cc-winget-" + [Guid]::NewGuid().ToString("N") + ".out")
+  $stderr = "$stdout.err"
+  try {
+    $process = Start-Process -FilePath $winget.Source -ArgumentList @(
+      "list", "--id", $Id, "--exact", "--accept-source-agreements", "--disable-interactivity"
+    ) -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    if ($process.ExitCode -ne 0) { return $false }
+    $text = if (Test-Path $stdout) { Get-Content $stdout -Raw -ErrorAction SilentlyContinue } else { "" }
+    return ($text -match [Regex]::Escape($Id))
+  } catch {
+    return $false
+  } finally {
+    Remove-Item $stdout, $stderr -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Test-ClaudeDesktopInstalled {
+  # Legacy/Squirrel paths plus the MSIX app-execution alias used by current Windows builds.
   $knownPaths = @(
     (Join-Path $env:LOCALAPPDATA "AnthropicClaude\Claude.exe"),
     (Join-Path $env:LOCALAPPDATA "Programs\Claude\Claude.exe"),
-    (Join-Path $env:LOCALAPPDATA "Claude\Claude.exe")
+    (Join-Path $env:LOCALAPPDATA "Claude\Claude.exe"),
+    (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\Claude.exe")
   )
   if ($knownPaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1) { return $true }
 
+  # Current Claude Desktop is commonly MSIX. PackageFamilyName is typically Claude_<publisher id>.
   try {
     $package = Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object {
-      ($_.Name -match "Claude") -and (($_.PublisherDisplayName -match "Anthropic") -or ($_.PackageFamilyName -like "Claude_*"))
+      ($_.Name -eq "Claude") -or ($_.PackageFamilyName -like "Claude_*") -or ($_.PackageFullName -like "Claude_*")
     } | Select-Object -First 1
     if ($package) { return $true }
   } catch { }
@@ -151,11 +160,23 @@ function Test-ClaudeDesktopInstalled {
   )) {
     try {
       $entry = Get-ItemProperty $root -ErrorAction SilentlyContinue | Where-Object {
-        ($_.DisplayName -match "^Claude( Desktop)?$") -and (($_.Publisher -match "Anthropic") -or ($_.UninstallString -match "AnthropicClaude"))
+        ($_.DisplayName -match "^Claude( Desktop)?$") -or ($_.UninstallString -match "AnthropicClaude|Claude")
       } | Select-Object -First 1
       if ($entry) { return $true }
     } catch { }
   }
+
+  # WinGet's installed-package inventory is authoritative for the package the installer just installed.
+  if (Test-WingetPackageInstalled "Anthropic.Claude") { return $true }
+  return $false
+}
+
+function Wait-ClaudeDesktopRegistration([int]$TimeoutSeconds = 60) {
+  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+  do {
+    if (Test-ClaudeDesktopInstalled) { return $true }
+    Start-Sleep -Seconds 2
+  } while ([DateTime]::UtcNow -lt $deadline)
   return $false
 }
 
@@ -173,31 +194,34 @@ function Get-VSCodeCommand {
   return $null
 }
 
+function Get-ClaudeCliCommand {
+  # Prefer the real native Claude Code CLI over the Claude Desktop WindowsApps alias.
+  $native = Join-Path $HOME ".local\bin\claude.exe"
+  if (Test-Path $native) { return $native }
+
+  $command = Get-Command claude -ErrorAction SilentlyContinue
+  if ($command -and $command.Source -notlike "*\Microsoft\WindowsApps\Claude.exe") { return $command.Source }
+  return $null
+}
+
 function Test-OpenAICCProxy {
   try {
     $health = Invoke-RestMethod -Uri "$GatewayBaseUrl/healthz" -TimeoutSec 2
     return [bool]$health.ok
-  } catch {
-    return $false
-  }
+  } catch { return $false }
 }
 
 function Ensure-CoreDependencies {
   Write-Step "Dependencies"
 
-  $git = Get-Command git -ErrorAction SilentlyContinue
-  if (-not $git) { Invoke-WingetInstall "Git.Git" "Git for Windows" }
+  if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Invoke-WingetInstall "Git.Git" "Git for Windows" }
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw "Git is still unavailable after installation." }
 
-  $node = Get-Command node -ErrorAction SilentlyContinue
-  if (-not $node) {
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     Invoke-WingetInstall "OpenJS.NodeJS.LTS" "Node.js LTS"
   } else {
-    $versionText = (& node --version).Trim().TrimStart('v')
-    $version = [Version]$versionText
-    if ($version -lt $MinimumNodeVersion) {
-      Invoke-WingetUpgrade "OpenJS.NodeJS.LTS" "Node.js LTS"
-    }
+    $version = [Version]((& node --version).Trim().TrimStart('v'))
+    if ($version -lt $MinimumNodeVersion) { Invoke-WingetUpgrade "OpenJS.NodeJS.LTS" "Node.js LTS" }
   }
   if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw "Node.js is unavailable after installation." }
   if ([Version]((& node --version).Trim().TrimStart('v')) -lt $MinimumNodeVersion) {
@@ -205,9 +229,7 @@ function Ensure-CoreDependencies {
   }
   if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { throw "npm is unavailable after installing Node.js." }
 
-  if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
-    Invoke-WingetInstall "BurntSushi.ripgrep.MSVC" "ripgrep"
-  }
+  if (-not (Get-Command rg -ErrorAction SilentlyContinue)) { Invoke-WingetInstall "BurntSushi.ripgrep.MSVC" "ripgrep" }
 }
 
 function Resolve-GatewayDirectory {
@@ -245,20 +267,19 @@ function Resolve-GatewayDirectory {
 }
 
 function Ensure-ClaudeCode([bool]$Requested) {
-  if (-not $Requested) {
-    Write-Host "Claude Code CLI: skipped by user." -ForegroundColor DarkGray
-    return
-  }
-  if (Get-Command claude -ErrorAction SilentlyContinue) {
+  if (-not $Requested) { Write-Host "Claude Code CLI: skipped by user." -ForegroundColor DarkGray; return }
+
+  $cli = Get-ClaudeCliCommand
+  if ($cli) {
+    Add-UserPath (Split-Path $cli -Parent) -Prepend
     Write-Host "Claude Code CLI already installed; leaving the installed version untouched." -ForegroundColor DarkGray
     return
   }
+
   Invoke-WingetInstall "Anthropic.ClaudeCode" "Claude Code"
-  if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
-    $nativeClaude = Join-Path $HOME ".local\bin\claude.exe"
-    if (Test-Path $nativeClaude) { Add-UserPath (Split-Path $nativeClaude -Parent) }
-  }
-  if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { throw "Claude Code installation completed but 'claude' is not on PATH." }
+  $nativeDir = Join-Path $HOME ".local\bin"
+  if (Test-Path (Join-Path $nativeDir "claude.exe")) { Add-UserPath $nativeDir -Prepend }
+  if (-not (Get-ClaudeCliCommand)) { throw "Claude Code installation completed but the native Claude Code CLI could not be found." }
 }
 
 function Configure-VSCodeClaudeSettings {
@@ -282,17 +303,10 @@ function Configure-VSCodeClaudeSettings {
 }
 
 function Ensure-VSCode([bool]$Requested) {
-  if (-not $Requested) {
-    Write-Host "VS Code + Claude Code extension: skipped by user." -ForegroundColor DarkGray
-    return
-  }
+  if (-not $Requested) { Write-Host "VS Code + Claude Code extension: skipped by user." -ForegroundColor DarkGray; return }
   $code = Get-VSCodeCommand
-  if (-not $code) {
-    Invoke-WingetInstall "Microsoft.VisualStudioCode" "Visual Studio Code"
-    $code = Get-VSCodeCommand
-  } else {
-    Write-Host "VS Code already installed; leaving the installed version untouched." -ForegroundColor DarkGray
-  }
+  if (-not $code) { Invoke-WingetInstall "Microsoft.VisualStudioCode" "Visual Studio Code"; $code = Get-VSCodeCommand }
+  else { Write-Host "VS Code already installed; leaving the installed version untouched." -ForegroundColor DarkGray }
   if (-not $code) { throw "VS Code is installed but code.cmd could not be found." }
 
   $extensions = @(& $code --list-extensions 2>$null)
@@ -300,23 +314,24 @@ function Ensure-VSCode([bool]$Requested) {
     Write-Host "Claude Code VS Code extension already installed; leaving it untouched." -ForegroundColor DarkGray
   } else {
     Write-Host "Installing Claude Code VS Code extension..."
-    & $code --install-extension anthropic.claude-code
-    if ($LASTEXITCODE -ne 0) { throw "Claude Code VS Code extension installation failed." }
+    $exitCode = Invoke-NativeConsole $code @("--install-extension", "anthropic.claude-code")
+    if ($exitCode -ne 0) { throw "Claude Code VS Code extension installation failed." }
   }
   Configure-VSCodeClaudeSettings
 }
 
 function Ensure-ClaudeDesktop([bool]$Requested) {
-  if (-not $Requested) {
-    Write-Host "Claude Desktop: skipped by user." -ForegroundColor DarkGray
-    return
-  }
+  if (-not $Requested) { Write-Host "Claude Desktop: skipped by user." -ForegroundColor DarkGray; return }
   if (Test-ClaudeDesktopInstalled) {
     Write-Host "Claude Desktop already installed; leaving the installed version untouched." -ForegroundColor DarkGray
-  } else {
-    Invoke-WingetInstall "Anthropic.Claude" "Claude Desktop"
+    return
   }
-  if (-not (Test-ClaudeDesktopInstalled)) { throw "Claude Desktop is still not detectable after installation." }
+
+  Invoke-WingetInstall "Anthropic.Claude" "Claude Desktop"
+  Write-Host "Waiting for Claude Desktop MSIX/package registration..." -ForegroundColor DarkGray
+  if (-not (Wait-ClaudeDesktopRegistration 60)) {
+    throw "Claude Desktop install completed, but Windows did not register the app/package within 60 seconds. Check 'winget list --id Anthropic.Claude --exact' and 'Get-AppxPackage -Name Claude'."
+  }
 }
 
 function Install-RTK {
@@ -340,26 +355,25 @@ function Install-RTK {
     } finally {
       Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
-    Add-UserPath $binDir
+    Add-UserPath $binDir -Prepend
     $rtk = Get-Command rtk -ErrorAction SilentlyContinue
   } else {
     Write-Host "RTK already installed; leaving the binary version untouched." -ForegroundColor DarkGray
   }
   if (-not $rtk) { throw "RTK could not be installed." }
 
-  & $rtk.Source init -g --auto-patch
-  if ($LASTEXITCODE -ne 0) { throw "RTK Claude Code integration failed." }
-  & $rtk.Source init --show
-  if ($LASTEXITCODE -ne 0) { throw "RTK integration verification failed." }
+  $exitCode = Invoke-NativeConsole $rtk.Source @("init", "-g", "--auto-patch")
+  if ($exitCode -ne 0) { throw "RTK Claude Code integration failed." }
+  $exitCode = Invoke-NativeConsole $rtk.Source @("init", "--show")
+  if ($exitCode -ne 0) { throw "RTK integration verification failed." }
 }
 
 function Get-ClaudeRunner {
-  $claude = Get-Command claude -ErrorAction SilentlyContinue
-  if ($claude) { return @{ Command = $claude.Source; Prefix = @() } }
+  $claude = Get-ClaudeCliCommand
+  if ($claude) { return @{ Command = $claude; Prefix = @() } }
   $npx = Get-Command npx.cmd -ErrorAction SilentlyContinue
   if (-not $npx) { $npx = Get-Command npx -ErrorAction SilentlyContinue }
   if (-not $npx) { throw "Neither Claude Code nor npx is available to configure Claude Code plugins." }
-  # Transient runner only; this does not install Claude Code globally when the user answered N.
   return @{ Command = $npx.Source; Prefix = @("--yes", "@anthropic-ai/claude-code@latest") }
 }
 
@@ -376,25 +390,17 @@ function Test-PluginEnabled([string]$PluginId) {
     if (-not $settings.enabledPlugins) { return $false }
     $property = $settings.enabledPlugins.PSObject.Properties[$PluginId]
     return ($null -ne $property -and [bool]$property.Value)
-  } catch {
-    return $false
-  }
+  } catch { return $false }
 }
 
 function Install-ClaudePlugin([hashtable]$Runner, [string]$PluginId, [string]$MarketplaceSource) {
-  if (Test-PluginEnabled $PluginId) {
-    Write-Host "$PluginId already enabled; leaving it installed." -ForegroundColor DarkGray
-    return
-  }
+  if (Test-PluginEnabled $PluginId) { Write-Host "$PluginId already enabled; leaving it installed." -ForegroundColor DarkGray; return }
 
   $exit = Invoke-ClaudeRunner $Runner @("plugin", "install", $PluginId, "--scope", "user")
   if ($exit -ne 0 -and $MarketplaceSource) {
     Write-Host "Registering plugin marketplace $MarketplaceSource..."
     $marketExit = Invoke-ClaudeRunner $Runner @("plugin", "marketplace", "add", $MarketplaceSource, "--scope", "user")
-    if ($marketExit -ne 0) {
-      # It may already exist but be stale; updating is safe and idempotent.
-      [void](Invoke-ClaudeRunner $Runner @("plugin", "marketplace", "update"))
-    }
+    if ($marketExit -ne 0) { [void](Invoke-ClaudeRunner $Runner @("plugin", "marketplace", "update")) }
     $exit = Invoke-ClaudeRunner $Runner @("plugin", "install", $PluginId, "--scope", "user")
   }
   if ($exit -ne 0) { throw "Failed to install Claude Code plugin $PluginId." }
@@ -402,11 +408,10 @@ function Install-ClaudePlugin([hashtable]$Runner, [string]$PluginId, [string]$Ma
 
 function Install-TokenOptimizationStack {
   Write-Step "Claude Code token optimization"
-
   if (-not (Get-Command typescript-language-server -ErrorAction SilentlyContinue)) {
     Write-Host "Installing TypeScript language server..."
-    & npm install -g typescript typescript-language-server
-    if ($LASTEXITCODE -ne 0) { throw "typescript-language-server installation failed." }
+    $exitCode = Invoke-NativeConsole (Get-Command npm).Source @("install", "-g", "typescript", "typescript-language-server")
+    if ($exitCode -ne 0) { throw "typescript-language-server installation failed." }
     $npmPrefix = (& npm config get prefix).Trim()
     if ($npmPrefix) { Add-UserPath $npmPrefix }
     Refresh-ProcessPath
@@ -441,18 +446,16 @@ function Build-AndConfigureGateway([bool]$DesktopRequested) {
   Write-Step "OpenAI-CC"
   Push-Location $script:GatewayDirectory
   try {
-    & npm install --no-audit --no-fund
-    if ($LASTEXITCODE -ne 0) { throw "npm install failed." }
-    & npm run build
-    if ($LASTEXITCODE -ne 0) { throw "OpenAI-CC build failed." }
+    $exitCode = Invoke-NativeConsole (Get-Command npm).Source @("install", "--no-audit", "--no-fund")
+    if ($exitCode -ne 0) { throw "npm install failed." }
+    $exitCode = Invoke-NativeConsole (Get-Command npm).Source @("run", "build")
+    if ($exitCode -ne 0) { throw "OpenAI-CC build failed." }
 
     $env:OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP = $(if ($DesktopRequested) { "1" } else { "0" })
     $env:OPENAI_CC_CONTEXT_WINDOW = [string]$ContextWindow
-    & node dist/scripts/configure-clients.js
-    if ($LASTEXITCODE -ne 0) { throw "OpenAI-CC client configuration failed." }
-  } finally {
-    Pop-Location
-  }
+    $exitCode = Invoke-NativeConsole (Get-Command node).Source @("dist/scripts/configure-clients.js")
+    if ($exitCode -ne 0) { throw "OpenAI-CC client configuration failed." }
+  } finally { Pop-Location }
 }
 
 function Start-OrVerifyGateway {
@@ -461,9 +464,7 @@ function Start-OrVerifyGateway {
     $runScript = Join-Path $script:GatewayDirectory "run-gateway.ps1"
     if (-not (Test-Path $runScript)) { throw "Missing run-gateway.ps1." }
     Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File", $runScript) -WindowStyle Hidden | Out-Null
-  } else {
-    Write-Host "OpenAI-CC proxy already running; leaving it in place." -ForegroundColor DarkGray
-  }
+  } else { Write-Host "OpenAI-CC proxy already running; leaving it in place." -ForegroundColor DarkGray }
 
   $healthy = $false
   for ($i = 0; $i -lt 40; $i++) {
@@ -472,10 +473,8 @@ function Start-OrVerifyGateway {
   }
   if (-not $healthy) { throw "OpenAI-CC did not become healthy at $GatewayBaseUrl/healthz." }
 
-  # Ensure an already-running proxy also persists the requested 700k gateway metadata.
   $payload = @{ contextWindow = $ContextWindow } | ConvertTo-Json -Compress
   Invoke-RestMethod -Uri "$GatewayBaseUrl/admin/model-config" -Method Post -ContentType "application/json" -Body $payload -TimeoutSec 5 | Out-Null
-
   $models = Invoke-RestMethod -Uri "$GatewayBaseUrl/v1/models" -TimeoutSec 5
   $publicModels = @($models.data)
   if ($publicModels.Count -lt 4) { throw "Gateway model discovery returned fewer than four Claude-compatible routes." }
@@ -516,7 +515,7 @@ function Verify-Installation([bool]$ClaudeCodeRequested, [bool]$VSCodeRequested,
   $checks.Add("Context Mode plugin")
 
   if ($ClaudeCodeRequested) {
-    if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { throw "Verification failed: Claude Code was requested but is unavailable." }
+    if (-not (Get-ClaudeCliCommand)) { throw "Verification failed: Claude Code was requested but the native CLI is unavailable." }
     $checks.Add("Claude Code CLI")
   }
   if ($VSCodeRequested) {
@@ -527,7 +526,7 @@ function Verify-Installation([bool]$ClaudeCodeRequested, [bool]$VSCodeRequested,
     $checks.Add("VS Code + Claude Code extension")
   }
   if ($DesktopRequested) {
-    if (-not (Test-ClaudeDesktopInstalled)) { throw "Verification failed: Claude Desktop was requested but is unavailable." }
+    if (-not (Wait-ClaudeDesktopRegistration 10)) { throw "Verification failed: Claude Desktop was requested but is not registered." }
     $profile = Join-Path $env:LOCALAPPDATA "Claude-3p\configLibrary\00000000-0000-4000-8000-000000008082.json"
     if (-not (Test-Path $profile)) {
       $candidate = Get-ChildItem $env:LOCALAPPDATA -Directory -Filter "Claude*-3p*" -ErrorAction SilentlyContinue |
@@ -548,16 +547,13 @@ if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
 Write-Host "OpenAI-CC Windows installer" -ForegroundColor Cyan
 Write-Host "Provider API keys and OAuth credentials are NOT requested here; add them later only in the OpenAI-CC admin panel." -ForegroundColor DarkGray
 
-# Flush stale keystrokes before the first choice, then accept only explicit Y or N for every choice.
 Clear-PendingConsoleInput
 $installClaudeCode = Read-YesNo "Install Claude Code CLI?"
 $installVSCode = Read-YesNo "Install VS Code and the Claude Code extension?"
 $installClaudeDesktop = Read-YesNo "Install and configure Claude Desktop?"
 
 $claudeDesktopWasRunning = $false
-if ($installClaudeDesktop) {
-  $claudeDesktopWasRunning = [bool](Get-Process -Name "Claude" -ErrorAction SilentlyContinue | Select-Object -First 1)
-}
+if ($installClaudeDesktop) { $claudeDesktopWasRunning = [bool](Get-Process -Name "Claude" -ErrorAction SilentlyContinue | Select-Object -First 1) }
 
 Ensure-CoreDependencies
 $script:GatewayDirectory = Resolve-GatewayDirectory
