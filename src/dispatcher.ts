@@ -5,8 +5,9 @@ import path from "node:path";
 import OpenAI from "openai";
 import { createOpenAIOAuthTransport } from "@openai-oauth/core";
 import { openaiCredentials } from "@openai-oauth/local";
-import { AccountRecord, AccountStore, readAuthEmail, validateId } from "./account-store.js";
+import { AccountRecord, AccountStore, ProviderKind, readAuthEmail, validateId } from "./account-store.js";
 import { AnthropicRequest, AnthropicSseTranslator, anthropicToResponses, estimateAnthropicTokens, mapModel, responsesToAnthropic } from "./translator.js";
+import { AnthropicChatSseTranslator, anthropicToChatCompletions, chatCompletionToAnthropic } from "./chat-translator.js";
 
 type OAuthJobStatus = "pending" | "complete" | "error";
 interface OAuthJob {
@@ -18,6 +19,8 @@ interface OAuthJob {
   email?: string;
   error?: string;
 }
+
+type ApiProvider = Exclude<ProviderKind, "chatgpt">;
 
 export class Dispatcher {
   private clients = new Map<string, OpenAI>();
@@ -38,7 +41,8 @@ export class Dispatcher {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 
       if (req.method === "GET" && url.pathname === "/healthz") {
-        return void json(res, 200, { ok: true, activeAccountId: this.store.active()?.id ?? null });
+        const active = this.store.active();
+        return void json(res, 200, { ok: true, activeAccountId: active?.id ?? null, provider: active?.provider ?? null });
       }
       if (req.method === "GET" && url.pathname === "/v1/models") {
         return void json(res, 200, { object: "list", data: modelAliases().map((id) => ({ id, object: "model", created: 0, owned_by: "local-handoff" })) });
@@ -58,6 +62,11 @@ export class Dispatcher {
         const body = await readJson<{ id?: string; name?: string }>(req);
         return void json(res, 202, await this.startBrowserOAuth(body));
       }
+      if (req.method === "POST" && url.pathname === "/admin/keys") {
+        const body = await readJson<{ id?: string; name?: string; provider?: string; apiKey?: string; model?: string }>(req);
+        const record = await this.addApiKey(body);
+        return void json(res, 201, publicCredential(record));
+      }
       if (req.method === "GET" && /^\/admin\/oauth\/[^/]+$/.test(url.pathname)) {
         const id = decodeURIComponent(url.pathname.split("/")[3]);
         const job = this.oauthJobs.get(id);
@@ -65,11 +74,11 @@ export class Dispatcher {
       }
       if (req.method === "POST" && /^\/admin\/accounts\/[^/]+\/activate$/.test(url.pathname)) {
         const id = decodeURIComponent(url.pathname.split("/")[3]);
-        return void json(res, 200, await this.store.activate(id));
+        return void json(res, 200, publicCredential(await this.store.activate(id)));
       }
       if (req.method === "POST" && /^\/admin\/accounts\/[^/]+\/reset$/.test(url.pathname)) {
         const id = decodeURIComponent(url.pathname.split("/")[3]);
-        return void json(res, 200, await this.store.reset(id));
+        return void json(res, 200, publicCredential(await this.store.reset(id)));
       }
       return void json(res, 404, { error: { type: "not_found_error", message: "Not found" } });
     } catch (error: any) {
@@ -79,14 +88,10 @@ export class Dispatcher {
 
   private async handleMessages(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await readJson<AnthropicRequest>(req);
-    const upstream = anthropicToResponses(body) as any;
     let account = this.store.active() ?? this.store.suggestedNext();
     if (!account) {
       return void json(res, 409, {
-        error: {
-          type: "handoff_required",
-          message: "No account is ready. Wait for a five-hour reset or add an account in the admin workflow.",
-        },
+        error: { type: "handoff_required", message: "No credential is ready. Wait for a reset/cooldown or add another account/API key in /admin." },
       });
     }
     if (!this.store.active()) account = await this.store.activate(account.id);
@@ -96,54 +101,78 @@ export class Dispatcher {
       attempted.add(account.id);
       await this.store.noteRequest(account.id);
       const client = this.clientFor(account);
+      const model = providerModel(account, body.model);
 
       try {
-        if (body.stream) {
-          // Do not expose a successful streaming response until the upstream stream object exists.
-          // A pre-stream 429 can therefore fail over without Claude Code ever seeing it.
-          const stream = await client.responses.create({ ...upstream, stream: true });
-          res.statusCode = 200;
-          res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-          res.setHeader("Cache-Control", "no-cache, no-transform");
-          res.setHeader("Connection", "keep-alive");
-          res.flushHeaders();
+        if (usesResponsesApi(account)) {
+          const upstream = { ...anthropicToResponses(body), model } as any;
+          if (body.stream) {
+            const stream = await client.responses.create({ ...upstream, stream: true });
+            beginSse(res);
+            const translator = new AnthropicSseTranslator(body.model);
+            for await (const event of stream as any) {
+              for (const chunk of translator.accept(event)) res.write(chunk);
+            }
+            if (!res.writableEnded) res.end();
+            return;
+          }
+          const response = await client.responses.create({ ...upstream, stream: false } as any);
+          return void json(res, 200, responsesToAnthropic(response, body.model));
+        }
 
-          const translator = new AnthropicSseTranslator(body.model);
-          for await (const event of stream as any) {
-            for (const chunk of translator.accept(event)) res.write(chunk);
+        const upstream = anthropicToChatCompletions(body, model) as any;
+        if (body.stream) {
+          const stream = await client.chat.completions.create({ ...upstream, stream: true });
+          beginSse(res);
+          const translator = new AnthropicChatSseTranslator(body.model);
+          for await (const chunk of stream as any) {
+            for (const out of translator.accept(chunk)) res.write(out);
           }
           if (!res.writableEnded) res.end();
           return;
         }
-
-        const response = await client.responses.create({ ...upstream, stream: false } as any);
-        return void json(res, 200, responsesToAnthropic(response, body.model));
+        const response = await client.chat.completions.create({ ...upstream, stream: false } as any);
+        return void json(res, 200, chatCompletionToAnthropic(response, body.model));
       } catch (error: any) {
         if (!isRateLimit(error)) throw error;
+        const cooldown = rateLimitCooldownMs(error, account);
 
-        // If streaming has already started, retrying the same prompt on another account can duplicate
-        // tool calls or text. Only pre-response rate limits are transparently retried.
         if (res.headersSent) {
-          await this.store.markRateLimited(account.id, error?.message ?? "429 rate limit", true);
+          await this.store.markRateLimited(account.id, error?.message ?? "429 rate limit", true, cooldown);
           if (!res.writableEnded) {
-            res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "The active account hit a limit after streaming began; the next teammate is active for the following request." } })}\n\n`);
+            res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "The active credential hit a limit after streaming began; the next ready credential is active for the following request." } })}\n\n`);
             res.end();
           }
           return;
         }
 
-        const next = await this.store.markRateLimited(account.id, error?.message ?? "429 rate limit", true);
+        const next = await this.store.markRateLimited(account.id, error?.message ?? "429 rate limit", true, cooldown);
         if (!next || attempted.has(next.id)) {
           return void json(res, 429, {
             error: {
               type: "rate_limit_error",
-              message: "All ready teammate accounts are currently rate-limited. No upstream 429 was forwarded until failover options were exhausted.",
+              message: "All ready credentials are currently rate-limited. The proxy exhausted failover options before returning this 429.",
             },
           });
         }
         account = next;
       }
     }
+  }
+
+  private async addApiKey(input: { id?: string; name?: string; provider?: string; apiKey?: string; model?: string }): Promise<AccountRecord> {
+    const id = String(input.id ?? "").trim();
+    const name = String(input.name ?? id).trim();
+    const provider = String(input.provider ?? "").trim().toLowerCase();
+    const apiKey = String(input.apiKey ?? "").trim();
+    const model = String(input.model ?? "").trim();
+    if (!id) throw new Error("Credential id is required.");
+    if (!name) throw new Error("Display name is required.");
+    validateId(id);
+    if (!isApiProvider(provider)) throw new Error("Provider must be zen, nvidia, or google.");
+    const record = await this.store.upsertApiKey({ id, name, provider, apiKey, model });
+    this.clients.delete(id);
+    return record;
   }
 
   private async startBrowserOAuth(input: { id?: string; name?: string }): Promise<OAuthJob> {
@@ -208,9 +237,18 @@ export class Dispatcher {
   private clientFor(account: AccountRecord): OpenAI {
     const cached = this.clients.get(account.id);
     if (cached) return cached;
-    const credentials = openaiCredentials({ authFilePath: account.authFile });
-    const transport = createOpenAIOAuthTransport({ auth: () => credentials.getSession() });
-    const client = new OpenAI({ apiKey: "openai-oauth", baseURL: transport.baseURL, fetch: transport.fetch });
+    const provider = account.provider ?? "chatgpt";
+    let client: OpenAI;
+
+    if (provider === "chatgpt") {
+      if (!account.authFile) throw new Error(`ChatGPT credential ${account.id} has no auth file.`);
+      const credentials = openaiCredentials({ authFilePath: account.authFile });
+      const transport = createOpenAIOAuthTransport({ auth: () => credentials.getSession() });
+      client = new OpenAI({ apiKey: "openai-oauth", baseURL: transport.baseURL, fetch: transport.fetch });
+    } else {
+      if (!account.apiKey || account.apiKey === "********") throw new Error(`${provider} credential ${account.id} has no API key.`);
+      client = new OpenAI({ apiKey: account.apiKey, baseURL: providerBaseUrl(provider) });
+    }
     this.clients.set(account.id, client);
     return client;
   }
@@ -232,8 +270,63 @@ export function createServer(store: AccountStore): http.Server {
   return http.createServer((req, res) => { void dispatcher.handler(req, res); });
 }
 
+function providerBaseUrl(provider: ApiProvider): string {
+  if (provider === "zen") return "https://opencode.ai/zen/v1";
+  if (provider === "nvidia") return "https://integrate.api.nvidia.com/v1";
+  return "https://generativelanguage.googleapis.com/v1beta/openai/";
+}
+
+function providerModel(account: AccountRecord, requestedModel: string): string {
+  return account.model || mapModel(requestedModel);
+}
+
+function usesResponsesApi(account: AccountRecord): boolean {
+  const provider = account.provider ?? "chatgpt";
+  return provider === "chatgpt" || provider === "zen";
+}
+
+function isApiProvider(value: string): value is ApiProvider {
+  return value === "zen" || value === "nvidia" || value === "google";
+}
+
 function isRateLimit(error: any): boolean {
   return error?.status === 429 || error?.statusCode === 429 || /\b429\b|rate.?limit|usage.?limit|quota/i.test(error?.message ?? "");
+}
+
+function rateLimitCooldownMs(error: any, account: AccountRecord): number | undefined {
+  if ((account.provider ?? "chatgpt") === "chatgpt") return undefined;
+  const retryAfter = headerValue(error?.headers, "retry-after");
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds * 1000);
+    const date = Date.parse(retryAfter);
+    if (Number.isFinite(date) && date > Date.now()) return date - Date.now();
+  }
+  const text = `${error?.message ?? ""} ${JSON.stringify(error?.error ?? {})}`;
+  const secondsMatch = text.match(/(?:retry|try again)[^\d]{0,20}(\d+(?:\.\d+)?)\s*s(?:ec(?:ond)?s?)?/i);
+  if (secondsMatch) return Math.ceil(Number(secondsMatch[1]) * 1000);
+  return undefined;
+}
+
+function headerValue(headers: any, name: string): string | undefined {
+  if (!headers) return undefined;
+  if (typeof headers.get === "function") return headers.get(name) ?? undefined;
+  const value = headers[name] ?? headers[name.toLowerCase()] ?? headers[name.toUpperCase()];
+  return Array.isArray(value) ? String(value[0]) : value !== undefined ? String(value) : undefined;
+}
+
+function publicCredential(account: AccountRecord): AccountRecord {
+  const copy = { ...account };
+  if (copy.apiKey) copy.apiKey = "********";
+  return copy;
+}
+
+function beginSse(res: ServerResponse): void {
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
 }
 
 async function readJson<T>(req: IncomingMessage): Promise<T> {
@@ -273,16 +366,19 @@ function modelAliases(): string[] {
 
 function adminHtml(): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenAI-CC</title><style>
-body{font:14px system-ui;margin:0;background:#0e1116;color:#e8edf3}.wrap{max-width:900px;margin:40px auto;padding:0 18px}h1{font-size:24px}.note,.add{background:#171c24;padding:14px;border-radius:10px;margin:16px 0}.card{display:grid;grid-template-columns:1fr auto;gap:12px;background:#171c24;margin:10px 0;padding:14px;border-radius:10px}.muted{color:#9aa6b2}.ready{color:#73d69c}.exhausted{color:#ff8f8f}.active{outline:2px solid #7aa2ff}button{background:#2b66d9;color:white;border:0;border-radius:7px;padding:8px 12px;cursor:pointer}button.secondary{background:#39414d}input{background:#0e1116;color:#e8edf3;border:1px solid #39414d;border-radius:7px;padding:9px;margin:4px 6px 4px 0}.toast{position:fixed;right:20px;bottom:20px;background:#242b36;padding:14px;border-radius:10px;max-width:360px;display:none}</style></head><body><div class="wrap"><h1>OpenAI-CC</h1><div class="note">Only one teammate is active at a time. Each teammate signs into their own ChatGPT account. If an upstream request hits a rate limit before output begins, OpenAI-CC marks that account exhausted, automatically activates the next ready teammate, and retries the same request before Claude Code sees the failure. A rate limit after streaming has already begun switches the next teammate for the following request instead of replaying partial work.</div><div class="add"><b>Add teammate with ChatGPT OAuth</b><div class="muted">Starts the same local OAuth login from this panel and opens sign-in in the machine's default browser.</div><form onsubmit="startOAuth(event)"><input id="oauth-id" required pattern="[A-Za-z0-9._-]{1,64}" placeholder="account id"><input id="oauth-name" required placeholder="display name"><button type="submit">Add account</button></form><div id="oauth-status" class="muted"></div></div><div id="status" class="muted"></div><div id="accounts"></div></div><div id="toast" class="toast"></div><script>
+body{font:14px system-ui;margin:0;background:#0e1116;color:#e8edf3}.wrap{max-width:980px;margin:36px auto;padding:0 18px}h1{font-size:24px}.note,.add{background:#171c24;padding:14px;border-radius:10px;margin:16px 0}.card{display:grid;grid-template-columns:1fr auto;gap:12px;background:#171c24;margin:10px 0;padding:14px;border-radius:10px}.muted{color:#9aa6b2}.ready{color:#73d69c}.exhausted{color:#ff8f8f}.active{outline:2px solid #7aa2ff}button{background:#2b66d9;color:white;border:0;border-radius:7px;padding:8px 12px;cursor:pointer}button.secondary{background:#39414d}input,select{background:#0e1116;color:#e8edf3;border:1px solid #39414d;border-radius:7px;padding:9px;margin:4px 6px 4px 0}.toast{position:fixed;right:20px;bottom:20px;background:#242b36;padding:14px;border-radius:10px;max-width:420px;display:none}</style></head><body><div class="wrap"><h1>OpenAI-CC</h1><div class="note">One active credential at a time across ChatGPT OAuth, OpenCode Zen, NVIDIA NIM, and Google AI Studio. A pre-output 429 marks that credential exhausted, activates the next ready credential, and transparently retries the request. API-key cooldowns use Retry-After when supplied; otherwise the default cooldown is 15 minutes.</div><div class="add"><b>Add teammate with ChatGPT OAuth</b><form onsubmit="startOAuth(event)"><input id="oauth-id" required pattern="[A-Za-z0-9._-]{1,64}" placeholder="credential id"><input id="oauth-name" required placeholder="display name"><button type="submit">Add ChatGPT account</button></form><div id="oauth-status" class="muted"></div></div><div class="add"><b>Add API key</b><div class="muted">Add as many keys as needed. Each entry participates in the same rotation.</div><form onsubmit="addKey(event)"><select id="key-provider"><option value="zen">OpenCode Zen</option><option value="nvidia">NVIDIA NIM</option><option value="google">Google AI Studio</option></select><input id="key-id" required pattern="[A-Za-z0-9._-]{1,64}" placeholder="credential id"><input id="key-name" required placeholder="display name"><input id="key-model" required placeholder="provider model id"><input id="key-value" required type="password" autocomplete="off" placeholder="API key"><button type="submit">Add API key</button></form><div id="key-status" class="muted"></div></div><div id="status" class="muted"></div><div id="accounts"></div></div><div id="toast" class="toast"></div><script>
 let currentState=null;
 async function load(){const s=await fetch('/admin/state').then(r=>r.json());currentState=s;render(s)}
 function remaining(iso){if(!iso)return'';const ms=Math.max(0,new Date(iso).getTime()-Date.now());const sec=Math.ceil(ms/1000),h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;return h+'h '+m+'m '+s+'s'}
-function render(s){const active=s.accounts.find(a=>a.id===s.activeAccountId);document.querySelector('#status').textContent='Active account: '+(active?(active.email||active.name)+' ('+active.id+')':'none')+' · Suggested next: '+(s.suggestedNextAccountId||'none');document.querySelector('#accounts').innerHTML=s.accounts.map(a=>'<div class="card '+(a.id===s.activeAccountId?'active':'')+'"><div><b>'+esc(a.name)+'</b> <span class="muted">('+esc(a.id)+')</span><div>'+esc(a.email||'Email unavailable')+'</div><div class="'+a.status+'">'+a.status+(a.exhaustedAt?' · exhausted '+new Date(a.exhaustedAt).toLocaleString():'')+'</div>'+(a.firstRequestAt?'<div class="muted">Window started '+new Date(a.firstRequestAt).toLocaleString()+'</div>':'')+(a.limitResetsAt?'<div class="muted">Fresh limits at '+new Date(a.limitResetsAt).toLocaleString()+' · '+remaining(a.limitResetsAt)+'</div>':'<div class="muted">Five-hour window starts on first request</div>')+'<div class="muted">'+esc(a.lastError||'')+'</div></div><div>'+(a.status==='ready'?'<button onclick="post(\'/admin/accounts/'+encodeURIComponent(a.id)+'/activate\')">Activate</button>':'<button class="secondary" '+(a.limitResetsAt&&new Date(a.limitResetsAt).getTime()>Date.now()?'disabled':'')+' onclick="post(\'/admin/accounts/'+encodeURIComponent(a.id)+'/reset\')">Reset</button>')+'</div></div>').join('')}
+function render(s){const active=s.accounts.find(a=>a.id===s.activeAccountId);document.querySelector('#status').textContent='Active: '+(active?label(active):'none')+' · Next: '+(s.suggestedNextAccountId||'none');document.querySelector('#accounts').innerHTML=s.accounts.map(a=>'<div class="card '+(a.id===s.activeAccountId?'active':'')+'"><div><b>'+esc(a.name)+'</b> <span class="muted">('+esc(a.id)+')</span><div>'+esc(providerName(a.provider||'chatgpt'))+(a.model?' · '+esc(a.model):'')+(a.email?' · '+esc(a.email):'')+'</div><div class="'+a.status+'">'+a.status+(a.exhaustedAt?' · exhausted '+new Date(a.exhaustedAt).toLocaleString():'')+'</div>'+(a.limitResetsAt?'<div class="muted">Ready again '+new Date(a.limitResetsAt).toLocaleString()+' · '+remaining(a.limitResetsAt)+'</div>':'')+'<div class="muted">'+esc(a.lastError||'')+'</div></div><div>'+(a.status==='ready'?'<button onclick="post(\'/admin/accounts/'+encodeURIComponent(a.id)+'/activate\')">Activate</button>':'<button class="secondary" '+(a.limitResetsAt&&new Date(a.limitResetsAt).getTime()>Date.now()?'disabled':'')+' onclick="post(\'/admin/accounts/'+encodeURIComponent(a.id)+'/reset\')">Reset</button>')+'</div></div>').join('')}
+function label(a){return (a.email||a.name)+' ['+providerName(a.provider||'chatgpt')+']'}
+function providerName(p){return p==='chatgpt'?'ChatGPT OAuth':p==='zen'?'OpenCode Zen':p==='nvidia'?'NVIDIA NIM':'Google AI Studio'}
 async function post(url){const r=await fetch(url,{method:'POST'});const d=await r.json().catch(()=>({}));if(!r.ok)toast(d.error?.message||'Request failed');await load()}
+async function addKey(e){e.preventDefault();const provider=document.querySelector('#key-provider').value,id=document.querySelector('#key-id').value.trim(),name=document.querySelector('#key-name').value.trim(),model=document.querySelector('#key-model').value.trim(),apiKey=document.querySelector('#key-value').value.trim(),status=document.querySelector('#key-status');status.textContent='Saving…';const r=await fetch('/admin/keys',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({provider,id,name,model,apiKey})});const d=await r.json().catch(()=>({}));if(!r.ok){status.textContent=d.error?.message||'Could not add key';return}document.querySelector('#key-value').value='';status.textContent='Added '+name+' ('+providerName(provider)+').';await load()}
 async function startOAuth(e){e.preventDefault();const id=document.querySelector('#oauth-id').value.trim(),name=document.querySelector('#oauth-name').value.trim(),status=document.querySelector('#oauth-status');status.textContent='Starting OAuth…';const r=await fetch('/admin/accounts',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id,name})});const d=await r.json().catch(()=>({}));if(!r.ok){status.textContent=d.error?.message||'Could not start OAuth';return}status.textContent='OAuth started. Complete ChatGPT sign-in in the browser window.';watchOAuth(id)}
 async function watchOAuth(id){const status=document.querySelector('#oauth-status');const r=await fetch('/admin/oauth/'+encodeURIComponent(id));const d=await r.json().catch(()=>({}));if(!r.ok){status.textContent='OAuth status unavailable';return}if(d.status==='complete'){status.textContent='Added '+(d.email||d.name)+'.';toast('Account added: '+(d.email||d.name));await load();return}if(d.status==='error'){status.textContent='OAuth failed: '+(d.error||'unknown error');return}setTimeout(()=>watchOAuth(id),1000)}
-function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-const es=new EventSource('/admin/events');['changed','activated','rate_limit','state'].forEach(t=>es.addEventListener(t,e=>{load();if(t==='rate_limit'){const d=JSON.parse(e.data);toast((d.account?.email||d.account?.name||'Account')+' hit its limit. '+(d.account?.limitResetsAt?'Fresh limits at '+new Date(d.account.limitResetsAt).toLocaleString()+'. ':'')+(d.activeAccountId?'Switched automatically to '+d.activeAccountId+'.':'No ready teammate remains.'));if(Notification.permission==='granted')new Notification('OpenAI-CC',{body:(d.account?.email||d.account?.name||'Account')+' exhausted; '+(d.activeAccountId?'switched to '+d.activeAccountId+'.':'no ready teammate remains.')})}}));
+function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot',"'":'&#39;'}[c]))}
+const es=new EventSource('/admin/events');['changed','activated','rate_limit','state'].forEach(t=>es.addEventListener(t,e=>{load();if(t==='rate_limit'){const d=JSON.parse(e.data);toast((d.account?.name||'Credential')+' hit its limit. '+(d.activeAccountId?'Switched automatically to '+d.activeAccountId+'.':'No ready credential remains.'))}}));
 function toast(t){const x=document.querySelector('#toast');x.textContent=t;x.style.display='block';setTimeout(()=>x.style.display='none',8000)}
-if('Notification'in window&&Notification.permission==='default')Notification.requestPermission();setInterval(()=>{if(currentState)render(currentState)},1000);load();</script></body></html>`;
+setInterval(()=>{if(currentState)render(currentState)},1000);load();</script></body></html>`;
 }
