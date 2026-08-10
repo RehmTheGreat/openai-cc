@@ -17,8 +17,10 @@ function Invoke-NativeConsole([string]$Command, [string[]]$Arguments) {
   # Do not redirect native stderr in Windows PowerShell 5.1. Redirecting 2>&1
   # converts ordinary native stderr progress into ErrorRecords. With the
   # installer's global Stop preference that can abort on harmless Git output.
-  & $Command @Arguments
-  return [int]$LASTEXITCODE
+  # Send stdout to the host so it stays visible without becoming function output.
+  & $Command @Arguments | Out-Host
+  $nativeExitCode = $LASTEXITCODE
+  return [int]$nativeExitCode
 }
 
 function Clear-PendingConsoleInput {

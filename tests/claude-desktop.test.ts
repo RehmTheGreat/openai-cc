@@ -101,7 +101,9 @@ test("PowerShell installer requires explicit buffered Y/N choices for optional a
 test("PowerShell native runner does not redirect stderr under Windows PowerShell 5.1", async () => {
   const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
   assert.match(setup, /function Invoke-NativeConsole/);
-  assert.match(setup, /& \$Command @Arguments/);
+  assert.match(setup, /& \$Command @Arguments \| Out-Host/);
+  assert.match(setup, /\$nativeExitCode = \$LASTEXITCODE/);
+  assert.match(setup, /return \[int\]\$nativeExitCode/);
   assert.doesNotMatch(setup, /& \$Command @Arguments 2>&1/);
   assert.match(setup, /Invoke-NativeConsole \$gitCommand @\("clone"/);
   assert.match(setup, /Invoke-NativeConsole \$gitCommand @\("-C", \$target, "pull"/);
