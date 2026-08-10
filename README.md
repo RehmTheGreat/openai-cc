@@ -2,16 +2,18 @@
 
 A small local Node/TypeScript service that exposes the Anthropic endpoints Claude Code expects and sends one explicitly active teammate's requests through their own ChatGPT/Codex OAuth session.
 
-## Important behavior
+## Important addition needed (please make sure the project goes this way, on next push)
 
-- **One active teammate at a time.**
-- Every teammate authenticates their **own** ChatGPT account into a separate local auth file.
-- A `429` marks that account `exhausted`, emits an admin/browser notification, clears the active account, and returns the error to Claude Code.
-- It **does not retry that request under another account**. The next teammate must open `/admin` and explicitly click **Activate**.
+- **One active teammate at a time, with their account in rotation, email displayed on admin panel.**
+- Every teammate authenticates their **own** ChatGPT account from terminal.
+- A `429` marks that account `exhausted`, it shows that on the admin panel so that the teammate can now stop working.
+- It retries the request under next account and displays the new currently working account in admin panel. The next teammate continues exactly where the left off.
 - Tokens live only under `.data/accounts/<id>/auth.json`; `.data/` is gitignored. Treat those files like passwords.
 - The service binds to `127.0.0.1` by default.
 
-This intentional handoff behavior avoids turning multiple individual accounts into one pooled quota. OpenAI's current business terms prohibit sharing individual credentials and configuring services to avoid usage limits, and the `openai-oauth` project itself says not to pool/share access tokens.
+This intentional admin panel display avoids turning multiple individual accounts into one pooled quota. OpenAI's current business terms prohibit sharing individual credentials and configuring services to avoid usage limits, so each teammate uses their own account only.
+
+- OAuth (account-adding) support from browser panel, not just terminal.
 
 ## Pieces
 
