@@ -80,7 +80,6 @@ test("Claude Desktop 3P configuration is merged and idempotent", async () => {
 
 test("PowerShell installer requires explicit buffered Y/N choices for optional apps", async () => {
   const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
-
   assert.match(setup, /function Clear-PendingConsoleInput/);
   assert.match(setup, /\[Console\]::KeyAvailable/);
   assert.match(setup, /\[Console\]::ReadKey\(\$true\)/);
@@ -89,7 +88,6 @@ test("PowerShell installer requires explicit buffered Y/N choices for optional a
   assert.match(setup, /Install Claude Code CLI\?/);
   assert.match(setup, /Install VS Code and the Claude Code extension\?/);
   assert.match(setup, /Install and configure Claude Desktop\?/);
-
   assert.match(setup, /Anthropic\.ClaudeCode/);
   assert.match(setup, /Microsoft\.VisualStudioCode/);
   assert.match(setup, /anthropic\.claude-code/);
@@ -100,21 +98,29 @@ test("PowerShell installer requires explicit buffered Y/N choices for optional a
   assert.match(setup, /claudeCode\.disableLoginPrompt/);
 });
 
-test("PowerShell installer isolates Windows PowerShell 5.1 native stderr from Stop semantics", async () => {
+test("PowerShell native runner does not redirect stderr under Windows PowerShell 5.1", async () => {
   const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
-
   assert.match(setup, /function Invoke-NativeConsole/);
-  assert.match(setup, /\$previousErrorActionPreference = \$ErrorActionPreference/);
-  assert.match(setup, /\$ErrorActionPreference = "Continue"/);
+  assert.match(setup, /& \$Command @Arguments/);
+  assert.doesNotMatch(setup, /& \$Command @Arguments 2>&1/);
   assert.match(setup, /Invoke-NativeConsole \$gitCommand @\("clone"/);
   assert.match(setup, /Invoke-NativeConsole \$gitCommand @\("-C", \$target, "pull"/);
   assert.match(setup, /return Invoke-NativeConsole \$Runner\.Command \$allArgs/);
-  assert.equal((setup.match(/2>&1 \| Out-Host/g) ?? []).length, 1);
+});
+
+test("PowerShell installer detects current Claude Desktop MSIX installs and waits for registration", async () => {
+  const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
+  assert.match(setup, /Microsoft\\WindowsApps\\Claude\.exe/);
+  assert.match(setup, /Get-AppxPackage/);
+  assert.match(setup, /PackageFamilyName -like "Claude_\*"/);
+  assert.match(setup, /Test-WingetPackageInstalled "Anthropic\.Claude"/);
+  assert.match(setup, /function Wait-ClaudeDesktopRegistration/);
+  assert.match(setup, /Wait-ClaudeDesktopRegistration 60/);
+  assert.match(setup, /winget list --id Anthropic\.Claude --exact/);
 });
 
 test("PowerShell installer configures the shared token-efficiency stack and persistent gateway", async () => {
   const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
-
   assert.match(setup, /Desktop\\Claude/);
   assert.match(setup, /CLAUDE_CODE_AUTO_COMPACT_WINDOW/);
   assert.match(setup, /700000/);
@@ -124,10 +130,10 @@ test("PowerShell installer configures the shared token-efficiency stack and pers
   assert.match(setup, /context-mode@context-mode/);
   assert.match(setup, /mksglu\/context-mode/);
   assert.match(setup, /rtk-x86_64-pc-windows-msvc\.zip/);
-  assert.match(setup, /init -g --auto-patch/);
+  assert.match(setup, /"init", "-g", "--auto-patch"/);
   assert.match(setup, /dist\/scripts\/configure-clients\.js/);
   assert.match(setup, /OpenAI-CC Gateway\.lnk/);
-  assert.match(setup, /http:\/\/127\.0\.0\.1:8082\/healthz/);
+  assert.match(setup, /\$GatewayBaseUrl\/healthz/);
   assert.match(setup, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP/);
   assert.doesNotMatch(setup, /(?:OPENAI|NVIDIA|GEMINI|GOOGLE|ZEN|ANTHROPIC)_API_KEY\s*[=:]/i);
   assert.doesNotMatch(setup, /DISABLE_COMPACT\s*[=:]/);
@@ -135,7 +141,6 @@ test("PowerShell installer configures the shared token-efficiency stack and pers
 
 test("shared Claude settings use safe aliases, 700k auto-compaction, and onboarding repair", async () => {
   const source = await readFile(path.join(process.cwd(), "src", "claude-config.ts"), "utf8");
-
   assert.match(source, /CLAUDE_DESKTOP_MODEL_ALIASES\.fable/);
   assert.match(source, /CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY/);
   assert.match(source, /CLAUDE_CODE_AUTO_COMPACT_WINDOW/);
@@ -148,7 +153,6 @@ test("gateway startup honors persistent Claude Desktop opt-out", async () => {
   const index = await readFile(path.join(process.cwd(), "src", "index.ts"), "utf8");
   const launcher = await readFile(path.join(process.cwd(), "run-gateway.ps1"), "utf8");
   const clients = await readFile(path.join(process.cwd(), "scripts", "configure-clients.ts"), "utf8");
-
   assert.match(index, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP !== "0"/);
   assert.match(clients, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP !== "0"/);
   assert.match(clients, /OPENAI_CC_CONTEXT_WINDOW \|\| 700000/);
