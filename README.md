@@ -1,14 +1,16 @@
 # OpenAI-CC
 
-A local Node/TypeScript gateway that exposes the Anthropic endpoints Claude Code and Claude Desktop expect, translates requests to supported upstream APIs, and rotates to the next ready credential when an upstream credential is rate-limited before output begins.
+OpenAI-CC is a local Node/TypeScript gateway that exposes the Anthropic endpoints expected by Claude Code and Claude Desktop, translates them to configured upstream providers, and performs deterministic provider-local credential failover.
+
+The gateway and Admin UI bind to `127.0.0.1:8082` by default.
 
 ## Supported clients
 
-- **Claude Code CLI** through the Anthropic-compatible endpoint at `http://127.0.0.1:8082`.
+- **Claude Code CLI** through `http://127.0.0.1:8082`.
 - **Claude Code for VS Code** through the same shared Claude Code configuration.
-- **Claude Desktop Code** through the same Claude Code engine/configuration plus Claude Desktop's `Claude-3p` / third-party inference gateway profile.
+- **Claude Desktop Code** through Claude Desktop's `Claude-3p` third-party inference gateway profile.
 
-Claude Desktop is intentionally given Claude-compatible public route names rather than raw upstream model ids:
+Claude-facing model discovery exposes only Claude-compatible public route aliases. Raw upstream model ids remain internal:
 
 | OpenAI-CC slot | Claude public route |
 | --- | --- |
@@ -17,169 +19,253 @@ Claude Desktop is intentionally given Claude-compatible public route names rathe
 | Sonnet | `claude-sonnet-5` |
 | Haiku | `claude-haiku-4-5` |
 
-Those names are public aliases only. Requests are still routed internally to the provider/model selected for each OpenAI-CC slot in the admin panel. Raw GPT, Gemini, DeepSeek, NVIDIA, or other upstream ids are not exposed through Claude model discovery.
+`GET /v1/models` and `GET /v1/models/{model_id}` immediately reflect the saved server-side route/context/output configuration.
 
-`GET /v1/models` and `GET /v1/models/{model_id}` return Claude-compatible model metadata including the configured context window, per-route maximum output tokens, and conservative gateway capabilities. The default model configuration advertises a 700,000-token input context. Output ceilings default to 128,000 tokens for Default/Fable/Opus/Sonnet and 64,000 for Haiku, and can be changed in the admin panel. Message requests are clamped to the configured per-route output ceiling.
+## Credential providers
 
-## Supported upstream credentials
+OpenAI-CC supports:
 
-- **ChatGPT/Codex OAuth** through the existing local OAuth flow.
-- **OpenCode Zen API keys** through `https://opencode.ai/zen/v1` using the OpenAI Responses API.
-- **NVIDIA NIM API keys** through `https://integrate.api.nvidia.com/v1` using OpenAI-compatible Chat Completions.
-- **Google AI Studio / Gemini API keys** through `https://generativelanguage.googleapis.com/v1beta/openai/` using OpenAI-compatible Chat Completions.
+- **ChatGPT/Codex OAuth** credentials acquired by the official OpenAI Codex CLI.
+- **OpenCode Zen** API keys.
+- **NVIDIA NIM** API keys.
+- **Google AI Studio / Gemini** API keys.
 
-OpenAI-CC never asks the Windows installer for provider credentials. API keys and OAuth setup belong exclusively in the local admin panel.
+### ChatGPT authentication architecture
 
-## Windows installer
+OpenAI-CC does **not** construct OpenAI's browser authorization URL and does not use the third-party `openai-oauth` CLI to acquire credentials.
 
-Run `setup.ps1` from a checkout, or download/run the script by itself and it will clone OpenAI-CC into `%LOCALAPPDATA%\OpenAI-CC`.
+Credential acquisition is delegated to the official `@openai/codex` CLI package pinned by OpenAI-CC. The currently tested package version is **0.146.0**. Browser login is the default; the official Codex device-auth flow is available as a fallback.
 
-The installer is idempotent and asks three explicit **Y/N** questions:
+Each ChatGPT credential has its own managed Codex home:
 
-1. Install Claude Code CLI?
-2. Install VS Code and the Claude Code extension?
-3. Install and configure Claude Desktop?
+```text
+.data/
+  codex-homes/
+    chatgpt-main/
+      auth.json
+    chatgpt-backup/
+      auth.json
+  auth-jobs/
+    <temporary-login-job>/
+```
 
-The input routine drains pending console keystrokes before every question and accepts only an explicit `Y` or `N`; stray or repeated Enter presses cannot submit an empty choice.
+OpenAI-CC starts Codex with a per-job `CODEX_HOME` and forces Codex's file credential store so a successful login produces a managed `auth.json`. A successful login is validated and then atomically promoted into that credential's permanent Codex home. Re-authentication always happens in a temporary home first; a failed/cancelled login leaves the previous working credential untouched.
 
-### What it installs/configures
+Only one browser/device login job is allowed at a time because current Codex browser authentication uses a small fixed loopback callback-port set. Jobs have cancellation, timeout, process-tree cleanup, and bounded/redacted output capture. OAuth URLs, authorization codes, PKCE state/verifiers, and tokens are never returned through the Admin API.
 
-Required dependencies are checked first. Missing Git, Node.js, and ripgrep are installed with WinGet. Node is brought to at least 22.5 because the installed Context Mode release requires Node 22.5 or newer.
+The existing `@openai-oauth/local` + `@openai-oauth/core` transport is retained only to **consume** a valid Codex `auth.json` and send Codex-backed Responses requests. Those packages are pinned; they are not the login implementation.
 
-For optional apps, the user's Y/N choice controls installation. An existing Claude Code, VS Code, Claude Code VS Code extension, or Claude Desktop installation is left at its installed version rather than being unnecessarily upgraded/reinstalled.
+## Credential routing
 
-The installer then:
+There is no longer one ambiguous global "active" credential. Preferences are provider-local:
 
-- installs/builds OpenAI-CC;
-- creates `~/Desktop/Claude` as the default projects directory;
-- persists the local gateway/model environment for future PowerShell and app sessions;
-- repairs Claude Code's `hasCompletedOnboarding` / `hasSeenOnboarding` state so a third-party gateway does not loop back to the login/onboarding screen;
-- enables gateway model discovery and uses the Claude-safe public aliases above;
-- sets Claude Code's auto-compaction capacity to **700,000 tokens** on routes whose actual model context permits it, instead of disabling compaction;
-- installs **RTK** and initializes its global Claude Code integration;
-- installs the official **TypeScript LSP** Claude plugin plus `typescript-language-server`;
-- installs **Context Mode** as a user-scoped Claude Code plugin;
-- configures `claudeCode.disableLoginPrompt` for the VS Code extension when VS Code support was selected;
-- configures Claude Desktop's `Claude-3p` profile when Desktop support was selected;
-- creates a per-user Startup shortcut so the local gateway is available after future Windows logins;
-- starts/verifies the proxy and validates Claude-compatible model discovery and 700k gateway metadata.
+```text
+chatgpt -> Personal Plus
+zen     -> Zen Primary
+nvidia  -> NIM Main
+google  -> Google Main
+```
 
-Claude Code CLI, its VS Code extension, and the local Code tab in Claude Desktop share Claude Code's user configuration. The token-efficiency plugins/hooks are therefore installed once at user scope rather than duplicated per client.
+For an **Auto** route:
 
-### 700k context behavior
+1. use the route's configured provider;
+2. try that provider's preferred **READY** credential first;
+3. if it is unavailable, try the other READY credentials for the same provider in stable order;
+4. on a pre-output `429`, mark that credential exhausted and retry the next same-provider credential;
+5. once any streaming output has been sent to Claude, never replay the partial response. The exhausted credential is skipped on the next request instead.
 
-OpenAI-CC advertises a 700,000-token gateway context. Claude Code is configured with `CLAUDE_CODE_AUTO_COMPACT_WINDOW=700000`, which keeps automatic compaction enabled while allowing up to 700k working capacity on a 1M-capable Claude route. Claude Code still caps that value at the actual context limit of the selected public model family, so a lower-context model such as Haiku cannot be forced beyond its own client-side limit merely by changing the gateway metadata.
+For a **Pinned** route, only the exact credential is used. If that credential is exhausted or disabled, the route is explicitly unavailable; pins do not silently fall back.
 
-### Credentials
+Route pins are validated server-side. A pin cannot reference a missing credential or a credential belonging to another provider. Disabled/exhausted credentials may remain intentionally pinned so the configuration is preserved while route health clearly shows it as unavailable.
 
-After installation, open:
+## Credential lifecycle
+
+The Admin UI supports explicit operations rather than implicit ID replacement:
+
+- Add ChatGPT account.
+- Add API-key credential.
+- Make preferred for that provider.
+- Re-authenticate ChatGPT account.
+- Replace an API key.
+- Disable / enable.
+- Rename.
+- Remove.
+
+Creating a credential with an existing ID returns `409 Conflict`; it never silently changes provider. Deleting a credential that is pinned to model slots also returns `409` and identifies the blocking slots.
+
+Statuses are:
+
+- `READY`
+- `EXHAUSTED`
+- `DISABLED`
+- `AUTH ERROR`
+
+A `401` from an upstream credential marks it `AUTH ERROR`; Auto routing may continue with the next ready credential from the same provider, while pinned routes remain unavailable until the exact credential is re-authenticated or its API key is replaced.
+
+An exhausted credential with a known future reset displays the reset time/countdown instead of a misleading Reset button. A disabled credential remains disabled when an old rate-limit timer expires.
+
+## Admin UI
+
+Open:
 
 ```text
 http://127.0.0.1:8082/admin
 ```
 
-Add provider API keys or complete ChatGPT OAuth there. The installer never asks for, embeds, or stores provider credentials. The local Claude-facing bearer token is the non-secret placeholder `local-not-used`.
+The Admin UI has separate Overview, Model Routes, Credentials, and Add Credential areas. Provider changes immediately rebuild the route's credential selector from real matching credentials. Route health is derived by the same server-side routing rules used by the dispatcher.
+
+Credential/SSE updates refresh credential state without destroying unsaved model-route form edits. If model configuration changes in another tab while the local form is dirty, the page shows a conflict banner instead of silently overwriting the edits.
+
+All mutations use a shared structured API client that checks `response.ok`, parses server error objects, applies a timeout, and disables pending buttons.
+
+## Admin security
+
+Admin access is loopback-only by default.
+
+- The default bind is `127.0.0.1`.
+- If `HOST` is changed to a non-loopback address, `/admin` is refused unless `OPENAI_CC_UNSAFE_REMOTE_ADMIN=1` is explicitly set. That override does **not** add TLS or user authentication; provide your own network protections if you deliberately use it.
+- Admin requests require a loopback `Host` by default.
+- Browser mutations require same-origin `Origin` plus a per-process CSRF token embedded in the Admin page.
+- Non-browser loopback automation (including the Windows installer) may send JSON mutations without an `Origin`; browsers cannot use a simple cross-site form to send `application/json`.
+- Admin mutation bodies must be `application/json` and are limited to 64 KiB.
+- Anthropic message bodies use their own separate larger limit.
+- Admin responses use `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, frame denial, and a nonce-based Content Security Policy.
+
+Public Admin objects are deliberate DTOs. They never contain API keys or local auth-file paths.
+
+## Windows installer
+
+Run `setup.ps1` from a checkout, or run the script by itself and it will clone OpenAI-CC into `%LOCALAPPDATA%\OpenAI-CC`.
+
+The installer remains native-PowerShell and idempotent. It does **not** invoke the VS Code `code` CLI. If VS Code support is selected, VS Code is installed/configured and the Claude Code extension is installed/enabled manually from the Extensions UI to avoid the known Windows `code.cmd` GUI/hang behavior.
+
+The installer:
+
+- checks/installs required Git, Node.js and ripgrep;
+- builds OpenAI-CC with its pinned npm dependency set, including the official Codex CLI package used for ChatGPT login;
+- creates the shared Claude projects/configuration;
+- keeps automatic compaction enabled at the configured gateway capacity;
+- installs/configures the existing token-efficiency tooling;
+- configures Claude Desktop when selected;
+- creates the per-user gateway Startup shortcut;
+- starts/verifies the local gateway and Claude-safe model discovery.
+
+The installer never asks for or embeds provider credentials.
 
 ## Manual install
-
-If you only want the gateway itself, Node.js 20+ is sufficient:
 
 ```bash
 git clone https://github.com/RehmTheGreat/openai-cc.git
 cd openai-cc
-npm install
+npm ci
 npm run build
 npm start
 ```
 
-The full Windows installer requires Node.js 22.5+ because it also installs Context Mode.
-
-## Rotation behavior
-
-All ChatGPT OAuth accounts and API-key entries live in one ordered credential list.
-
-- One credential is active at a time.
-- You can add multiple keys for Zen, NVIDIA NIM, Google AI Studio, or any mixture of those providers.
-- If a request gets a `429` **before Claude receives any output**, OpenAI-CC marks that credential exhausted, activates the next ready credential, and retries the same request internally.
-- It keeps walking the ready credential list until the request succeeds or all ready credentials have been tried.
-- If a rate limit occurs after streaming output has already started, the request is not replayed because replaying partial agent output could duplicate text or tool calls. The next ready credential becomes active for the following request.
-- ChatGPT OAuth accounts retain the persisted five-hour window behavior.
-- API-key providers use the upstream `Retry-After` value when available. Otherwise they use a 15-minute cooldown by default. Override it with `API_KEY_RATE_LIMIT_COOLDOWN_MS`.
-- When a cooldown/reset time expires, the credential automatically returns to `ready`.
-
-Credentials are stored only under `.data/`, which is gitignored. API keys are masked in the admin API/UI and event payloads. Treat `.data/accounts.json` and OAuth files as secrets.
-
-## Pieces
-
-1. `src/account-store.ts` — unified ChatGPT/API-key credential records, active state, cooldown/reset timers, rotation, and persistence.
-2. `src/model-config.ts` — slot routing, configured context window, and output ceilings.
-3. `src/translator.ts` — Anthropic Messages ↔ OpenAI Responses translation for ChatGPT OAuth and OpenCode Zen.
-4. `src/chat-translator.ts` — Anthropic Messages ↔ OpenAI-compatible Chat Completions translation for NVIDIA NIM and Google AI Studio, including tools and streaming.
-5. `src/claude-desktop.ts` — Claude-safe model discovery plus minimal Claude Desktop `Claude-3p` gateway/profile configuration.
-6. `src/claude-config.ts` — shared Claude Code gateway aliases, model discovery, auto-compaction capacity, and onboarding state.
-7. `src/dispatcher.ts` — Anthropic HTTP surface, provider routing, transparent pre-output failover, browser OAuth, API-key setup, and the admin UI.
-8. `setup.ps1` — idempotent native-Windows installer/configurator.
-
-## Add credentials
-
-### ChatGPT OAuth
-
-In the admin panel, under **Add teammate with ChatGPT OAuth**, enter a unique credential id and display name, then finish sign-in in the browser.
-
-You can also use the terminal flow:
+For development:
 
 ```bash
-npm run account:add -- --id my-account --name "My Account"
+npm install
+npm test
 ```
 
-### API keys
+## Add ChatGPT credentials from the terminal
 
-Under **Add API key**:
+The terminal flow uses exactly the same `OfficialCodexAuthRunner` as the Admin UI:
 
-1. Select `OpenCode Zen`, `NVIDIA NIM`, or `Google AI Studio`.
-2. Enter a unique credential id.
-3. Enter a display name.
-4. Enter the exact provider model id that this credential should use.
-5. Paste the API key.
-6. Repeat for every additional key you want in rotation.
+```bash
+npm run account:add -- --id chatgpt-main --name "Personal Plus"
+```
 
-The selected credential's model can be overridden by the slot's configured route. This makes cross-provider routing possible even though each provider names models differently.
+Re-authenticate an existing ChatGPT credential atomically:
+
+```bash
+npm run account:add -- --id chatgpt-main --name "Personal Plus" --reauth
+```
+
+Use the official device-auth fallback deliberately:
+
+```bash
+npm run account:add -- --id chatgpt-main --name "Personal Plus" --device-auth
+```
+
+The terminal command reports only safe job state and identifying metadata; it does not print `auth.json` or its path/content.
+
+List credentials without secrets or auth paths:
+
+```bash
+npm run account:list
+```
+
+## API-key credentials
+
+In the Admin UI select `OpenCode Zen`, `NVIDIA NIM`, or `Google AI Studio`, then provide a unique ID, display name, provider model id, and key. A route's configured model id is the model actually requested upstream; the model recorded on an API-key credential is useful identifying/default metadata for that credential.
+
+## Persistence
+
+Credentials are stored under `.data/`, which is gitignored.
+
+`accounts.json` currently uses schema version 2 and stores `preferredCredentialByProvider`. Existing pre-v2 data migrates conservatively: if an old `activeAccountId` still exists, it becomes the preference only for that credential's provider. No preference is guessed for unrelated providers.
+
+API keys and OAuth files are secrets even though the Admin API masks/omits them. Do not commit `.data/`.
 
 ## Endpoints
 
 - Anthropic base URL: `http://127.0.0.1:8082`
-- Claude model discovery: `GET http://127.0.0.1:8082/v1/models`
-- Claude model detail: `GET http://127.0.0.1:8082/v1/models/{model_id}`
-- Messages: `POST http://127.0.0.1:8082/v1/messages`
-- Token estimate: `POST http://127.0.0.1:8082/v1/messages/count_tokens`
-- Admin: `http://127.0.0.1:8082/admin`
-- Health: `http://127.0.0.1:8082/healthz`
+- Claude model discovery: `GET /v1/models`
+- Claude model detail: `GET /v1/models/{model_id}`
+- Messages: `POST /v1/messages`
+- Token estimate: `POST /v1/messages/count_tokens`
+- Admin: `GET /admin`
+- Admin state: `GET /admin/state`
+- Health: `GET /healthz`
+
+Credential-control endpoints include:
+
+```text
+POST   /admin/chatgpt/auth
+GET    /admin/auth-jobs/:jobId
+POST   /admin/auth-jobs/:jobId/cancel
+POST   /admin/credentials
+PATCH  /admin/credentials/:id
+DELETE /admin/credentials/:id
+POST   /admin/credentials/:id/prefer
+POST   /admin/credentials/:id/disable
+POST   /admin/credentials/:id/enable
+POST   /admin/credentials/:id/reauth
+POST   /admin/credentials/:id/replace-key
+```
+
+Invalid requests return structured `4xx` errors such as `400`, `403`, `404`, `409`, `413`, `415`, or `422` instead of being collapsed into generic `500` responses.
 
 ## Compatibility notes
 
-- `POST /v1/messages`: text, images, tools, tool results, non-streaming responses, and streaming are translated.
-- `GET /v1/models` and `GET /v1/models/{model_id}` use Claude-style model metadata and do not reveal raw upstream ids as callable model names.
-- ChatGPT OAuth and Zen use the OpenAI Responses path.
-- NVIDIA NIM and Google AI Studio use the OpenAI-compatible Chat Completions path.
-- Tool definitions, assistant tool calls, tool results, and streamed tool-call argument deltas are translated in both paths.
-- Claude `thinking` history is never converted into hidden provider chain-of-thought. When present in history it is preserved only as visible prior context.
-- The advertised `thinking` capability is conservative: it is enabled only for routes using the Responses translation path; adaptive thinking is not advertised.
-- Image input is advertised only for ChatGPT and Google routes. PDF input, citations, built-in code execution, context-management controls, effort controls, and structured outputs are not advertised because the gateway does not provide those Claude-native features end-to-end.
-- `POST /v1/messages/count_tokens` remains a conservative local estimate rather than Anthropic's exact tokenizer.
-- Provider-specific model capabilities still matter. A model that lacks tools, vision, long context, or reliable streaming cannot gain those capabilities through protocol translation.
+- ChatGPT OAuth and Zen use the OpenAI Responses translation path.
+- NVIDIA NIM and Google AI Studio use OpenAI-compatible Chat Completions.
+- Text, images where supported, tools/tool results, non-streaming, and streaming are translated by the existing gateway translators.
+- Provider/model capabilities still apply. Routing cannot make an upstream model support tools, vision, context length, or output length that the provider itself does not support.
+- `POST /v1/messages/count_tokens` is a conservative local estimate rather than Anthropic's exact tokenizer.
 
-## Test
+## Tests
 
-```bash
-npm test
-```
+`npm test` builds the repository and runs **all** compiled `dist/tests/**/*.test.js` files using a Node-based test enumerator, so Windows does not depend on shell glob expansion.
 
-The test suite covers Claude-safe alias discovery, configured context/output metadata, Desktop `Claude-3p` profile merging, installer Y/N input invariants, token-efficiency stack configuration, persistent gateway settings, and Desktop opt-out behavior.
+The suite covers, among other things:
 
-## Security
+- account-store schema migration/persistence and explicit lifecycle operations;
+- public credential secrecy;
+- provider preference/rotation and route pin validation;
+- pre-output and post-output rate-limit behavior;
+- upstream authentication-error state/failover and secret redaction;
+- official-Codex auth runner success/failure/cancel/concurrency using fake CLI processes;
+- atomic failed re-auth preservation;
+- Admin HTTP lifecycle/status codes;
+- Host/Origin/CSRF/content-type/body-limit/security-header protections;
+- critical Admin frontend invariants and dirty-form SSE behavior;
+- existing Claude Desktop and Windows installer regressions.
 
-- Keep the service bound to loopback unless you add real authentication and TLS.
-- The Claude-facing gateway token is the non-secret local placeholder `local-not-used`; provider credentials remain inside OpenAI-CC.
-- Never commit `.data/`.
-- API keys are stored locally in `.data/accounts.json`; filesystem permissions are tightened where the OS supports it.
-- Use only API keys/accounts you are authorized to use and stay within each provider's applicable terms and quota rules.
+## Security and terms
+
+Keep the gateway on loopback unless you deliberately add appropriate network authentication/TLS protections. Treat `.data/accounts.json` and all Codex auth files as password-equivalent secrets.
+
+Use only accounts/API keys you are authorized to use, and comply with each upstream provider's applicable terms, policies, quotas, and account restrictions.

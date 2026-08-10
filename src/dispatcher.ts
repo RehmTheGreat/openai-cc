@@ -1,46 +1,67 @@
-import { spawn } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import http, { IncomingMessage, ServerResponse } from "node:http";
-import path from "node:path";
 import OpenAI from "openai";
 import { createOpenAIOAuthTransport } from "@openai-oauth/core";
 import { openaiCredentials } from "@openai-oauth/local";
-import { AccountRecord, AccountStore, ProviderKind, readAuthEmail, validateId } from "./account-store.js";
+import { AccountRecord, AccountStore, ApiProviderKind, ProviderKind, publicCredential, validateId } from "./account-store.js";
+import { ChatGptAuthRunner, OfficialCodexAuthRunner } from "./chatgpt-auth.js";
 import { claudeDesktopModel, claudeDesktopModelList } from "./claude-desktop.js";
 import { AnthropicRequest, AnthropicSseTranslator, anthropicToResponses, estimateAnthropicTokens, responsesToAnthropic } from "./translator.js";
 import { AnthropicChatSseTranslator, anthropicToChatCompletions, chatCompletionToAnthropic } from "./chat-translator.js";
-import { ModelConfigStore } from "./model-config.js";
-
-type OAuthJobStatus = "pending" | "complete" | "error";
-interface OAuthJob {
-  id: string;
-  name: string;
-  status: OAuthJobStatus;
-  startedAt: string;
-  finishedAt?: string;
-  email?: string;
-  error?: string;
-}
+import { MODEL_SLOTS, ModelConfigStore } from "./model-config.js";
+import { OpenAICCError, conflict } from "./errors.js";
+import { adminPage } from "./admin/page.js";
 
 type ApiProvider = Exclude<ProviderKind, "chatgpt">;
+const MESSAGE_BODY_LIMIT = 32 * 1024 * 1024;
+const ADMIN_BODY_LIMIT = 64 * 1024;
+
+export interface DispatcherOptions {
+  authRunner?: ChatGptAuthRunner;
+  bindHost?: string;
+  allowRemoteAdmin?: boolean;
+  clientFactory?: (account: AccountRecord) => any;
+}
 
 export class Dispatcher {
-  private clients = new Map<string, OpenAI>();
-  private eventStreams = new Set<ServerResponse>();
-  private oauthJobs = new Map<string, OAuthJob>();
+  private readonly clients = new Map<string, any>();
+  private readonly eventStreams = new Set<ServerResponse>();
+  private readonly authRunner: ChatGptAuthRunner;
+  private readonly csrfToken = randomBytes(32).toString("base64url");
+  private readonly cspNonce = randomBytes(18).toString("base64url");
+  private readonly bindHost: string;
+  private readonly allowRemoteAdmin: boolean;
+  private readonly clientFactory?: (account: AccountRecord) => any;
 
-  constructor(private readonly store: AccountStore, private readonly models: ModelConfigStore) {
-    store.on("event", (event) => {
-      const payload = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
-      for (const res of this.eventStreams) res.write(payload);
+  constructor(
+    private readonly store: AccountStore,
+    private readonly models: ModelConfigStore,
+    options: DispatcherOptions = {},
+  ) {
+    this.bindHost = options.bindHost ?? "127.0.0.1";
+    this.allowRemoteAdmin = options.allowRemoteAdmin ?? process.env.OPENAI_CC_UNSAFE_REMOTE_ADMIN === "1";
+    this.clientFactory = options.clientFactory;
+    this.authRunner = options.authRunner ?? new OfficialCodexAuthRunner(store);
+    store.on("event", (event) => this.broadcast(event.type, event));
+    models.on("event", (event) => this.broadcast(event.type, event));
+    this.authRunner.on("job", (job) => {
+      if (job.status === "complete") this.clients.delete(job.credentialId);
+      this.broadcast("auth_job_changed", job);
     });
   }
 
   handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     try {
-      setCors(res);
-      if (req.method === "OPTIONS") return void send(res, 204, "");
-      const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
+      const url = safeUrl(req);
+      const isAdmin = url.pathname === "/admin" || url.pathname.startsWith("/admin/");
+      if (isAdmin) {
+        setAdminSecurityHeaders(res, this.cspNonce);
+        this.assertAdminAccess(req);
+        if (isMutation(req.method)) this.assertAdminMutation(req);
+      } else {
+        setGatewayCors(req, res);
+        if (req.method === "OPTIONS") return void send(res, 204, "");
+      }
 
       if (req.method === "GET" && url.pathname === "/healthz") {
         return void json(res, 200, { ok: true, contextWindow: this.models.snapshot().contextWindow });
@@ -59,48 +80,107 @@ export class Dispatcher {
         return void json(res, model ? 200 : 404, model ?? { error: { type: "not_found_error", message: `Model not found: ${modelId}` } });
       }
       if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
-        const body = await readJson<AnthropicRequest>(req);
+        const body = await readJson<AnthropicRequest>(req, MESSAGE_BODY_LIMIT, false);
         return void json(res, 200, { input_tokens: estimateAnthropicTokens(body) });
       }
       if (req.method === "POST" && url.pathname === "/v1/messages") return void await this.handleMessages(req, res);
 
-      if (req.method === "GET" && url.pathname === "/admin") return void html(res, adminHtml());
-      if (req.method === "GET" && url.pathname === "/admin/state") return void json(res, 200, { ...this.store.snapshot(), modelConfig: this.models.snapshot() });
-      if (req.method === "POST" && url.pathname === "/admin/model-config") {
-        const body = await readJson<any>(req);
-        return void json(res, 200, await this.models.update(body));
-      }
+      if (req.method === "GET" && url.pathname === "/admin") return void html(res, adminPage(this.csrfToken, this.cspNonce));
+      if (req.method === "GET" && url.pathname === "/admin/state") return void json(res, 200, this.adminState());
       if (req.method === "GET" && url.pathname === "/admin/events") return void this.handleEventStream(req, res);
-      if (req.method === "POST" && url.pathname === "/admin/accounts") {
-        const body = await readJson<{ id?: string; name?: string }>(req);
-        return void json(res, 202, await this.startBrowserOAuth(body));
+      if (req.method === "POST" && url.pathname === "/admin/model-config") {
+        const body = await readJson<any>(req, ADMIN_BODY_LIMIT, true);
+        const modelConfig = await this.models.update(body);
+        return void json(res, 200, { modelConfig, routeHealth: this.models.health() });
       }
-      if (req.method === "POST" && url.pathname === "/admin/keys") {
-        const body = await readJson<{ id?: string; name?: string; provider?: string; apiKey?: string; model?: string }>(req);
+      if (req.method === "POST" && url.pathname === "/admin/chatgpt/auth") {
+        const body = await readJson<{ id?: string; name?: string; loginMode?: string }>(req, ADMIN_BODY_LIMIT, true);
+        const job = await this.authRunner.start({
+          credentialId: String(body.id ?? "").trim(),
+          displayName: String(body.name ?? "").trim(),
+          mode: "create",
+          loginMode: body.loginMode === "device" ? "device" : "browser",
+        });
+        return void json(res, 202, job);
+      }
+      if (req.method === "GET" && /^\/admin\/auth-jobs\/[^/]+$/.test(url.pathname)) {
+        const jobId = decodeURIComponent(url.pathname.split("/")[3]);
+        return void json(res, 200, this.authRunner.status(jobId));
+      }
+      if (req.method === "POST" && /^\/admin\/auth-jobs\/[^/]+\/cancel$/.test(url.pathname)) {
+        await readJson(req, ADMIN_BODY_LIMIT, true);
+        const jobId = decodeURIComponent(url.pathname.split("/")[3]);
+        await this.authRunner.cancel(jobId);
+        return void json(res, 200, this.authRunner.status(jobId));
+      }
+      if (req.method === "POST" && url.pathname === "/admin/credentials") {
+        const body = await readJson<{ id?: string; name?: string; provider?: string; apiKey?: string; model?: string }>(req, ADMIN_BODY_LIMIT, true);
         const record = await this.addApiKey(body);
         return void json(res, 201, publicCredential(record));
       }
-      if (req.method === "GET" && /^\/admin\/oauth\/[^/]+$/.test(url.pathname)) {
-        const id = decodeURIComponent(url.pathname.split("/")[3]);
-        const job = this.oauthJobs.get(id);
-        return void json(res, job ? 200 : 404, job ?? { error: { type: "not_found_error", message: "OAuth job not found" } });
+      if (req.method === "PATCH" && /^\/admin\/credentials\/[^/]+$/.test(url.pathname)) {
+        const id = credentialIdFromPath(url.pathname);
+        const body = await readJson<{ name?: string }>(req, ADMIN_BODY_LIMIT, true);
+        if (body.name === undefined) throw new OpenAICCError("name is required.", 400, "name_required");
+        return void json(res, 200, publicCredential(await this.store.rename(id, body.name)));
       }
-      if (req.method === "POST" && /^\/admin\/accounts\/[^/]+\/activate$/.test(url.pathname)) {
-        const id = decodeURIComponent(url.pathname.split("/")[3]);
-        return void json(res, 200, publicCredential(await this.store.activate(id)));
+      if (req.method === "DELETE" && /^\/admin\/credentials\/[^/]+$/.test(url.pathname)) {
+        await readJson(req, ADMIN_BODY_LIMIT, true);
+        const id = credentialIdFromPath(url.pathname);
+        const pinned = this.models.pinnedSlotsForCredential(id);
+        if (pinned.length) throw conflict(`Credential ${id} is pinned to: ${pinned.join(", ")}. Clear those pins before removing it.`, "credential_pinned", { slots: pinned });
+        const activeJob = this.authRunner.activeJobs().find((job) => job.credentialId === id);
+        if (activeJob) throw conflict(`Credential ${id} has an active authentication job. Cancel it first.`, "auth_job_conflict", { jobId: activeJob.jobId });
+        await this.store.delete(id);
+        this.clients.delete(id);
+        return void json(res, 200, { ok: true });
       }
-      if (req.method === "POST" && /^\/admin\/accounts\/[^/]+\/reset$/.test(url.pathname)) {
-        const id = decodeURIComponent(url.pathname.split("/")[3]);
-        return void json(res, 200, publicCredential(await this.store.reset(id)));
+      if (req.method === "POST" && /^\/admin\/credentials\/[^/]+\/(prefer|disable|enable)$/.test(url.pathname)) {
+        await readJson(req, ADMIN_BODY_LIMIT, true);
+        const id = credentialIdFromPath(url.pathname);
+        const action = url.pathname.split("/")[4];
+        const record = action === "prefer" ? await this.store.prefer(id) : action === "disable" ? await this.store.disable(id) : await this.store.enable(id);
+        return void json(res, 200, publicCredential(record));
       }
-      return void json(res, 404, { error: { type: "not_found_error", message: "Not found" } });
-    } catch (error: any) {
-      return void json(res, 500, { error: { type: "api_error", message: error?.message ?? String(error) } });
+      if (req.method === "POST" && /^\/admin\/credentials\/[^/]+\/reauth$/.test(url.pathname)) {
+        const id = credentialIdFromPath(url.pathname);
+        const body = await readJson<{ loginMode?: string; name?: string }>(req, ADMIN_BODY_LIMIT, true);
+        const existing = this.store.get(id);
+        if (!existing) throw new OpenAICCError(`Unknown credential: ${id}`, 404, "credential_not_found");
+        const job = await this.authRunner.start({
+          credentialId: id,
+          displayName: String(body.name ?? existing.name),
+          mode: "reauth",
+          loginMode: body.loginMode === "device" ? "device" : "browser",
+        });
+        return void json(res, 202, job);
+      }
+      if (req.method === "POST" && /^\/admin\/credentials\/[^/]+\/replace-key$/.test(url.pathname)) {
+        const id = credentialIdFromPath(url.pathname);
+        const body = await readJson<{ apiKey?: string; model?: string; name?: string }>(req, ADMIN_BODY_LIMIT, true);
+        const record = await this.store.replaceApiKey(id, { apiKey: String(body.apiKey ?? ""), model: body.model, name: body.name });
+        this.clients.delete(id);
+        return void json(res, 200, publicCredential(record));
+      }
+      return void json(res, 404, { error: { code: "not_found", message: "Not found" } });
+    } catch (error: unknown) {
+      return void this.sendError(res, error);
     }
   };
 
+  async close(): Promise<void> {
+    for (const stream of this.eventStreams) stream.end();
+    this.eventStreams.clear();
+    await this.authRunner.shutdown();
+    this.store.close();
+  }
+
+  private adminState() {
+    return { ...this.store.snapshot(), modelConfig: this.models.snapshot(), routeHealth: this.models.health() };
+  }
+
   private async handleMessages(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const body = await readJson<AnthropicRequest>(req);
+    const body = await readJson<AnthropicRequest>(req, MESSAGE_BODY_LIMIT, false);
     const route = this.models.routeForRequestedModel(body.model);
     const requestedMaxTokens = Number(body.max_tokens) || route.maxOutputTokens;
     const routedBody: AnthropicRequest = {
@@ -110,7 +190,9 @@ export class Dispatcher {
     const attempted = new Set<string>();
     let account = this.models.credentialForRequestedModel(body.model, attempted);
     if (!account) {
-      return void json(res, 409, { error: { type: "handoff_required", message: `No ready ${route.provider} credential is available for ${this.models.slotForRequestedModel(body.model)}.` } });
+      const health = this.models.healthFor(this.models.slotForRequestedModel(body.model));
+      const code = route.credentialId ? "pinned_credential_unavailable" : "no_ready_credential";
+      return void json(res, 409, { error: { type: "handoff_required", code, message: health.message } });
     }
 
     while (account && !attempted.has(account.id)) {
@@ -123,9 +205,15 @@ export class Dispatcher {
           const upstream = { ...anthropicToResponses(routedBody), model } as any;
           if (body.stream) {
             const stream = await client.responses.create({ ...upstream, stream: true });
-            beginSse(res);
             const translator = new AnthropicSseTranslator(body.model);
-            for await (const event of stream as any) for (const chunk of translator.accept(event)) res.write(chunk);
+            let wrote = false;
+            for await (const event of stream as any) {
+              for (const chunk of translator.accept(event)) {
+                if (!wrote) { beginSse(res); wrote = true; }
+                res.write(chunk);
+              }
+            }
+            if (!wrote) beginSse(res);
             if (!res.writableEnded) res.end();
             return;
           }
@@ -136,27 +224,53 @@ export class Dispatcher {
         const upstream = anthropicToChatCompletions(routedBody, model) as any;
         if (body.stream) {
           const stream = await client.chat.completions.create({ ...upstream, stream: true });
-          beginSse(res);
           const translator = new AnthropicChatSseTranslator(body.model);
-          for await (const chunk of stream as any) for (const out of translator.accept(chunk)) res.write(out);
+          let wrote = false;
+          for await (const chunk of stream as any) {
+            for (const out of translator.accept(chunk)) {
+              if (!wrote) { beginSse(res); wrote = true; }
+              res.write(out);
+            }
+          }
+          if (!wrote) beginSse(res);
           if (!res.writableEnded) res.end();
           return;
         }
         const response = await client.chat.completions.create({ ...upstream, stream: false } as any);
         return void json(res, 200, chatCompletionToAnthropic(response, body.model));
       } catch (error: any) {
+        if (isAuthenticationError(error)) {
+          const upstreamMessage = error?.message ?? "Upstream authentication failed.";
+          if (res.headersSent) {
+            await this.models.markAuthErrorAndNext(body.model, account, upstreamMessage, attempted);
+            if (!res.writableEnded) {
+              res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "authentication_error", message: "The configured credential failed authentication after streaming began; no partial response was replayed. Re-authenticate or replace the credential. The next request may use another eligible credential." } })}\n\n`);
+              res.end();
+            }
+            return;
+          }
+          account = await this.models.markAuthErrorAndNext(body.model, account, upstreamMessage, attempted);
+          if (!account) {
+            const message = route.credentialId ? "The pinned credential failed authentication; pinned routes do not fall back." : `All ready ${route.provider} credentials for this model slot failed authentication or are unavailable.`;
+            return void json(res, 401, { error: { type: "authentication_error", message } });
+          }
+          continue;
+        }
         if (!isRateLimit(error)) throw error;
         const cooldown = rateLimitCooldownMs(error, account);
         if (res.headersSent) {
           await this.models.markRateLimitedAndNext(body.model, account, error?.message ?? "429 rate limit", cooldown, attempted);
           if (!res.writableEnded) {
-            res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "The configured credential hit a limit after streaming began; a same-provider credential will be used for the next request." } })}\n\n`);
+            res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "The configured credential hit a limit after streaming began; no partial response was replayed. The next request will use the next eligible credential." } })}\n\n`);
             res.end();
           }
           return;
         }
         account = await this.models.markRateLimitedAndNext(body.model, account, error?.message ?? "429 rate limit", cooldown, attempted);
-        if (!account) return void json(res, 429, { error: { type: "rate_limit_error", message: `All ready ${route.provider} credentials for this model slot are rate-limited.` } });
+        if (!account) {
+          const message = route.credentialId ? "The pinned credential is rate-limited; pinned routes do not fall back." : `All ready ${route.provider} credentials for this model slot are rate-limited.`;
+          return void json(res, 429, { error: { type: "rate_limit_error", message } });
+        }
       }
     }
   }
@@ -167,62 +281,31 @@ export class Dispatcher {
     const provider = String(input.provider ?? "").trim().toLowerCase();
     const apiKey = String(input.apiKey ?? "").trim();
     const model = String(input.model ?? "").trim();
-    if (!id) throw new Error("Credential id is required.");
-    if (!name) throw new Error("Display name is required.");
+    if (!id) throw new OpenAICCError("Credential id is required.", 400, "credential_id_required");
     validateId(id);
-    if (!isApiProvider(provider)) throw new Error("Provider must be zen, nvidia, or google.");
-    const record = await this.store.upsertApiKey({ id, name, provider, apiKey, model });
+    if (!isApiProvider(provider)) throw new OpenAICCError("Provider must be zen, nvidia, or google.", 400, "invalid_provider");
+    const record = await this.store.createApiKey({ id, name, provider, apiKey, model });
     this.clients.delete(id);
     return record;
   }
 
-  private async startBrowserOAuth(input: { id?: string; name?: string }): Promise<OAuthJob> {
-    const id = String(input.id ?? "").trim();
-    const name = String(input.name ?? id).trim();
-    if (!id) throw new Error("Account id is required.");
-    if (!name) throw new Error("Account name is required.");
-    validateId(id);
-    const existing = this.oauthJobs.get(id);
-    if (existing?.status === "pending") throw new Error(`OAuth is already running for ${id}.`);
-    const authFile = this.store.authFileFor(id);
-    await mkdir(path.dirname(authFile), { recursive: true, mode: 0o700 });
-    const job: OAuthJob = { id, name, status: "pending", startedAt: new Date().toISOString() };
-    this.oauthJobs.set(id, job);
-    const npxArgs = ["--yes", "openai-oauth@latest", "login", "--oauth-file", authFile];
-    const child = process.platform === "win32"
-      ? spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "npx", ...npxArgs], { stdio: "ignore", windowsHide: true })
-      : spawn("npx", npxArgs, { stdio: "ignore", windowsHide: true });
-    let settled = false;
-    const fail = (message: string): void => { if (settled) return; settled = true; job.status = "error"; job.error = message; job.finishedAt = new Date().toISOString(); };
-    child.once("error", (error) => fail(error.message));
-    child.once("exit", (code) => {
-      if (settled) return;
-      settled = true;
-      void (async () => {
-        if (code !== 0) { job.status = "error"; job.error = `OAuth process exited with code ${code ?? "unknown"}.`; job.finishedAt = new Date().toISOString(); return; }
-        try {
-          const email = await readAuthEmail(authFile);
-          await this.store.upsert({ id, name, email, authFile });
-          this.clients.delete(id);
-          job.status = "complete"; job.email = email; job.finishedAt = new Date().toISOString();
-        } catch (error: any) { job.status = "error"; job.error = error?.message ?? String(error); job.finishedAt = new Date().toISOString(); }
-      })();
-    });
-    return { ...job };
-  }
-
-  private clientFor(account: AccountRecord): OpenAI {
+  private clientFor(account: AccountRecord): any {
     const cached = this.clients.get(account.id);
     if (cached) return cached;
-    const provider = account.provider ?? "chatgpt";
+    if (this.clientFactory) {
+      const client = this.clientFactory(account);
+      this.clients.set(account.id, client);
+      return client;
+    }
+    const provider = account.provider;
     let client: OpenAI;
     if (provider === "chatgpt") {
-      if (!account.authFile) throw new Error(`ChatGPT credential ${account.id} has no auth file.`);
+      if (!account.authFile) throw new OpenAICCError(`ChatGPT credential ${account.id} has no auth file.`, 409, "missing_auth_file");
       const credentials = openaiCredentials({ authFilePath: account.authFile });
       const transport = createOpenAIOAuthTransport({ auth: () => credentials.getSession() });
       client = new OpenAI({ apiKey: "openai-oauth", baseURL: transport.baseURL, fetch: transport.fetch });
     } else {
-      if (!account.apiKey || account.apiKey === "********") throw new Error(`${provider} credential ${account.id} has no API key.`);
+      if (!account.apiKey) throw new OpenAICCError(`${provider} credential ${account.id} has no API key.`, 409, "missing_api_key");
       client = new OpenAI({ apiKey: account.apiKey, baseURL: providerBaseUrl(provider) });
     }
     this.clients.set(account.id, client);
@@ -230,16 +313,63 @@ export class Dispatcher {
   }
 
   private handleEventStream(req: IncomingMessage, res: ServerResponse): void {
-    res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", Connection: "keep-alive" });
-    res.write(`event: state\ndata: ${JSON.stringify({ ...this.store.snapshot(), modelConfig: this.models.snapshot() })}\n\n`);
+    res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store", Connection: "keep-alive" });
+    res.write(`event: state\ndata: ${JSON.stringify(this.adminState())}\n\n`);
     this.eventStreams.add(res);
     req.on("close", () => this.eventStreams.delete(res));
   }
+
+  private broadcast(type: string, data: unknown): void {
+    const payload = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+    for (const response of this.eventStreams) response.write(payload);
+  }
+
+  private assertAdminAccess(req: IncomingMessage): void {
+    if (!this.allowRemoteAdmin && !isLoopbackHost(this.bindHost)) {
+      throw new OpenAICCError("Admin UI is disabled because the gateway is bound to a non-loopback host. Set OPENAI_CC_UNSAFE_REMOTE_ADMIN=1 only if you intentionally provide separate network protections.", 403, "remote_admin_disabled");
+    }
+    if (!this.allowRemoteAdmin) {
+      const remote = normalizeAddress(req.socket.remoteAddress);
+      if (remote && !isLoopbackAddress(remote)) throw new OpenAICCError("Admin access is loopback-only.", 403, "admin_loopback_only");
+      const host = hostName(req.headers.host);
+      if (!host || !isLoopbackHost(host)) throw new OpenAICCError("Admin requests require a loopback Host header.", 403, "invalid_admin_host");
+    }
+  }
+
+  private assertAdminMutation(req: IncomingMessage): void {
+    const type = String(req.headers["content-type"] ?? "").split(";", 1)[0].trim().toLowerCase();
+    if (type !== "application/json") throw new OpenAICCError("Admin mutations require Content-Type: application/json.", 415, "unsupported_media_type");
+    const origin = req.headers.origin;
+    if (origin) {
+      let parsed: URL;
+      try { parsed = new URL(origin); } catch { throw new OpenAICCError("Invalid Origin header.", 403, "invalid_origin"); }
+      if (!isLoopbackHost(parsed.hostname) || parsed.protocol !== "http:") throw new OpenAICCError("Cross-origin Admin mutation rejected.", 403, "invalid_origin");
+      const requestHost = String(req.headers.host ?? "").toLowerCase();
+      if (requestHost && parsed.host.toLowerCase() !== requestHost) throw new OpenAICCError("Cross-origin Admin mutation rejected.", 403, "invalid_origin");
+      if (req.headers["x-openai-cc-csrf"] !== this.csrfToken) throw new OpenAICCError("Missing or invalid Admin anti-CSRF token.", 403, "invalid_csrf");
+    } else if (req.headers["x-openai-cc-csrf"] && req.headers["x-openai-cc-csrf"] !== this.csrfToken) {
+      throw new OpenAICCError("Invalid Admin anti-CSRF token.", 403, "invalid_csrf");
+    }
+  }
+
+  private sendError(res: ServerResponse, error: unknown): void {
+    if (res.headersSent) {
+      if (!res.writableEnded) res.end();
+      return;
+    }
+    if (error instanceof OpenAICCError) {
+      json(res, error.status, { error: { code: error.code, message: error.message, ...(error.details === undefined ? {} : { details: error.details }) } });
+      return;
+    }
+    json(res, 500, { error: { code: "internal_error", message: "Internal server error." } });
+  }
 }
 
-export function createServer(store: AccountStore, models: ModelConfigStore): http.Server {
-  const dispatcher = new Dispatcher(store, models);
-  return http.createServer((req, res) => { void dispatcher.handler(req, res); });
+export function createServer(store: AccountStore, models: ModelConfigStore, options: DispatcherOptions = {}): http.Server {
+  const dispatcher = new Dispatcher(store, models, options);
+  const server = http.createServer((req, res) => { void dispatcher.handler(req, res); });
+  server.on("close", () => { void dispatcher.close(); });
+  return server;
 }
 
 function providerBaseUrl(provider: ApiProvider): string {
@@ -247,11 +377,12 @@ function providerBaseUrl(provider: ApiProvider): string {
   if (provider === "nvidia") return "https://integrate.api.nvidia.com/v1";
   return "https://generativelanguage.googleapis.com/v1beta/openai/";
 }
-function usesResponsesApi(account: AccountRecord): boolean { const provider = account.provider ?? "chatgpt"; return provider === "chatgpt" || provider === "zen"; }
-function isApiProvider(value: string): value is ApiProvider { return value === "zen" || value === "nvidia" || value === "google"; }
+function usesResponsesApi(account: AccountRecord): boolean { return account.provider === "chatgpt" || account.provider === "zen"; }
+function isApiProvider(value: string): value is ApiProviderKind { return value === "zen" || value === "nvidia" || value === "google"; }
+function isAuthenticationError(error: any): boolean { return error?.status === 401 || error?.statusCode === 401; }
 function isRateLimit(error: any): boolean { return error?.status === 429 || error?.statusCode === 429 || /\b429\b|rate.?limit|usage.?limit|quota/i.test(error?.message ?? ""); }
 function rateLimitCooldownMs(error: any, account: AccountRecord): number | undefined {
-  if ((account.provider ?? "chatgpt") === "chatgpt") return undefined;
+  if (account.provider === "chatgpt") return undefined;
   const retryAfter = headerValue(error?.headers, "retry-after");
   if (retryAfter) {
     const seconds = Number(retryAfter); if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds * 1000);
@@ -267,31 +398,59 @@ function headerValue(headers: any, name: string): string | undefined {
   const value = headers[name] ?? headers[name.toLowerCase()] ?? headers[name.toUpperCase()];
   return Array.isArray(value) ? String(value[0]) : value !== undefined ? String(value) : undefined;
 }
-function publicCredential(account: AccountRecord): AccountRecord { const copy = { ...account }; if (copy.apiKey) copy.apiKey = "********"; return copy; }
 function beginSse(res: ServerResponse): void { res.statusCode = 200; res.setHeader("Content-Type", "text/event-stream; charset=utf-8"); res.setHeader("Cache-Control", "no-cache, no-transform"); res.setHeader("Connection", "keep-alive"); res.flushHeaders(); }
-async function readJson<T>(req: IncomingMessage): Promise<T> {
+async function readJson<T = unknown>(req: IncomingMessage, maxBytes: number, requireJson: boolean): Promise<T> {
+  if (requireJson) {
+    const type = String(req.headers["content-type"] ?? "").split(";", 1)[0].trim().toLowerCase();
+    if (type !== "application/json") throw new OpenAICCError("Expected application/json.", 415, "unsupported_media_type");
+  }
   const chunks: Buffer[] = []; let bytes = 0;
-  for await (const chunk of req) { const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); bytes += buf.length; if (bytes > 32 * 1024 * 1024) throw new Error("Request body too large"); chunks.push(buf); }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as T;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > maxBytes) throw new OpenAICCError("Request body too large.", 413, "body_too_large");
+    chunks.push(buffer);
+  }
+  const text = Buffer.concat(chunks).toString("utf8").trim();
+  if (!text) return {} as T;
+  try { return JSON.parse(text) as T; } catch { throw new OpenAICCError("Request body is not valid JSON.", 400, "invalid_json"); }
 }
 function send(res: ServerResponse, status: number, body: string): void { res.statusCode = status; res.end(body); }
 function json(res: ServerResponse, status: number, body: unknown): void { res.statusCode = status; res.setHeader("Content-Type", "application/json; charset=utf-8"); res.end(JSON.stringify(body)); }
 function html(res: ServerResponse, body: string): void { res.statusCode = 200; res.setHeader("Content-Type", "text/html; charset=utf-8"); res.end(body); }
-function setCors(res: ServerResponse): void { res.setHeader("Access-Control-Allow-Origin", "http://127.0.0.1"); res.setHeader("Access-Control-Allow-Headers", "authorization,content-type,x-api-key,anthropic-version,anthropic-beta"); res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS"); }
-
-function adminHtml(): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenAI-CC</title><style>
-body{font:14px system-ui;margin:0;background:#0e1116;color:#e8edf3}.wrap{max-width:1150px;margin:36px auto;padding:0 18px}h1{font-size:24px}.note,.add{background:#171c24;padding:14px;border-radius:10px;margin:16px 0}.grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:7px 0}.card{display:grid;grid-template-columns:1fr auto;gap:12px;background:#171c24;margin:10px 0;padding:14px;border-radius:10px}.muted{color:#9aa6b2}.ready{color:#73d69c}.exhausted{color:#ff8f8f}button{background:#2b66d9;color:white;border:0;border-radius:7px;padding:8px 12px;cursor:pointer}button.secondary{background:#39414d}input,select{background:#0e1116;color:#e8edf3;border:1px solid #39414d;border-radius:7px;padding:9px;margin:4px 6px 4px 0;min-width:0}.toast{position:fixed;right:20px;bottom:20px;background:#242b36;padding:14px;border-radius:10px;max-width:420px;display:none}@media(max-width:900px){.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><h1>OpenAI-CC</h1><div class="note">Claude Code uses <b>Default, Fable, Opus, Sonnet, Haiku</b>. Claude Desktop exposes only Claude-safe aliases for Fable, Opus, Sonnet and Haiku and routes them to the same configured upstream slots.</div><div class="add"><b>Model config</b><div class="muted">Choose a provider, exact upstream model id, output ceiling, and optionally pin a credential id. Leave credential blank to use the first ready credential for that provider.</div><div id="model-config"></div><button onclick="saveModels()">Save model config</button><div id="model-status" class="muted"></div></div><div class="add"><b>Add teammate with ChatGPT OAuth</b><form onsubmit="startOAuth(event)"><input id="oauth-id" required pattern="[A-Za-z0-9._-]{1,64}" placeholder="credential id"><input id="oauth-name" required placeholder="display name"><button type="submit">Add ChatGPT account</button></form><div id="oauth-status" class="muted"></div></div><div class="add"><b>Add API key</b><form onsubmit="addKey(event)"><select id="key-provider"><option value="zen">OpenCode Zen</option><option value="nvidia">NVIDIA NIM</option><option value="google">Google AI Studio</option></select><input id="key-id" required pattern="[A-Za-z0-9._-]{1,64}" placeholder="credential id"><input id="key-name" required placeholder="display name"><input id="key-model" required placeholder="provider model id"><input id="key-value" required type="password" autocomplete="off" placeholder="API key"><button type="submit">Add API key</button></form><div id="key-status" class="muted"></div></div><div id="status" class="muted"></div><div id="accounts"></div></div><div id="toast" class="toast"></div><script>
-const slots=['default','fable','opus','sonnet','haiku'];let currentState=null;
-async function load(){const s=await fetch('/admin/state').then(r=>r.json());currentState=s;render(s)}
-function render(s){document.querySelector('#status').textContent='Credentials: '+s.accounts.length+' · Context: '+s.modelConfig.contextWindow.toLocaleString();document.querySelector('#accounts').innerHTML=s.accounts.map(a=>'<div class="card"><div><b>'+esc(a.name)+'</b> <span class="muted">('+esc(a.id)+')</span><div>'+esc(providerName(a.provider||'chatgpt'))+(a.model?' · '+esc(a.model):'')+(a.email?' · '+esc(a.email):'')+'</div><div class="'+a.status+'">'+a.status+'</div><div class="muted">'+esc(a.lastError||'')+'</div></div><div>'+(a.status==='ready'?'<button onclick="post(\'/admin/accounts/'+encodeURIComponent(a.id)+'/activate\')">Activate</button>':'<button class="secondary" onclick="post(\'/admin/accounts/'+encodeURIComponent(a.id)+'/reset\')">Reset</button>')+'</div></div>').join('');renderModels(s)}
-function renderModels(s){const c=s.modelConfig;document.querySelector('#model-config').innerHTML='<div class="grid"><label>Context window<input id="context-window" type="number" min="200000" max="1000000" value="'+c.contextWindow+'"></label></div>'+slots.map(slot=>{const r=c.routes[slot];return '<div class="grid"><b>'+slot[0].toUpperCase()+slot.slice(1)+'</b><select id="p-'+slot+'">'+['chatgpt','zen','nvidia','google'].map(p=>'<option value="'+p+'" '+(p===r.provider?'selected':'')+'>'+providerName(p)+'</option>').join('')+'</select><input id="m-'+slot+'" value="'+esc(r.model)+'" placeholder="upstream model id"><input id="o-'+slot+'" type="number" min="1" max="1000000" value="'+Number(r.maxOutputTokens||64000)+'" placeholder="max output"><input id="c-'+slot+'" value="'+esc(r.credentialId||'')+'" placeholder="credential id (optional)"></div>'}).join('')}
-async function saveModels(){const routes={};for(const slot of slots)routes[slot]={provider:document.querySelector('#p-'+slot).value,model:document.querySelector('#m-'+slot).value.trim(),maxOutputTokens:Number(document.querySelector('#o-'+slot).value),credentialId:document.querySelector('#c-'+slot).value.trim()||undefined};const r=await fetch('/admin/model-config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({contextWindow:Number(document.querySelector('#context-window').value),routes})});document.querySelector('#model-status').textContent=r.ok?'Saved. Model discovery updates immediately; restart the proxy to refresh Claude Desktop profile labels.':'Save failed';await load()}
-function providerName(p){return p==='chatgpt'?'ChatGPT OAuth':p==='zen'?'OpenCode Zen':p==='nvidia'?'NVIDIA NIM':'Google AI Studio'}
-async function post(url){await fetch(url,{method:'POST'});load()}
-async function addKey(e){e.preventDefault();const provider=document.querySelector('#key-provider').value,id=document.querySelector('#key-id').value.trim(),name=document.querySelector('#key-name').value.trim(),model=document.querySelector('#key-model').value.trim(),apiKey=document.querySelector('#key-value').value.trim(),status=document.querySelector('#key-status');const r=await fetch('/admin/keys',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({provider,id,name,model,apiKey})});const d=await r.json().catch(()=>({}));status.textContent=r.ok?'Added '+name+'.':(d.error?.message||'Could not add key');if(r.ok)document.querySelector('#key-value').value='';await load()}
-async function startOAuth(e){e.preventDefault();const id=document.querySelector('#oauth-id').value.trim(),name=document.querySelector('#oauth-name').value.trim(),status=document.querySelector('#oauth-status');const r=await fetch('/admin/accounts',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id,name})});const d=await r.json().catch(()=>({}));if(!r.ok){status.textContent=d.error?.message||'Could not start OAuth';return}status.textContent='OAuth started. Complete sign-in in the browser.';watchOAuth(id)}
-async function watchOAuth(id){const status=document.querySelector('#oauth-status');const r=await fetch('/admin/oauth/'+encodeURIComponent(id));const d=await r.json().catch(()=>({}));if(d.status==='complete'){status.textContent='Added '+(d.email||d.name)+'.';await load();return}if(d.status==='error'){status.textContent='OAuth failed: '+(d.error||'unknown error');return}setTimeout(()=>watchOAuth(id),1000)}
-function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-const es=new EventSource('/admin/events');['changed','activated','rate_limit','state'].forEach(t=>es.addEventListener(t,load));load();</script></body></html>`;
+function setGatewayCors(req: IncomingMessage, res: ServerResponse): void {
+  const origin = req.headers.origin;
+  if (origin === "http://127.0.0.1" || origin === "http://localhost") res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Access-Control-Allow-Headers", "authorization,content-type,x-api-key,anthropic-version,anthropic-beta");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+}
+function setAdminSecurityHeaders(res: ServerResponse, nonce: string): void {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Content-Security-Policy", `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`);
+}
+function safeUrl(req: IncomingMessage): URL {
+  const host = req.headers.host ?? "127.0.0.1";
+  try { return new URL(req.url ?? "/", `http://${host}`); } catch { return new URL(req.url ?? "/", "http://127.0.0.1"); }
+}
+function credentialIdFromPath(pathname: string): string {
+  const id = decodeURIComponent(pathname.split("/")[3]);
+  validateId(id);
+  return id;
+}
+function isMutation(method: string | undefined): boolean { return method === "POST" || method === "PATCH" || method === "PUT" || method === "DELETE"; }
+function hostName(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try { return new URL(`http://${value}`).hostname; } catch { return undefined; }
+}
+function normalizeAddress(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  return value.startsWith("::ffff:") ? value.slice(7) : value;
+}
+function isLoopbackAddress(value: string): boolean { return value === "127.0.0.1" || value === "::1" || value.startsWith("127."); }
+function isLoopbackHost(value: string): boolean {
+  const normalized = String(value).replace(/^\[|\]$/g, "").toLowerCase();
+  return normalized === "localhost" || normalized === "::1" || normalized === "127.0.0.1" || normalized.startsWith("127.");
 }

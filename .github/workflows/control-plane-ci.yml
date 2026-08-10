@@ -1,0 +1,43 @@
+name: Auth Admin Control Plane CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Verify bundled official Codex CLI
+        shell: bash
+        if: runner.os != 'Windows'
+        run: |
+          node node_modules/@openai/codex/bin/codex.js --version
+          node node_modules/@openai/codex/bin/codex.js login --help
+      - name: Verify bundled official Codex CLI on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          node node_modules/@openai/codex/bin/codex.js --version
+          node node_modules/@openai/codex/bin/codex.js login --help
+      - name: Run full test suite
+        run: npm test
+      - name: Parse Windows installer
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          [void][scriptblock]::Create((Get-Content setup.ps1 -Raw))
