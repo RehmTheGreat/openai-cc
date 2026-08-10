@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   apply:
+    # This workflow is intentionally one-shot and deletes itself in its result commit.
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
