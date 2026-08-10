@@ -132,8 +132,8 @@ jobs:
           $testPath = "tests/claude-desktop.test.ts"
           $tests = Get-Content $testPath -Raw
           $tests = $tests.Replace(
-            'assert.match(setup, /Install VS Code and the Claude Code extension\\?/);',
-            'assert.match(setup, /Install\\/configure VS Code \\(Claude Code extension is manual\\)\\?/);'
+            'Install VS Code and the Claude Code extension',
+            'Install\/configure VS Code \(Claude Code extension is manual\)'
           )
 
           $oldCliTest = @'
