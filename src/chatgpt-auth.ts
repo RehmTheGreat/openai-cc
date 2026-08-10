@@ -25,6 +25,8 @@ export interface AuthJob {
   startedAt: string;
   finishedAt?: string;
   email?: string;
+  verificationUrl?: string;
+  userCode?: string;
   safeMessage?: string;
   errorCode?: string;
   safeError?: string;
@@ -57,6 +59,7 @@ interface InternalJob extends AuthJob {
   codexHome: string;
   settled: boolean;
   output: string;
+  devicePromptBuffer: string;
 }
 
 type Listener = (job: AuthJob) => void;
@@ -108,6 +111,7 @@ export class OfficialCodexAuthRunner implements ChatGptAuthRunner {
       codexHome,
       settled: false,
       output: "",
+      devicePromptBuffer: "",
     };
     this.jobs.set(jobId, job);
     this.emit(job);
@@ -136,13 +140,22 @@ export class OfficialCodexAuthRunner implements ChatGptAuthRunner {
         : "Complete the device sign-in shown by the official Codex flow.");
 
     const capture = (chunk: Buffer | string): void => {
+      if (job.settled) return;
       const text = String(chunk);
-      job.output = (job.output + "\n" + redactSensitive(text)).slice(-MAX_CAPTURE);
-      if (/device|enter.*code|verification/i.test(text) && job.loginMode === "device") {
-        this.setStatus(job, "awaiting_user", "Complete the device sign-in in your browser.");
-      } else if (/browser|sign.?in|login/i.test(text) && job.loginMode === "browser") {
+      if (job.loginMode === "device") {
+        job.devicePromptBuffer = (job.devicePromptBuffer + "\n" + text).slice(-4096);
+        const prompt = extractDevicePrompt(job.devicePromptBuffer);
+        if (prompt) {
+          job.verificationUrl = prompt.verificationUrl;
+          job.userCode = prompt.userCode;
+          this.setStatus(job, "awaiting_user", "Open the official Codex device sign-in page and enter the one-time code.");
+        } else if (/device|enter.*code|verification/i.test(text)) {
+          this.setStatus(job, "awaiting_user", "Waiting for the official Codex device sign-in instructions…");
+        }
+      } else if (/browser|sign.?in|login/i.test(text)) {
         this.setStatus(job, "awaiting_browser", "Browser opened. Finish signing in with ChatGPT.");
       }
+      job.output = (job.output + "\n" + redactSensitive(text)).slice(-MAX_CAPTURE);
     };
     child.stdout?.on("data", capture);
     child.stderr?.on("data", capture);
@@ -173,6 +186,7 @@ export class OfficialCodexAuthRunner implements ChatGptAuthRunner {
     job.settled = true;
     if (job.timer) clearTimeout(job.timer);
     await terminateChild(job.child);
+    this.clearTransientAuth(job);
     job.status = "cancelled";
     job.safeMessage = "Authentication cancelled.";
     job.finishedAt = new Date().toISOString();
@@ -213,6 +227,7 @@ export class OfficialCodexAuthRunner implements ChatGptAuthRunner {
         throw error;
       }
       job.settled = true;
+      this.clearTransientAuth(job);
       job.status = "complete";
       job.email = email ?? await readAuthEmail(targetAuth);
       job.safeMessage = job.email ? `Signed in as ${job.email}.` : "ChatGPT authentication completed.";
@@ -228,6 +243,7 @@ export class OfficialCodexAuthRunner implements ChatGptAuthRunner {
     if (job.settled) return;
     job.settled = true;
     await terminateChild(job.child);
+    this.clearTransientAuth(job);
     job.status = "error";
     job.errorCode = "auth_timeout";
     job.safeError = "ChatGPT sign-in timed out before completion.";
@@ -243,6 +259,7 @@ export class OfficialCodexAuthRunner implements ChatGptAuthRunner {
     if (job.timer) clearTimeout(job.timer);
     await terminateChild(job.child);
     const message = error instanceof Error ? error.message : String(error);
+    this.clearTransientAuth(job);
     job.status = "error";
     job.errorCode = code;
     job.safeError = this.redactError(message);
@@ -272,11 +289,18 @@ export class OfficialCodexAuthRunner implements ChatGptAuthRunner {
       .slice(0, 1200);
   }
 
+  private clearTransientAuth(job: InternalJob): void {
+    job.devicePromptBuffer = "";
+    delete job.verificationUrl;
+    delete job.userCode;
+  }
+
   private async cleanup(job: InternalJob): Promise<void> {
     try { await rm(job.tempRoot, { recursive: true, force: true }); } catch { /* best effort */ }
     delete job.child;
     delete job.timer;
     job.output = "";
+    this.clearTransientAuth(job);
   }
 
   private async resolveCodexEntrypoint(): Promise<string> {
@@ -357,6 +381,8 @@ function cloneJob(job: InternalJob): AuthJob {
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     email: job.email,
+    verificationUrl: job.verificationUrl,
+    userCode: job.userCode,
     safeMessage: job.safeMessage,
     errorCode: job.errorCode,
     safeError: job.safeError,
@@ -367,10 +393,19 @@ function isTerminal(status: AuthJobStatus): boolean {
   return status === "complete" || status === "cancelled" || status === "error";
 }
 
+function extractDevicePrompt(value: string): { verificationUrl: string; userCode: string } | undefined {
+  const clean = value.replace(/\x1b\[[0-9;]*m/g, "");
+  const url = clean.match(/https:\/\/auth\.openai\.com\/codex\/device\b/i)?.[0];
+  const code = clean.match(/Enter this one-time code[\s\S]{0,180}?\n\s*([A-Z0-9]{2,}(?:-[A-Z0-9]{2,})+|[A-Z0-9]{6,16})\b/i)?.[1];
+  if (!url || !code) return undefined;
+  return { verificationUrl: url, userCode: code.toUpperCase() };
+}
+
 function redactSensitive(value: string): string {
   return String(value ?? "")
     .replace(/https?:\/\/\S+/gi, "[redacted-auth-url]")
     .replace(/\b(?:access_token|refresh_token|id_token|code|code_verifier|state|api_key)\b\s*[:=]\s*[^\s,]+/gi, "$1=[redacted]")
+    .replace(/\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/g, "[redacted-device-code]")
     .replace(/\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted-jwt]");
 }
 

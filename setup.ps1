@@ -442,8 +442,8 @@ function Build-AndConfigureGateway([bool]$DesktopRequested) {
   Write-Step "OpenAI-CC"
   Push-Location $script:GatewayDirectory
   try {
-    $exitCode = Invoke-NativeConsole (Get-Command npm).Source @("install", "--no-audit", "--no-fund")
-    if ($exitCode -ne 0) { throw "npm install failed." }
+    $exitCode = Invoke-NativeConsole (Get-Command npm).Source @("ci", "--no-audit", "--no-fund")
+    if ($exitCode -ne 0) { throw "npm ci failed against the committed package-lock.json." }
     $exitCode = Invoke-NativeConsole (Get-Command npm).Source @("run", "build")
     if ($exitCode -ne 0) { throw "OpenAI-CC build failed." }
 

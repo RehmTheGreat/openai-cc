@@ -27,9 +27,14 @@ try {
   });
   currentJobId = job.jobId;
   let last = "";
+  let lastDevice = "";
   while (!terminal(job)) {
     const message = `${job.status}: ${job.safeMessage ?? ""}`.trim();
     if (message !== last) { console.log(message); last = message; }
+    if (job.verificationUrl && job.userCode) {
+      const device = `Open: ${job.verificationUrl}\nOne-time code: ${job.userCode}`;
+      if (device !== lastDevice) { console.log(device); lastDevice = device; }
+    }
     await new Promise((resolve) => setTimeout(resolve, 500));
     job = runner.status(job.jobId);
   }
