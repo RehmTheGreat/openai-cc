@@ -126,6 +126,13 @@ export class ModelConfigStore extends EventEmitter {
     return this.credentialForRequestedModel(model, attempted);
   }
 
+  async markAuthErrorAndNext(model: string, account: AccountRecord, message: string, attempted = new Set<string>()): Promise<AccountRecord | undefined> {
+    await this.accounts.markAuthError(account.id, message);
+    const route = this.routeForRequestedModel(model);
+    if (route.credentialId) return undefined;
+    return this.credentialForRequestedModel(model, attempted);
+  }
+
   pinnedSlotsForCredential(id: string): ModelSlot[] {
     return MODEL_SLOTS.filter((slot) => this.state.routes[slot].credentialId === id);
   }

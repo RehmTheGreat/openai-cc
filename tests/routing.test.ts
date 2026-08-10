@@ -89,3 +89,21 @@ test("stream 429 after output does not replay partial response and next request 
     assert.deepEqual(calls, ["n2"]);
   } finally { await new Promise<void>((resolve) => f.server.close(() => resolve())); }
 });
+
+
+test("pre-output 401 marks AUTH ERROR and retries the next same-provider credential", async () => {
+  const calls: string[] = [];
+  const f = await routeFixture((id) => ({ chat: { completions: { create: async () => {
+    calls.push(id);
+    if (id === "n1") throw Object.assign(new Error("401 invalid credential access_token=do-not-expose"), { status: 401 });
+    return { id: "ok", choices: [{ message: { content: "authenticated fallback" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+  } } } }));
+  try {
+    const response = await fetch(`${f.base}/v1/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(requestBody(false)) });
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls, ["n1", "n2"]);
+    assert.equal(f.accounts.publicGet("n1")?.status, "auth_error");
+    assert.equal(f.accounts.publicGet("n1")?.lastError?.includes("do-not-expose"), false);
+    assert.equal((await response.json() as any).content[0].text, "authenticated fallback");
+  } finally { await new Promise<void>((resolve) => f.server.close(() => resolve())); }
+});

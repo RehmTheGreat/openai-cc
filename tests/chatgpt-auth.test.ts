@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -144,8 +146,12 @@ test("re-auth rolls back a promoted auth file when account metadata persistence 
   const oldContents = JSON.stringify({ auth_mode: "chatgpt", email: "old@example.com", tokens: { access_token: "old-token" } });
   await writeFile(oldAuth, oldContents, "utf8");
   await store.createChatGpt({ id: "main", name: "Main", authFile: oldAuth, email: "old@example.com" });
-  const originalReplace = store.replaceChatGptAuth.bind(store);
-  (store as any).replaceChatGptAuth = async () => { throw new Error("simulated metadata persistence failure"); };
+  const originalPersist = (store as any).persist.bind(store);
+  let failPersist = true;
+  (store as any).persist = async () => {
+    if (failPersist) { failPersist = false; throw new Error("simulated metadata persistence failure"); }
+    return originalPersist();
+  };
   const entrypoint = await fakeCodex(root);
   const previous = process.env.FAKE_CODEX_BEHAVIOR;
   process.env.FAKE_CODEX_BEHAVIOR = "success";
@@ -154,8 +160,31 @@ test("re-auth rolls back a promoted auth file when account metadata persistence 
   const done = await waitTerminal(runner, started);
   assert.equal(done.status, "error");
   assert.equal(await readFile(oldAuth, "utf8"), oldContents);
-  (store as any).replaceChatGptAuth = originalReplace;
+  (store as any).persist = originalPersist;
   if (previous === undefined) delete process.env.FAKE_CODEX_BEHAVIOR; else process.env.FAKE_CODEX_BEHAVIOR = previous;
   await runner.shutdown();
   store.close();
+});
+
+
+test("bundled official Codex accepts isolated file-credential-store login status", async (t) => {
+  let packageJson: string;
+  try {
+    const require = createRequire(import.meta.url);
+    packageJson = require.resolve("@openai/codex/package.json");
+  } catch {
+    t.skip("bundled Codex package is not installed in the offline local harness");
+    return;
+  }
+  const codex = path.join(path.dirname(packageJson), "bin", "codex.js");
+  const home = await mkdtemp(path.join(os.tmpdir(), "openai-cc-real-codex-status-"));
+  const result = spawnSync(process.execPath, [codex, "-c", 'cli_auth_credentials_store="file"', "login", "status"], {
+    env: { ...process.env, CODEX_HOME: home },
+    encoding: "utf8",
+    timeout: 15_000,
+  });
+  const output = `${result.stdout ?? ""} ${result.stderr ?? ""}`;
+  assert.equal(result.status, 1);
+  assert.doesNotMatch(output, /unknown.*cli_auth_credentials_store|invalid.*config/i);
+  assert.match(output, /not logged in|login/i);
 });

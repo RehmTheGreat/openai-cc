@@ -239,6 +239,23 @@ export class Dispatcher {
         const response = await client.chat.completions.create({ ...upstream, stream: false } as any);
         return void json(res, 200, chatCompletionToAnthropic(response, body.model));
       } catch (error: any) {
+        if (isAuthenticationError(error)) {
+          const upstreamMessage = error?.message ?? "Upstream authentication failed.";
+          if (res.headersSent) {
+            await this.models.markAuthErrorAndNext(body.model, account, upstreamMessage, attempted);
+            if (!res.writableEnded) {
+              res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "authentication_error", message: "The configured credential failed authentication after streaming began; no partial response was replayed. Re-authenticate or replace the credential. The next request may use another eligible credential." } })}\n\n`);
+              res.end();
+            }
+            return;
+          }
+          account = await this.models.markAuthErrorAndNext(body.model, account, upstreamMessage, attempted);
+          if (!account) {
+            const message = route.credentialId ? "The pinned credential failed authentication; pinned routes do not fall back." : `All ready ${route.provider} credentials for this model slot failed authentication or are unavailable.`;
+            return void json(res, 401, { error: { type: "authentication_error", message } });
+          }
+          continue;
+        }
         if (!isRateLimit(error)) throw error;
         const cooldown = rateLimitCooldownMs(error, account);
         if (res.headersSent) {
@@ -344,8 +361,7 @@ export class Dispatcher {
       json(res, error.status, { error: { code: error.code, message: error.message, ...(error.details === undefined ? {} : { details: error.details }) } });
       return;
     }
-    const message = error instanceof Error ? error.message : String(error);
-    json(res, 500, { error: { code: "internal_error", message: sanitizeServerError(message) } });
+    json(res, 500, { error: { code: "internal_error", message: "Internal server error." } });
   }
 }
 
@@ -363,6 +379,7 @@ function providerBaseUrl(provider: ApiProvider): string {
 }
 function usesResponsesApi(account: AccountRecord): boolean { return account.provider === "chatgpt" || account.provider === "zen"; }
 function isApiProvider(value: string): value is ApiProviderKind { return value === "zen" || value === "nvidia" || value === "google"; }
+function isAuthenticationError(error: any): boolean { return error?.status === 401 || error?.statusCode === 401; }
 function isRateLimit(error: any): boolean { return error?.status === 429 || error?.statusCode === 429 || /\b429\b|rate.?limit|usage.?limit|quota/i.test(error?.message ?? ""); }
 function rateLimitCooldownMs(error: any, account: AccountRecord): number | undefined {
   if (account.provider === "chatgpt") return undefined;
@@ -436,10 +453,4 @@ function isLoopbackAddress(value: string): boolean { return value === "127.0.0.1
 function isLoopbackHost(value: string): boolean {
   const normalized = String(value).replace(/^\[|\]$/g, "").toLowerCase();
   return normalized === "localhost" || normalized === "::1" || normalized === "127.0.0.1" || normalized.startsWith("127.");
-}
-function sanitizeServerError(value: string): string {
-  return String(value ?? "")
-    .replace(/https?:\/\/\S+/gi, "[redacted-url]")
-    .replace(/\b(?:access_token|refresh_token|id_token|code|code_verifier|state|api_key)\b\s*[:=]\s*[^\s,]+/gi, "$1=[redacted]")
-    .slice(0, 1200);
 }

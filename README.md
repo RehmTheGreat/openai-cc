@@ -98,6 +98,9 @@ Statuses are:
 - `READY`
 - `EXHAUSTED`
 - `DISABLED`
+- `AUTH ERROR`
+
+A `401` from an upstream credential marks it `AUTH ERROR`; Auto routing may continue with the next ready credential from the same provider, while pinned routes remain unavailable until the exact credential is re-authenticated or its API key is replaced.
 
 An exhausted credential with a known future reset displays the reset time/countdown instead of a misleading Reset button. A disabled credential remains disabled when an old rate-limit timer expires.
 
@@ -253,6 +256,7 @@ The suite covers, among other things:
 - public credential secrecy;
 - provider preference/rotation and route pin validation;
 - pre-output and post-output rate-limit behavior;
+- upstream authentication-error state/failover and secret redaction;
 - official-Codex auth runner success/failure/cancel/concurrency using fake CLI processes;
 - atomic failed re-auth preservation;
 - Admin HTTP lifecycle/status codes;

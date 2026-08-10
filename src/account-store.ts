@@ -3,7 +3,7 @@ import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import path from "node:path";
 import { conflict, notFound, OpenAICCError } from "./errors.js";
 
-export type AccountStatus = "ready" | "exhausted" | "disabled";
+export type AccountStatus = "ready" | "exhausted" | "auth_error" | "disabled";
 export type ProviderKind = "chatgpt" | "zen" | "nvidia" | "google";
 export type ApiProviderKind = Exclude<ProviderKind, "chatgpt">;
 
@@ -187,9 +187,15 @@ export class AccountStore extends EventEmitter {
       createdAt: now,
       updatedAt: now,
     };
+    const previousState = structuredClone(this.state);
     this.state.accounts.push(record);
     if (!this.state.preferredCredentialByProvider.chatgpt) this.state.preferredCredentialByProvider.chatgpt = record.id;
-    await this.persist();
+    try {
+      await this.persist();
+    } catch (error) {
+      this.state = previousState;
+      throw error;
+    }
     this.emitEvent({ type: "credentials_changed", credential: publicCredential(record) });
     return { ...record };
   }
@@ -199,15 +205,24 @@ export class AccountStore extends EventEmitter {
     if (account.provider !== "chatgpt") throw conflict(`Credential ${id} is ${account.provider}, not ChatGPT.`, "provider_conflict");
     const authFile = path.resolve(input.authFile);
     assertManagedAuthPath(this, authFile);
+    const previousState = structuredClone(this.state);
     account.authFile = authFile;
     account.email = input.email ?? await readAuthEmail(authFile) ?? account.email;
     if (input.name !== undefined) account.name = cleanName(input.name);
-    this.clearUsageWindow(account);
     account.status = "ready";
+    delete account.firstRequestAt;
+    delete account.limitResetsAt;
+    delete account.exhaustedAt;
+    delete account.lastError;
     delete account.disabledAt;
     account.updatedAt = new Date().toISOString();
-    await this.persist();
-    this.scheduleReset(account);
+    try {
+      await this.persist();
+    } catch (error) {
+      this.state = previousState;
+      throw error;
+    }
+    this.clearResetTimer(id);
     this.emitEvent({ type: "credentials_changed", credential: publicCredential(account) });
     return { ...account };
   }
@@ -231,9 +246,15 @@ export class AccountStore extends EventEmitter {
       createdAt: now,
       updatedAt: now,
     };
+    const previousState = structuredClone(this.state);
     this.state.accounts.push(record);
     if (!this.state.preferredCredentialByProvider[input.provider]) this.state.preferredCredentialByProvider[input.provider] = record.id;
-    await this.persist();
+    try {
+      await this.persist();
+    } catch (error) {
+      this.state = previousState;
+      throw error;
+    }
     this.emitEvent({ type: "credentials_changed", credential: publicCredential(record) });
     return { ...record };
   }
@@ -243,6 +264,7 @@ export class AccountStore extends EventEmitter {
     if (!isApiProvider(account.provider)) throw conflict(`Credential ${id} is ChatGPT OAuth, not an API-key credential.`, "provider_conflict");
     const apiKey = String(input.apiKey ?? "").trim();
     if (!apiKey) throw new OpenAICCError("API key is required.", 400, "api_key_required");
+    const previousState = structuredClone(this.state);
     account.apiKey = apiKey;
     if (input.model !== undefined) {
       const model = String(input.model).trim();
@@ -250,11 +272,20 @@ export class AccountStore extends EventEmitter {
       account.model = model;
     }
     if (input.name !== undefined) account.name = cleanName(input.name);
-    this.clearUsageWindow(account);
     account.status = "ready";
+    delete account.firstRequestAt;
+    delete account.limitResetsAt;
+    delete account.exhaustedAt;
+    delete account.lastError;
     delete account.disabledAt;
     account.updatedAt = new Date().toISOString();
-    await this.persist();
+    try {
+      await this.persist();
+    } catch (error) {
+      this.state = previousState;
+      throw error;
+    }
+    this.clearResetTimer(id);
     this.emitEvent({ type: "credentials_changed", credential: publicCredential(account) });
     return { ...account };
   }
@@ -270,7 +301,7 @@ export class AccountStore extends EventEmitter {
 
   async prefer(id: string): Promise<AccountRecord> {
     const account = this.requireAccount(id);
-    if (account.status === "disabled") throw conflict(`Credential ${id} is disabled and cannot be preferred.`, "credential_disabled");
+    if (account.status !== "ready") throw conflict(`Credential ${id} is ${account.status} and cannot be preferred until it is ready.`, "credential_unavailable");
     this.state.preferredCredentialByProvider[account.provider] = id;
     account.updatedAt = new Date().toISOString();
     await this.persist();
@@ -293,8 +324,8 @@ export class AccountStore extends EventEmitter {
     const account = this.requireAccount(id);
     if (account.status !== "disabled") return { ...account };
     const futureReset = account.limitResetsAt && Date.parse(account.limitResetsAt) > Date.now();
-    account.status = futureReset ? "exhausted" : "ready";
-    if (!futureReset) this.clearUsageWindow(account);
+    account.status = futureReset ? "exhausted" : account.lastError ? "auth_error" : "ready";
+    if (!futureReset && account.status === "ready") this.clearUsageWindow(account);
     delete account.disabledAt;
     account.updatedAt = new Date().toISOString();
     await this.persist();
@@ -355,6 +386,27 @@ export class AccountStore extends EventEmitter {
     account.updatedAt = now.toISOString();
     await this.persist();
     this.scheduleReset(account);
+    this.emitEvent({ type: "credential_status_changed", credential: publicCredential(account) });
+    return { ...account };
+  }
+
+  async markAuthError(id: string, message: string): Promise<AccountRecord> {
+    const account = this.requireAccount(id);
+    if (account.status === "disabled") return { ...account };
+    const previousState = structuredClone(this.state);
+    account.status = "auth_error";
+    delete account.firstRequestAt;
+    delete account.limitResetsAt;
+    delete account.exhaustedAt;
+    account.lastError = sanitizeError(message || "Authentication failed.");
+    account.updatedAt = new Date().toISOString();
+    try {
+      await this.persist();
+    } catch (error) {
+      this.state = previousState;
+      throw error;
+    }
+    this.clearResetTimer(id);
     this.emitEvent({ type: "credential_status_changed", credential: publicCredential(account) });
     return { ...account };
   }
@@ -429,9 +481,13 @@ export class AccountStore extends EventEmitter {
     delete account.limitResetsAt;
     delete account.exhaustedAt;
     delete account.lastError;
-    const timer = this.resetTimers.get(account.id);
+    this.clearResetTimer(account.id);
+  }
+
+  private clearResetTimer(id: string): void {
+    const timer = this.resetTimers.get(id);
     if (timer) clearTimeout(timer);
-    this.resetTimers.delete(account.id);
+    this.resetTimers.delete(id);
   }
 
   private scheduleReset(account: AccountRecord): void {
@@ -546,7 +602,11 @@ function cleanName(value: string): string {
 }
 
 function sanitizeError(value: string): string {
-  return String(value ?? "").replace(/https?:\/\/\S+/gi, "[redacted-url]").slice(0, 1000);
+  return String(value ?? "")
+    .replace(/https?:\/\/\S+/gi, "[redacted-url]")
+    .replace(/\b(?:access_token|refresh_token|id_token|code|code_verifier|state|api_key|authorization)\b\s*[:=]\s*[^\s,]+/gi, "$1=[redacted]")
+    .replace(/\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted-jwt]")
+    .slice(0, 1000);
 }
 
 function findEmail(value: unknown, depth = 0): string | undefined {

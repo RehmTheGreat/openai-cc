@@ -245,7 +245,7 @@ export class OfficialCodexAuthRunner implements ChatGptAuthRunner {
     const message = error instanceof Error ? error.message : String(error);
     job.status = "error";
     job.errorCode = code;
-    job.safeError = redactSensitive(message).slice(0, 1200);
+    job.safeError = this.redactError(message);
     job.safeMessage = "Authentication failed. Existing credentials, if any, were left unchanged.";
     job.finishedAt = new Date().toISOString();
     await this.cleanup(job);
@@ -262,6 +262,14 @@ export class OfficialCodexAuthRunner implements ChatGptAuthRunner {
   private emit(job: InternalJob): void {
     const safe = cloneJob(job);
     for (const listener of this.listeners) listener(safe);
+  }
+
+  private redactError(message: string): string {
+    const managedRoot = this.store.dataDir;
+    return redactSensitive(message)
+      .split(managedRoot).join("[managed-data]")
+      .split(managedRoot.replace(/\\/g, "/")).join("[managed-data]")
+      .slice(0, 1200);
   }
 
   private async cleanup(job: InternalJob): Promise<void> {

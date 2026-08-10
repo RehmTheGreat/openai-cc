@@ -108,3 +108,37 @@ test("deleting migrated external auth paths never recursively deletes outside ma
   assert.match(await readFile(auth, "utf8"), /dummy/);
   store.close();
 });
+
+
+test("authentication errors are sticky, secret-safe, and excluded from routing", async () => {
+  const { store } = await tempStore();
+  await store.createApiKey({ id: "g1", name: "Google 1", provider: "google", apiKey: "a", model: "m" });
+  await store.createApiKey({ id: "g2", name: "Google 2", provider: "google", apiKey: "b", model: "m" });
+  const jwt = "eyJaaaaaaaaaaaaaaaaaaaa.eyJbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccc";
+  await store.markAuthError("g1", `401 access_token=very-secret https://auth.example.invalid ${jwt}`);
+  const failed = store.publicGet("g1");
+  assert.equal(failed?.status, "auth_error");
+  assert.equal(failed?.lastError?.includes("very-secret"), false);
+  assert.equal(failed?.lastError?.includes("auth.example.invalid"), false);
+  assert.equal(failed?.lastError?.includes(jwt), false);
+  assert.deepEqual(store.orderedReady("google").map((a) => a.id), ["g2"]);
+  await assert.rejects(() => store.prefer("g1"), (error: unknown) => error instanceof OpenAICCError && error.code === "credential_unavailable");
+  await store.disable("g1");
+  await store.enable("g1");
+  assert.equal(store.publicGet("g1")?.status, "auth_error");
+  store.close();
+});
+
+test("failed API-key replacement rolls in-memory state back before returning", async () => {
+  const { store } = await tempStore();
+  await store.createApiKey({ id: "n1", name: "NVIDIA", provider: "nvidia", apiKey: "old-key", model: "old-model" });
+  const originalPersist = (store as any).persist.bind(store);
+  (store as any).persist = async () => { throw new Error("simulated disk failure"); };
+  await assert.rejects(() => store.replaceApiKey("n1", { apiKey: "new-key", model: "new-model" }), /simulated disk failure/);
+  (store as any).persist = originalPersist;
+  const record = store.get("n1");
+  assert.equal(record?.apiKey, "old-key");
+  assert.equal(record?.model, "old-model");
+  assert.equal(record?.status, "ready");
+  store.close();
+});

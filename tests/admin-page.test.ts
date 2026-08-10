@@ -16,5 +16,7 @@ test("Admin frontend keeps secrets out, scopes SSE refreshes, and surfaces API f
   assert.match(source, /state\.accounts\.filter\(a=>a\.provider===provider\)/);
   assert.match(source, /oauth-cancel/);
   assert.match(source, /button\.disabled=true/);
+  assert.match(source, /statusLabel/);
+  assert.match(source, /auth-error/);
   assert.doesNotMatch(source, /onclick=/);
 });
