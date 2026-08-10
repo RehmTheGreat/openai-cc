@@ -100,6 +100,18 @@ test("PowerShell installer requires explicit buffered Y/N choices for optional a
   assert.match(setup, /claudeCode\.disableLoginPrompt/);
 });
 
+test("PowerShell installer isolates Windows PowerShell 5.1 native stderr from Stop semantics", async () => {
+  const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
+
+  assert.match(setup, /function Invoke-NativeConsole/);
+  assert.match(setup, /\$previousErrorActionPreference = \$ErrorActionPreference/);
+  assert.match(setup, /\$ErrorActionPreference = "Continue"/);
+  assert.match(setup, /Invoke-NativeConsole \$gitCommand @\("clone"/);
+  assert.match(setup, /Invoke-NativeConsole \$gitCommand @\("-C", \$target, "pull"/);
+  assert.match(setup, /return Invoke-NativeConsole \$Runner\.Command \$allArgs/);
+  assert.equal((setup.match(/2>&1 \| Out-Host/g) ?? []).length, 1);
+});
+
 test("PowerShell installer configures the shared token-efficiency stack and persistent gateway", async () => {
   const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
 
