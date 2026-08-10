@@ -179,9 +179,9 @@ export class AccountStore extends EventEmitter {
     return { ...account };
   }
 
-  async markRateLimited(id: string, message: string): Promise<void> {
+  async markRateLimited(id: string, message: string, activateNext = false): Promise<AccountRecord | undefined> {
     const account = this.state.accounts.find((a) => a.id === id);
-    if (!account) return;
+    if (!account) return undefined;
     const now = new Date();
     if (!account.firstRequestAt) {
       account.firstRequestAt = now.toISOString();
@@ -192,14 +192,31 @@ export class AccountStore extends EventEmitter {
     account.lastError = message.slice(0, 1000);
     account.updatedAt = now.toISOString();
     if (this.state.activeAccountId === id) this.state.activeAccountId = null;
+
+    const next = activateNext ? this.suggestedNext(id) : undefined;
+    if (next) {
+      this.state.activeAccountId = next.id;
+      const nextRecord = this.state.accounts.find((a) => a.id === next.id);
+      if (nextRecord) nextRecord.updatedAt = now.toISOString();
+    }
+
     await this.persist();
     this.scheduleReset(account);
     this.emit("event", {
       type: "rate_limit",
       account: { ...account },
       activeAccountId: this.state.activeAccountId,
-      suggestedNextAccountId: this.suggestedNext(id)?.id ?? null,
+      suggestedNextAccountId: this.suggestedNext(this.state.activeAccountId ?? id)?.id ?? null,
     } satisfies StoreEvent);
+    if (next) {
+      this.emit("event", {
+        type: "activated",
+        account: this.get(next.id),
+        activeAccountId: next.id,
+        suggestedNextAccountId: this.suggestedNext(next.id)?.id ?? null,
+      } satisfies StoreEvent);
+    }
+    return next ? this.get(next.id) : undefined;
   }
 
   async reset(id: string): Promise<AccountRecord> {
