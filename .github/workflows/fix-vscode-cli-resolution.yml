@@ -1,0 +1,111 @@
+name: Apply VS Code CLI resolution fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/fix-vscode-cli-resolution.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  fix-vscode-cli:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Patch VS Code CLI resolution and regression test
+        shell: pwsh
+        run: |
+          $setupPath = "setup.ps1"
+          $setup = Get-Content $setupPath -Raw
+          $old = @'
+          function Get-VSCodeCommand {
+            $command = Get-Command code -ErrorAction SilentlyContinue
+            if ($command) { return $command.Source }
+            $candidates = @(
+              (Join-Path $env:LOCALAPPDATA "Programs\Microsoft VS Code\bin\code.cmd"),
+              (Join-Path $env:ProgramFiles "Microsoft VS Code\bin\code.cmd")
+            )
+            if (${env:ProgramFiles(x86)}) { $candidates += (Join-Path ${env:ProgramFiles(x86)} "Microsoft VS Code\bin\code.cmd") }
+            foreach ($candidate in $candidates) {
+              if ($candidate -and (Test-Path $candidate)) { return $candidate }
+            }
+            return $null
+          }
+          '@
+          $new = @'
+          function Get-VSCodeCommand {
+            # Use the CLI shim, never Code.exe or a Windows app-execution alias. On some
+            # systems `Get-Command code` resolves to the GUI executable, which launches
+            # Electron and never returns from --list-extensions during unattended setup.
+            $candidates = @(
+              (Join-Path $env:LOCALAPPDATA "Programs\Microsoft VS Code\bin\code.cmd"),
+              (Join-Path $env:ProgramFiles "Microsoft VS Code\bin\code.cmd")
+            )
+            if (${env:ProgramFiles(x86)}) { $candidates += (Join-Path ${env:ProgramFiles(x86)} "Microsoft VS Code\bin\code.cmd") }
+            foreach ($candidate in $candidates) {
+              if ($candidate -and (Test-Path $candidate)) { return $candidate }
+            }
+
+            $command = Get-Command code.cmd -ErrorAction SilentlyContinue
+            if ($command -and $command.Source -and ([IO.Path]::GetFileName($command.Source) -ieq "code.cmd")) {
+              return $command.Source
+            }
+            return $null
+          }
+          '@
+          if (-not $setup.Contains($old)) { throw "Expected Get-VSCodeCommand block was not found." }
+          $setup = $setup.Replace($old, $new)
+          [IO.File]::WriteAllText((Resolve-Path $setupPath), $setup, [Text.UTF8Encoding]::new($false))
+
+          $testPath = "tests/claude-desktop.test.ts"
+          $tests = Get-Content $testPath -Raw
+          $anchor = @'
+          test("PowerShell native runner does not redirect stderr under Windows PowerShell 5.1", async () => {
+          '@
+          $regression = @'
+          test("PowerShell installer resolves the VS Code CLI shim instead of the GUI executable", async () => {
+            const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
+            assert.match(setup, /function Get-VSCodeCommand/);
+            assert.match(setup, /Microsoft VS Code\\bin\\code\.cmd/);
+            assert.match(setup, /Get-Command code\.cmd/);
+            assert.doesNotMatch(setup, /Get-Command code -ErrorAction/);
+          });
+
+          test("PowerShell native runner does not redirect stderr under Windows PowerShell 5.1", async () => {
+          '@
+          if (-not $tests.Contains($anchor)) { throw "Expected native-runner test anchor was not found." }
+          $tests = $tests.Replace($anchor, $regression)
+          [IO.File]::WriteAllText((Resolve-Path $testPath), $tests, [Text.UTF8Encoding]::new($false))
+
+      - name: Verify Windows PowerShell selects code.cmd
+        shell: powershell
+        run: |
+          $setup = Get-Content setup.ps1 -Raw
+          $match = [regex]::Match($setup, '(?ms)^function Get-VSCodeCommand \{.*?^\}')
+          if (-not $match.Success) { throw "Could not extract Get-VSCodeCommand from setup.ps1." }
+          Invoke-Expression $match.Value
+          $resolved = Get-VSCodeCommand
+          if ($resolved -and ([IO.Path]::GetFileName($resolved) -ine 'code.cmd')) {
+            throw "Get-VSCodeCommand returned non-CLI executable: $resolved"
+          }
+
+      - name: Run project tests
+        shell: pwsh
+        run: |
+          npm install --no-audit --no-fund
+          npm test
+
+      - name: Commit fix and remove this one-shot workflow
+        shell: pwsh
+        run: |
+          Remove-Item ".github/workflows/fix-vscode-cli-resolution.yml"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add setup.ps1 tests/claude-desktop.test.ts .github/workflows/fix-vscode-cli-resolution.yml
+          git commit -m "Fix VS Code CLI resolution on Windows"
+          git push origin HEAD:main
