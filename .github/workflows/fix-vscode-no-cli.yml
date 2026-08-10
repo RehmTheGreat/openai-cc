@@ -1,0 +1,189 @@
+name: Apply no-VS-Code-CLI installer fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/fix-vscode-no-cli.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  fix-vscode-no-cli:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Remove all VS Code CLI calls
+        shell: pwsh
+        run: |
+          $setupPath = "setup.ps1"
+          $setup = Get-Content $setupPath -Raw
+
+          $oldResolver = @'
+          function Get-VSCodeCommand {
+            # Use the CLI shim, never Code.exe or a Windows app-execution alias. On some
+            # systems `Get-Command code` resolves to the GUI executable, which launches
+            # Electron and never returns from --list-extensions during unattended setup.
+            $candidates = @(
+              (Join-Path $env:LOCALAPPDATA "Programs\Microsoft VS Code\bin\code.cmd"),
+              (Join-Path $env:ProgramFiles "Microsoft VS Code\bin\code.cmd")
+            )
+            if (${env:ProgramFiles(x86)}) { $candidates += (Join-Path ${env:ProgramFiles(x86)} "Microsoft VS Code\bin\code.cmd") }
+            foreach ($candidate in $candidates) {
+              if ($candidate -and (Test-Path $candidate)) { return $candidate }
+            }
+
+            $command = Get-Command code.cmd -ErrorAction SilentlyContinue
+            if ($command -and $command.Source -and ([IO.Path]::GetFileName($command.Source) -ieq "code.cmd")) {
+              return $command.Source
+            }
+            return $null
+          }
+          '@
+          $newResolver = @'
+          function Test-VSCodeInstalled {
+            # Deliberately detect VS Code without invoking its `code` CLI. On Windows,
+            # code.cmd can launch the full Electron GUI and hang indefinitely when
+            # Code.exe is configured to run as administrator.
+            $candidates = @(
+              (Join-Path $env:LOCALAPPDATA "Programs\Microsoft VS Code\Code.exe"),
+              (Join-Path $env:ProgramFiles "Microsoft VS Code\Code.exe")
+            )
+            if (${env:ProgramFiles(x86)}) { $candidates += (Join-Path ${env:ProgramFiles(x86)} "Microsoft VS Code\Code.exe") }
+            if ($candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1) { return $true }
+            return (Test-WingetPackageInstalled "Microsoft.VisualStudioCode")
+          }
+          '@
+          if (-not $setup.Contains($oldResolver)) { throw "Expected Get-VSCodeCommand block was not found." }
+          $setup = $setup.Replace($oldResolver, $newResolver)
+
+          $oldEnsure = @'
+          function Ensure-VSCode([bool]$Requested) {
+            if (-not $Requested) { Write-Host "VS Code + Claude Code extension: skipped by user." -ForegroundColor DarkGray; return }
+            $code = Get-VSCodeCommand
+            if (-not $code) { Invoke-WingetInstall "Microsoft.VisualStudioCode" "Visual Studio Code"; $code = Get-VSCodeCommand }
+            else { Write-Host "VS Code already installed; leaving the installed version untouched." -ForegroundColor DarkGray }
+            if (-not $code) { throw "VS Code is installed but code.cmd could not be found." }
+
+            $extensions = @(& $code --list-extensions 2>$null)
+            if ($extensions -contains "anthropic.claude-code") {
+              Write-Host "Claude Code VS Code extension already installed; leaving it untouched." -ForegroundColor DarkGray
+            } else {
+              Write-Host "Installing Claude Code VS Code extension..."
+              $exitCode = Invoke-NativeConsole $code @("--install-extension", "anthropic.claude-code")
+              if ($exitCode -ne 0) { throw "Claude Code VS Code extension installation failed." }
+            }
+            Configure-VSCodeClaudeSettings
+          }
+          '@
+          $newEnsure = @'
+          function Ensure-VSCode([bool]$Requested) {
+            if (-not $Requested) { Write-Host "VS Code: skipped by user." -ForegroundColor DarkGray; return }
+            if (Test-VSCodeInstalled) {
+              Write-Host "VS Code already installed; leaving the installed version untouched." -ForegroundColor DarkGray
+            } else {
+              Invoke-WingetInstall "Microsoft.VisualStudioCode" "Visual Studio Code"
+              if (-not (Test-VSCodeInstalled)) { throw "VS Code installation completed but VS Code could not be detected." }
+            }
+
+            Configure-VSCodeClaudeSettings
+            Write-Host "VS Code CLI automation intentionally skipped to avoid the known Windows code.cmd/GUI hang." -ForegroundColor Yellow
+            Write-Host "After setup, open VS Code > Extensions and install/enable Claude Code (anthropic.claude-code) manually." -ForegroundColor Yellow
+          }
+          '@
+          if (-not $setup.Contains($oldEnsure)) { throw "Expected Ensure-VSCode block was not found." }
+          $setup = $setup.Replace($oldEnsure, $newEnsure)
+
+          $oldVerify = @'
+            $code = Get-VSCodeCommand
+            if (-not $code) { throw "Verification failed: VS Code was requested but is unavailable." }
+            $extensions = @(& $code --list-extensions 2>$null)
+            if ($extensions -notcontains "anthropic.claude-code") { throw "Verification failed: Claude Code VS Code extension missing." }
+            $checks.Add("VS Code + Claude Code extension")
+          '@
+          $newVerify = @'
+            if (-not (Test-VSCodeInstalled)) { throw "Verification failed: VS Code was requested but is unavailable." }
+            $checks.Add("VS Code (Claude Code extension installation is manual)")
+          '@
+          if (-not $setup.Contains($oldVerify)) { throw "Expected VS Code verification block was not found." }
+          $setup = $setup.Replace($oldVerify, $newVerify)
+
+          $setup = $setup.Replace(
+            '$installVSCode = Read-YesNo "Install VS Code and the Claude Code extension?"',
+            '$installVSCode = Read-YesNo "Install/configure VS Code (Claude Code extension is manual)?"'
+          )
+
+          $summaryAnchor = 'Write-Host "Provider credentials remain exclusively in the OpenAI-CC admin panel."'
+          $summaryReplacement = @'
+          Write-Host "Provider credentials remain exclusively in the OpenAI-CC admin panel."
+          if ($installVSCode) {
+            Write-Host "VS Code extension: install/enable anthropic.claude-code manually from Extensions; no VS Code code CLI command was run." -ForegroundColor Yellow
+          }
+          '@
+          if (-not $setup.Contains($summaryAnchor)) { throw "Expected final summary anchor was not found." }
+          $setup = $setup.Replace($summaryAnchor, $summaryReplacement.TrimEnd())
+
+          [IO.File]::WriteAllText((Resolve-Path $setupPath), $setup, [Text.UTF8Encoding]::new($false))
+
+          $testPath = "tests/claude-desktop.test.ts"
+          $tests = Get-Content $testPath -Raw
+          $tests = $tests.Replace(
+            'assert.match(setup, /Install VS Code and the Claude Code extension\\?/);',
+            'assert.match(setup, /Install\\/configure VS Code \\(Claude Code extension is manual\\)\\?/);'
+          )
+
+          $oldCliTest = @'
+          test("PowerShell installer resolves the VS Code CLI shim instead of the GUI executable", async () => {
+            const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
+            assert.match(setup, /function Get-VSCodeCommand/);
+            assert.match(setup, /Microsoft VS Code\\bin\\code\.cmd/);
+            assert.match(setup, /Get-Command code\.cmd/);
+            assert.doesNotMatch(setup, /Get-Command code -ErrorAction/);
+          });
+          '@
+          $newCliTest = @'
+          test("PowerShell installer never invokes the VS Code code CLI", async () => {
+            const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
+            assert.match(setup, /function Test-VSCodeInstalled/);
+            assert.match(setup, /Microsoft VS Code\\Code\.exe/);
+            assert.match(setup, /Test-WingetPackageInstalled "Microsoft\.VisualStudioCode"/);
+            assert.match(setup, /VS Code CLI automation intentionally skipped/);
+            assert.match(setup, /install\/enable Claude Code \(anthropic\.claude-code\) manually/);
+            assert.doesNotMatch(setup, /--list-extensions/);
+            assert.doesNotMatch(setup, /--install-extension/);
+            assert.doesNotMatch(setup, /Get-Command code(?:\.cmd)?/);
+          });
+          '@
+          if (-not $tests.Contains($oldCliTest)) { throw "Expected VS Code CLI regression test was not found." }
+          $tests = $tests.Replace($oldCliTest, $newCliTest)
+          [IO.File]::WriteAllText((Resolve-Path $testPath), $tests, [Text.UTF8Encoding]::new($false))
+
+      - name: Assert installer contains zero VS Code CLI invocations
+        shell: powershell
+        run: |
+          $setup = Get-Content setup.ps1 -Raw
+          foreach ($forbidden in @('--list-extensions', '--install-extension', 'Get-Command code ', 'Get-Command code.cmd')) {
+            if ($setup.Contains($forbidden)) { throw "Forbidden VS Code CLI usage remains: $forbidden" }
+          }
+          if ($setup -notmatch 'Test-VSCodeInstalled') { throw "VS Code non-CLI detection helper missing." }
+          if ($setup -notmatch 'extension is manual') { throw "Manual extension guidance missing." }
+
+      - name: Run project tests
+        shell: pwsh
+        run: |
+          npm install --no-audit --no-fund
+          npm test
+
+      - name: Commit fix and remove this one-shot workflow
+        shell: pwsh
+        run: |
+          Remove-Item ".github/workflows/fix-vscode-no-cli.yml"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add setup.ps1 tests/claude-desktop.test.ts .github/workflows/fix-vscode-no-cli.yml
+          git commit -m "Stop invoking VS Code CLI from installer"
+          git push origin HEAD:main
