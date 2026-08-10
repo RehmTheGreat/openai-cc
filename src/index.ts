@@ -29,9 +29,26 @@ if (process.env.OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP !== "0") {
   }
 }
 
-const server = createServer(store, modelConfig);
+const server = createServer(store, modelConfig, { bindHost: host });
 server.listen(port, host, () => {
   console.log(`Anthropic-compatible endpoint: ${baseUrl}`);
-  console.log(`Admin panel: ${baseUrl}/admin`);
+  if (isLoopback(host) || process.env.OPENAI_CC_UNSAFE_REMOTE_ADMIN === "1") console.log(`Admin panel: ${baseUrl}/admin`);
+  else console.log("Admin panel: disabled because HOST is not loopback (set OPENAI_CC_UNSAFE_REMOTE_ADMIN=1 only behind your own protection). ");
   console.log(`Context window: ${modelConfig.snapshot().contextWindow}`);
 });
+
+let closing = false;
+const shutdown = (): void => {
+  if (closing) return;
+  closing = true;
+  server.close(() => process.exit(0));
+  const timer = setTimeout(() => process.exit(1), 5000);
+  timer.unref();
+};
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);
+
+function isLoopback(value: string): boolean {
+  const host = value.replace(/^\[|\]$/g, "").toLowerCase();
+  return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
+}
