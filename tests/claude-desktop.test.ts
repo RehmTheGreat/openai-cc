@@ -86,7 +86,7 @@ test("PowerShell installer requires explicit buffered Y/N choices for optional a
   assert.match(setup, /if \(\$key\.Key -eq \[ConsoleKey\]::Y\)/);
   assert.match(setup, /if \(\$key\.Key -eq \[ConsoleKey\]::N\)/);
   assert.match(setup, /Install Claude Code CLI\?/);
-  assert.match(setup, /Install VS Code and the Claude Code extension\?/);
+  assert.match(setup, /Install\/configure VS Code \(Claude Code extension is manual\)\?/);
   assert.match(setup, /Install and configure Claude Desktop\?/);
   assert.match(setup, /Anthropic\.ClaudeCode/);
   assert.match(setup, /Microsoft\.VisualStudioCode/);
@@ -98,12 +98,16 @@ test("PowerShell installer requires explicit buffered Y/N choices for optional a
   assert.match(setup, /claudeCode\.disableLoginPrompt/);
 });
 
-test("PowerShell installer resolves the VS Code CLI shim instead of the GUI executable", async () => {
+test("PowerShell installer never invokes the VS Code code CLI", async () => {
   const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
-  assert.match(setup, /function Get-VSCodeCommand/);
-  assert.match(setup, /Microsoft VS Code\\bin\\code\.cmd/);
-  assert.match(setup, /Get-Command code\.cmd/);
-  assert.doesNotMatch(setup, /Get-Command code -ErrorAction/);
+  assert.match(setup, /function Test-VSCodeInstalled/);
+  assert.match(setup, /Microsoft VS Code\\Code\.exe/);
+  assert.match(setup, /Test-WingetPackageInstalled "Microsoft\.VisualStudioCode"/);
+  assert.match(setup, /VS Code CLI automation intentionally skipped/);
+  assert.match(setup, /install\/enable Claude Code \(anthropic\.claude-code\) manually/);
+  assert.doesNotMatch(setup, /--list-extensions/);
+  assert.doesNotMatch(setup, /--install-extension/);
+  assert.doesNotMatch(setup, /Get-Command code(?:\.cmd)?/);
 });
 
 test("PowerShell native runner does not redirect stderr under Windows PowerShell 5.1", async () => {
