@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
-import { AccountStore, validateId } from "../src/account-store.js";
+import { AccountStore, readAuthEmail, validateId } from "../src/account-store.js";
 
 const args = parseArgs(process.argv.slice(2));
 const id = args.id;
@@ -20,8 +20,9 @@ console.log(`Signing in ${name}. The OAuth callback stays on this machine.`);
 const child = spawn(process.platform === "win32" ? "npx.cmd" : "npx", ["--yes", "openai-oauth@latest", "login", "--oauth-file", authFile], { stdio: "inherit" });
 const code = await new Promise<number>((resolve) => child.on("exit", (c) => resolve(c ?? 1)));
 if (code !== 0) process.exit(code);
-await store.upsert({ id, name, authFile });
-console.log(`Added ${name} (${id}). Auth file: ${authFile}`);
+const email = await readAuthEmail(authFile);
+await store.upsert({ id, name, email, authFile });
+console.log(`Added ${name} (${id})${email ? ` <${email}>` : ""}. Auth file: ${authFile}`);
 
 function parseArgs(argv: string[]): Record<string, string> {
   const out: Record<string, string> = {};
