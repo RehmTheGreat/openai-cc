@@ -1,0 +1,39 @@
+name: Apply validated VS Code no-CLI fix
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/apply-vscode-no-cli-v2.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply installer patch
+        shell: powershell
+        run: .\.github\scripts\apply-vscode-no-cli-fix.ps1
+
+      - name: Run tests
+        shell: powershell
+        run: |
+          npm install --no-audit --no-fund
+          npm test
+
+      - name: Commit validated fix
+        shell: powershell
+        run: |
+          Remove-Item .github\workflows\apply-vscode-no-cli-v2.yml -Force
+          Remove-Item .github\workflows\fix-vscode-no-cli.yml -Force -ErrorAction SilentlyContinue
+          Remove-Item .github\scripts\apply-vscode-no-cli-fix.ps1 -Force
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add setup.ps1 tests/claude-desktop.test.ts .github
+          git commit -m "Stop invoking VS Code CLI from installer"
+          git push origin HEAD:main
