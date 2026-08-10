@@ -14,8 +14,6 @@ Start-Sleep -Milliseconds 800
 
 try {
   Start-Process "${baseUrl}/admin"
-  $env:ANTHROPIC_BASE_URL = $baseUrl
-  $env:ANTHROPIC_AUTH_TOKEN = "local-not-used"
   & claude
 } finally {
   if ($proxy -and -not $proxy.HasExited) { Stop-Process -Id $proxy.Id -Force }
