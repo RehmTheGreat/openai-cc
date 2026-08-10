@@ -34,7 +34,7 @@ OpenAI-CC supports:
 
 OpenAI-CC does **not** construct OpenAI's browser authorization URL and does not use the third-party `openai-oauth` CLI to acquire credentials.
 
-Credential acquisition is delegated to the official `@openai/codex` CLI package pinned by OpenAI-CC. The currently tested package version is **0.146.0**. Browser login is the default; the official Codex device-auth flow is available as a fallback.
+Credential acquisition is delegated to the official `@openai/codex` CLI package pinned by OpenAI-CC. The currently tested package version is **0.146.0**. Browser login is the default; the official Codex device-auth flow is available as a fallback. In device mode the Admin UI and terminal show the official transient verification URL and one-time user code, then discard both when the auth job finishes.
 
 Each ChatGPT credential has its own managed Codex home:
 
@@ -123,7 +123,7 @@ All mutations use a shared structured API client that checks `response.ok`, pars
 Admin access is loopback-only by default.
 
 - The default bind is `127.0.0.1`.
-- If `HOST` is changed to a non-loopback address, `/admin` is refused unless `OPENAI_CC_UNSAFE_REMOTE_ADMIN=1` is explicitly set. That override does **not** add TLS or user authentication; provide your own network protections if you deliberately use it.
+- If `HOST` is changed to a non-loopback address, `/admin` is refused unless `OPENAI_CC_UNSAFE_REMOTE_ADMIN=1` is explicitly set. With that override, browser mutations still require exact same-origin Host/Origin matching plus the per-process CSRF token, and non-browser mutations require the CSRF token. The override does **not** add TLS or user authentication; provide your own network protections if you deliberately use it.
 - Admin requests require a loopback `Host` by default.
 - Browser mutations require same-origin `Origin` plus a per-process CSRF token embedded in the Admin page.
 - Non-browser loopback automation (including the Windows installer) may send JSON mutations without an `Origin`; browsers cannot use a simple cross-site form to send `application/json`.
@@ -142,7 +142,7 @@ The installer remains native-PowerShell and idempotent. It does **not** invoke t
 The installer:
 
 - checks/installs required Git, Node.js and ripgrep;
-- builds OpenAI-CC with its pinned npm dependency set, including the official Codex CLI package used for ChatGPT login;
+- installs OpenAI-CC with `npm ci` from the committed lockfile and builds it, including the pinned official Codex CLI package used for ChatGPT login;
 - creates the shared Claude projects/configuration;
 - keeps automatic compaction enabled at the configured gateway capacity;
 - installs/configures the existing token-efficiency tooling;

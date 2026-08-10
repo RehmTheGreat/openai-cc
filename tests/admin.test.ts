@@ -23,9 +23,11 @@ class FakeAuthRunner extends EventEmitter implements ChatGptAuthRunner {
       displayName: options.displayName,
       mode: options.mode ?? "create",
       loginMode: options.loginMode ?? "browser",
-      status: "awaiting_browser",
+      status: options.loginMode === "device" ? "awaiting_user" : "awaiting_browser",
       startedAt: new Date().toISOString(),
-      safeMessage: "Browser opened. Finish signing in with ChatGPT.",
+      verificationUrl: options.loginMode === "device" ? "https://auth.openai.com/codex/device" : undefined,
+      userCode: options.loginMode === "device" ? "ABCD-1234" : undefined,
+      safeMessage: options.loginMode === "device" ? "Open the official Codex device sign-in page and enter the one-time code." : "Browser opened. Finish signing in with ChatGPT.",
     };
     this.jobs.set(job.jobId, job);
     this.emit("job", { ...job });
@@ -195,3 +197,48 @@ test("Admin is refused when configured for non-loopback bind without explicit ov
     assert.equal((await response.json() as any).error.code, "remote_admin_disabled");
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
+
+
+test("explicit remote-admin override permits only same-origin CSRF-protected browser mutations", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-remote-override-"));
+  const store = new AccountStore(root); await store.init();
+  const models = new ModelConfigStore(root, store); await models.init();
+  const auth = new FakeAuthRunner(store);
+  const server = createServer(store, models, { authRunner: auth, bindHost: "0.0.0.0", allowRemoteAdmin: true });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address(); if (!address || typeof address === "string") throw new Error("bad address");
+  const port = address.port;
+  const virtualHost = `admin.example.test:${port}`;
+  try {
+    const page = await rawAdminRequest(port, "/admin", "GET", { Host: virtualHost });
+    assert.equal(page.status, 200);
+    const match = page.body.match(/window\.__OPENAI_CC__=(\{[^;]+\});/);
+    if (!match) throw new Error("csrf token missing");
+    const csrf = JSON.parse(match[1]).csrfToken as string;
+    const good = await rawAdminRequest(port, "/admin/credentials", "POST", {
+      Host: virtualHost, Origin: `http://${virtualHost}`, "Content-Type": "application/json", "X-OpenAI-CC-CSRF": csrf,
+    }, JSON.stringify({ id: "remote", name: "Remote", provider: "nvidia", apiKey: "secret", model: "nim" }));
+    assert.equal(good.status, 201);
+    const wrongOrigin = await rawAdminRequest(port, "/admin/credentials", "POST", {
+      Host: virtualHost, Origin: `http://evil.example:${port}`, "Content-Type": "application/json", "X-OpenAI-CC-CSRF": csrf,
+    }, JSON.stringify({ id: "bad-origin", name: "Bad", provider: "nvidia", apiKey: "secret", model: "nim" }));
+    assert.equal(wrongOrigin.status, 403);
+    const noOriginNoCsrf = await rawAdminRequest(port, "/admin/credentials", "POST", {
+      Host: virtualHost, "Content-Type": "application/json",
+    }, JSON.stringify({ id: "no-csrf", name: "Bad", provider: "nvidia", apiKey: "secret", model: "nim" }));
+    assert.equal(noOriginNoCsrf.status, 403);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+});
+
+async function rawAdminRequest(port: number, requestPath: string, method: string, headers: Record<string, string>, body?: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ hostname: "127.0.0.1", port, path: requestPath, method, headers }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    req.on("error", reject);
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
+}

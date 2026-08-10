@@ -340,14 +340,22 @@ export class Dispatcher {
     const type = String(req.headers["content-type"] ?? "").split(";", 1)[0].trim().toLowerCase();
     if (type !== "application/json") throw new OpenAICCError("Admin mutations require Content-Type: application/json.", 415, "unsupported_media_type");
     const origin = req.headers.origin;
+    const csrfValid = req.headers["x-openai-cc-csrf"] === this.csrfToken;
     if (origin) {
       let parsed: URL;
       try { parsed = new URL(origin); } catch { throw new OpenAICCError("Invalid Origin header.", 403, "invalid_origin"); }
-      if (!isLoopbackHost(parsed.hostname) || parsed.protocol !== "http:") throw new OpenAICCError("Cross-origin Admin mutation rejected.", 403, "invalid_origin");
       const requestHost = String(req.headers.host ?? "").toLowerCase();
-      if (requestHost && parsed.host.toLowerCase() !== requestHost) throw new OpenAICCError("Cross-origin Admin mutation rejected.", 403, "invalid_origin");
-      if (req.headers["x-openai-cc-csrf"] !== this.csrfToken) throw new OpenAICCError("Missing or invalid Admin anti-CSRF token.", 403, "invalid_csrf");
-    } else if (req.headers["x-openai-cc-csrf"] && req.headers["x-openai-cc-csrf"] !== this.csrfToken) {
+      if (!requestHost || parsed.host.toLowerCase() !== requestHost) throw new OpenAICCError("Cross-origin Admin mutation rejected.", 403, "invalid_origin");
+      if (!this.allowRemoteAdmin && (!isLoopbackHost(parsed.hostname) || parsed.protocol !== "http:")) {
+        throw new OpenAICCError("Cross-origin Admin mutation rejected.", 403, "invalid_origin");
+      }
+      if (this.allowRemoteAdmin && parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        throw new OpenAICCError("Unsupported Admin Origin scheme.", 403, "invalid_origin");
+      }
+      if (!csrfValid) throw new OpenAICCError("Missing or invalid Admin anti-CSRF token.", 403, "invalid_csrf");
+    } else if (this.allowRemoteAdmin) {
+      if (!csrfValid) throw new OpenAICCError("Remote Admin mutations require the anti-CSRF token.", 403, "invalid_csrf");
+    } else if (req.headers["x-openai-cc-csrf"] && !csrfValid) {
       throw new OpenAICCError("Invalid Admin anti-CSRF token.", 403, "invalid_csrf");
     }
   }

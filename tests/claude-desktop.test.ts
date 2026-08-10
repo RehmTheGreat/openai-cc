@@ -146,6 +146,8 @@ test("PowerShell installer configures the shared token-efficiency stack and pers
   assert.match(setup, /rtk-x86_64-pc-windows-msvc\.zip/);
   assert.match(setup, /"init", "-g", "--auto-patch"/);
   assert.match(setup, /dist\/scripts\/configure-clients\.js/);
+  assert.match(setup, /Invoke-NativeConsole \(Get-Command npm\)\.Source @\("ci", "--no-audit", "--no-fund"\)/);
+  assert.doesNotMatch(setup, /Invoke-NativeConsole \(Get-Command npm\)\.Source @\("install", "--no-audit", "--no-fund"\)/);
   assert.match(setup, /OpenAI-CC Gateway\.lnk/);
   assert.match(setup, /\$GatewayBaseUrl\/healthz/);
   assert.match(setup, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP/);

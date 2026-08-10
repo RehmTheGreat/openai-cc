@@ -18,6 +18,15 @@ const home=process.env.CODEX_HOME;
 const mode=process.env.FAKE_CODEX_BEHAVIOR||'success';
 if(mode==='fail'){console.error('login failed safely');process.exit(7)}
 if(mode==='hang'){console.error('Open this URL: https://example.invalid/?state=secret&code_verifier=secret');setInterval(()=>{},1000)}
+if(mode==='device'||mode==='device-fail'){
+  console.log('Follow these steps to sign in with ChatGPT using device code authorization:');
+  console.log('1. Open this link in your browser and sign in to your account');
+  console.log(' https://auth.openai.com/codex/device');
+  console.log('2. Enter this one-time code (expires in 15 minutes)');
+  console.log(' ABCD-1234');
+  if(mode==='device-fail') process.exit(7);
+  await new Promise(resolve=>setTimeout(resolve,180));
+}
 await mkdir(home,{recursive:true});
 if(mode==='malformed') await writeFile(path.join(home,'auth.json'),'not-json');
 else await writeFile(path.join(home,'auth.json'),JSON.stringify({auth_mode:'chatgpt',email:'person@example.com',tokens:{access_token:'dummy-access',refresh_token:'dummy-refresh'}}));
@@ -187,4 +196,52 @@ test("bundled official Codex accepts isolated file-credential-store login status
   assert.equal(result.status, 1);
   assert.doesNotMatch(output, /unknown.*cli_auth_credentials_store|invalid.*config/i);
   assert.match(output, /not logged in|login/i);
+});
+
+
+test("device-code fallback exposes only the official transient verification URL and user code", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-device-"));
+  const store = new AccountStore(path.join(root, "data"));
+  await store.init();
+  const entrypoint = await fakeCodex(root);
+  const previous = process.env.FAKE_CODEX_BEHAVIOR;
+  process.env.FAKE_CODEX_BEHAVIOR = "device";
+  const runner = new OfficialCodexAuthRunner(store, { codexEntrypoint: entrypoint, timeoutMs: 5_000 });
+  const started = await runner.start({ credentialId: "device", displayName: "Device", loginMode: "device" });
+  if (previous === undefined) delete process.env.FAKE_CODEX_BEHAVIOR; else process.env.FAKE_CODEX_BEHAVIOR = previous;
+  let active = started;
+  for (let i = 0; i < 60 && (!active.verificationUrl || !active.userCode); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    active = runner.status(started.jobId);
+  }
+  assert.equal(active.status, "awaiting_user");
+  assert.equal(active.verificationUrl, "https://auth.openai.com/codex/device");
+  assert.equal(active.userCode, "ABCD-1234");
+  assert.equal(JSON.stringify(active).includes("auth.json"), false);
+  const done = await waitTerminal(runner, started);
+  assert.equal(done.status, "complete");
+  assert.equal(done.verificationUrl, undefined);
+  assert.equal(done.userCode, undefined);
+  await runner.shutdown();
+  store.close();
+});
+
+
+test("failed device auth never retains its one-time user code in safe diagnostics", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-device-fail-"));
+  const store = new AccountStore(path.join(root, "data"));
+  await store.init();
+  const entrypoint = await fakeCodex(root);
+  const previous = process.env.FAKE_CODEX_BEHAVIOR;
+  process.env.FAKE_CODEX_BEHAVIOR = "device-fail";
+  const runner = new OfficialCodexAuthRunner(store, { codexEntrypoint: entrypoint, timeoutMs: 5_000 });
+  const started = await runner.start({ credentialId: "device-fail", displayName: "Device Fail", loginMode: "device" });
+  if (previous === undefined) delete process.env.FAKE_CODEX_BEHAVIOR; else process.env.FAKE_CODEX_BEHAVIOR = previous;
+  const done = await waitTerminal(runner, started);
+  assert.equal(done.status, "error");
+  assert.equal(done.safeError?.includes("ABCD-1234"), false);
+  assert.equal(done.userCode, undefined);
+  assert.equal(done.verificationUrl, undefined);
+  await runner.shutdown();
+  store.close();
 });

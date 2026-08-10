@@ -15,6 +15,10 @@ test("Admin frontend keeps secrets out, scopes SSE refreshes, and surfaces API f
   assert.match(source, /Auto — preferred \+ rotation/);
   assert.match(source, /state\.accounts\.filter\(a=>a\.provider===provider\)/);
   assert.match(source, /oauth-cancel/);
+  assert.match(source, /oauth-device-link/);
+  assert.match(source, /verificationUrl/);
+  assert.match(source, /userCode/);
+  assert.match(source, /deviceCode\.textContent=job\.userCode/);
   assert.match(source, /button\.disabled=true/);
   assert.match(source, /statusLabel/);
   assert.match(source, /auth-error/);
