@@ -1,31 +1,53 @@
-import { mkdir } from "node:fs/promises";
-import { spawn } from "node:child_process";
-import path from "node:path";
-import { AccountStore, readAuthEmail, validateId } from "../src/account-store.js";
+import { AccountStore } from "../src/account-store.js";
+import { AuthJob, OfficialCodexAuthRunner } from "../src/chatgpt-auth.js";
 
 const args = parseArgs(process.argv.slice(2));
 const id = args.id;
 const name = args.name || id;
 if (!id) {
-  console.error("Usage: npm run account:add -- --id alice --name \"Alice\"");
+  console.error('Usage: npm run account:add -- --id alice --name "Alice" [--reauth] [--device-auth]');
   process.exit(2);
 }
-validateId(id);
+
 const store = new AccountStore(process.env.DATA_DIR || ".data");
 await store.init();
-const authFile = store.authFileFor(id);
-await mkdir(path.dirname(authFile), { recursive: true, mode: 0o700 });
+const runner = new OfficialCodexAuthRunner(store);
+let currentJobId: string | undefined;
+process.once("SIGINT", () => {
+  if (currentJobId) void runner.cancel(currentJobId).finally(() => process.exit(130));
+  else process.exit(130);
+});
 
-console.log(`Signing in ${name}. The OAuth callback stays on this machine.`);
-const npxArgs = ["--yes", "openai-oauth@latest", "login", "--oauth-file", authFile];
-const child = process.platform === "win32"
-  ? spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "npx", ...npxArgs], { stdio: "inherit" })
-  : spawn("npx", npxArgs, { stdio: "inherit" });
-const code = await new Promise<number>((resolve) => child.on("exit", (c) => resolve(c ?? 1)));
-if (code !== 0) process.exit(code);
-const email = await readAuthEmail(authFile);
-await store.upsert({ id, name, email, authFile });
-console.log(`Added ${name} (${id})${email ? ` <${email}>` : ""}. Auth file: ${authFile}`);
+try {
+  let job = await runner.start({
+    credentialId: id,
+    displayName: name,
+    mode: args.reauth === "true" ? "reauth" : "create",
+    loginMode: args["device-auth"] === "true" ? "device" : "browser",
+  });
+  currentJobId = job.jobId;
+  let last = "";
+  while (!terminal(job)) {
+    const message = `${job.status}: ${job.safeMessage ?? ""}`.trim();
+    if (message !== last) { console.log(message); last = message; }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    job = runner.status(job.jobId);
+  }
+  if (job.status !== "complete") {
+    console.error(job.safeError ?? job.safeMessage ?? `Authentication ${job.status}.`);
+    process.exitCode = job.status === "cancelled" ? 130 : 1;
+  } else {
+    console.log(`Added ${job.displayName} (${job.credentialId})${job.email ? ` <${job.email}>` : ""}.`);
+  }
+} finally {
+  currentJobId = undefined;
+  await runner.shutdown();
+  store.close();
+}
+
+function terminal(job: AuthJob): boolean {
+  return job.status === "complete" || job.status === "cancelled" || job.status === "error";
+}
 
 function parseArgs(argv: string[]): Record<string, string> {
   const out: Record<string, string> = {};
@@ -34,12 +56,8 @@ function parseArgs(argv: string[]): Record<string, string> {
     if (!token.startsWith("--")) continue;
     const key = token.slice(2);
     const next = argv[i + 1];
-    if (next && !next.startsWith("--")) {
-      out[key] = next;
-      i++;
-    } else {
-      out[key] = "true";
-    }
+    if (next && !next.startsWith("--")) { out[key] = next; i++; }
+    else out[key] = "true";
   }
   return out;
 }
