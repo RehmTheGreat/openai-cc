@@ -2,38 +2,12 @@ name: Auth Admin Control Plane CI
 
 on:
   push:
-    branches:
-      - agent/auth-admin-control-plane
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  lockfile:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: agent/auth-admin-control-plane
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Generate reproducible dependency lock
-        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
-      - name: Commit lockfile if needed
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package-lock.json
-          if git diff --cached --quiet; then
-            echo "package-lock.json is already current"
-          else
-            git commit -m "Commit reproducible dependency lock"
-            git push origin HEAD:agent/auth-admin-control-plane
-          fi
-
   test:
     strategy:
       fail-fast: false
@@ -45,8 +19,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Install pinned dependencies
-        run: npm install --no-audit --no-fund
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
       - name: Verify bundled official Codex CLI
         shell: bash
         if: runner.os != 'Windows'
