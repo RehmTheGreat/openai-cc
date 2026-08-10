@@ -13,6 +13,21 @@ function Write-Step([string]$Message) {
   Write-Host "=== $Message ===" -ForegroundColor Cyan
 }
 
+function Invoke-NativeConsole([string]$Command, [string[]]$Arguments) {
+  # Windows PowerShell 5.1 turns native stderr redirected with 2>&1 into
+  # non-terminating ErrorRecords. With the installer's global Stop preference,
+  # ordinary progress such as Git's "Cloning into..." can otherwise abort setup.
+  # Temporarily use Continue here and decide success only from the process exit code.
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    & $Command @Arguments 2>&1 | Out-Host
+    return [int]$LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+}
+
 function Clear-PendingConsoleInput {
   try {
     if (-not [Console]::IsInputRedirected) {
@@ -201,18 +216,27 @@ function Resolve-GatewayDirectory {
   }
 
   $target = Join-Path $env:LOCALAPPDATA "OpenAI-CC"
+  $gitCommand = (Get-Command git).Source
   if (-not (Test-Path $target)) {
     Write-Host "Cloning OpenAI-CC to $target..."
-    & git clone $RepositoryUrl $target 2>&1 | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw "Could not clone OpenAI-CC." }
+    $exitCode = Invoke-NativeConsole $gitCommand @("clone", $RepositoryUrl, $target)
+    if ($exitCode -ne 0) { throw "Could not clone OpenAI-CC (git exit code $exitCode)." }
   } elseif (-not (Test-Path (Join-Path $target ".git"))) {
-    throw "$target already exists but is not an OpenAI-CC git checkout. Move/rename it and rerun the installer."
+    $existingItems = @(Get-ChildItem -Force -Path $target -ErrorAction SilentlyContinue)
+    if ($existingItems.Count -eq 0) {
+      Remove-Item $target -Force -ErrorAction SilentlyContinue
+      Write-Host "Recovering an empty interrupted OpenAI-CC clone at $target..." -ForegroundColor Yellow
+      $exitCode = Invoke-NativeConsole $gitCommand @("clone", $RepositoryUrl, $target)
+      if ($exitCode -ne 0) { throw "Could not clone OpenAI-CC (git exit code $exitCode)." }
+    } else {
+      throw "$target already exists but is not an OpenAI-CC git checkout. Move/rename it and rerun the installer."
+    }
   } else {
     $dirty = (& git -C $target status --porcelain) -join "`n"
     if (-not $dirty) {
       Write-Host "Refreshing existing OpenAI-CC checkout..." -ForegroundColor DarkGray
-      & git -C $target pull --ff-only origin main 2>&1 | Out-Host
-      if ($LASTEXITCODE -ne 0) { throw "Could not fast-forward the existing OpenAI-CC checkout." }
+      $exitCode = Invoke-NativeConsole $gitCommand @("-C", $target, "pull", "--ff-only", "origin", "main")
+      if ($exitCode -ne 0) { throw "Could not fast-forward the existing OpenAI-CC checkout (git exit code $exitCode)." }
     } else {
       Write-Host "Existing OpenAI-CC checkout has local changes; leaving them untouched." -ForegroundColor Yellow
     }
@@ -341,9 +365,7 @@ function Get-ClaudeRunner {
 
 function Invoke-ClaudeRunner([hashtable]$Runner, [string[]]$Arguments) {
   $allArgs = @($Runner.Prefix) + @($Arguments)
-  & $Runner.Command @allArgs 2>&1 | Out-Host
-  $exitCode = $LASTEXITCODE
-  return [int]$exitCode
+  return Invoke-NativeConsole $Runner.Command $allArgs
 }
 
 function Test-PluginEnabled([string]$PluginId) {
