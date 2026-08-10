@@ -182,24 +182,16 @@ function Wait-ClaudeDesktopRegistration([int]$TimeoutSeconds = 60) {
   return $false
 }
 
-function Get-VSCodeCommand {
-  # Use the CLI shim, never Code.exe or a Windows app-execution alias. On some
-  # systems `Get-Command code` resolves to the GUI executable, which launches
-  # Electron and never returns from --list-extensions during unattended setup.
+function Test-VSCodeInstalled {
+  # Deliberately detect VS Code without invoking its `code` CLI. On Windows,
+  # code.cmd may launch the full Electron GUI and hang instead of behaving as a CLI.
   $candidates = @(
-    (Join-Path $env:LOCALAPPDATA "Programs\Microsoft VS Code\bin\code.cmd"),
-    (Join-Path $env:ProgramFiles "Microsoft VS Code\bin\code.cmd")
+    (Join-Path $env:LOCALAPPDATA "Programs\Microsoft VS Code\Code.exe"),
+    (Join-Path $env:ProgramFiles "Microsoft VS Code\Code.exe")
   )
-  if (${env:ProgramFiles(x86)}) { $candidates += (Join-Path ${env:ProgramFiles(x86)} "Microsoft VS Code\bin\code.cmd") }
-  foreach ($candidate in $candidates) {
-    if ($candidate -and (Test-Path $candidate)) { return $candidate }
-  }
-
-  $command = Get-Command code.cmd -ErrorAction SilentlyContinue
-  if ($command -and $command.Source -and ([IO.Path]::GetFileName($command.Source) -ieq "code.cmd")) {
-    return $command.Source
-  }
-  return $null
+  if (${env:ProgramFiles(x86)}) { $candidates += (Join-Path ${env:ProgramFiles(x86)} "Microsoft VS Code\Code.exe") }
+  if ($candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1) { return $true }
+  return (Test-WingetPackageInstalled "Microsoft.VisualStudioCode")
 }
 
 function Get-ClaudeCliCommand {
@@ -311,21 +303,17 @@ function Configure-VSCodeClaudeSettings {
 }
 
 function Ensure-VSCode([bool]$Requested) {
-  if (-not $Requested) { Write-Host "VS Code + Claude Code extension: skipped by user." -ForegroundColor DarkGray; return }
-  $code = Get-VSCodeCommand
-  if (-not $code) { Invoke-WingetInstall "Microsoft.VisualStudioCode" "Visual Studio Code"; $code = Get-VSCodeCommand }
-  else { Write-Host "VS Code already installed; leaving the installed version untouched." -ForegroundColor DarkGray }
-  if (-not $code) { throw "VS Code is installed but code.cmd could not be found." }
-
-  $extensions = @(& $code --list-extensions 2>$null)
-  if ($extensions -contains "anthropic.claude-code") {
-    Write-Host "Claude Code VS Code extension already installed; leaving it untouched." -ForegroundColor DarkGray
+  if (-not $Requested) { Write-Host "VS Code: skipped by user." -ForegroundColor DarkGray; return }
+  if (Test-VSCodeInstalled) {
+    Write-Host "VS Code already installed; leaving the installed version untouched." -ForegroundColor DarkGray
   } else {
-    Write-Host "Installing Claude Code VS Code extension..."
-    $exitCode = Invoke-NativeConsole $code @("--install-extension", "anthropic.claude-code")
-    if ($exitCode -ne 0) { throw "Claude Code VS Code extension installation failed." }
+    Invoke-WingetInstall "Microsoft.VisualStudioCode" "Visual Studio Code"
+    if (-not (Test-VSCodeInstalled)) { throw "VS Code installation completed but VS Code could not be detected." }
   }
+
   Configure-VSCodeClaudeSettings
+  Write-Host "VS Code CLI automation intentionally skipped to avoid the known Windows code.cmd/GUI hang." -ForegroundColor Yellow
+  Write-Host "After setup, open VS Code > Extensions and install/enable Claude Code (anthropic.claude-code) manually." -ForegroundColor Yellow
 }
 
 function Ensure-ClaudeDesktop([bool]$Requested) {
@@ -527,11 +515,8 @@ function Verify-Installation([bool]$ClaudeCodeRequested, [bool]$VSCodeRequested,
     $checks.Add("Claude Code CLI")
   }
   if ($VSCodeRequested) {
-    $code = Get-VSCodeCommand
-    if (-not $code) { throw "Verification failed: VS Code was requested but is unavailable." }
-    $extensions = @(& $code --list-extensions 2>$null)
-    if ($extensions -notcontains "anthropic.claude-code") { throw "Verification failed: Claude Code VS Code extension missing." }
-    $checks.Add("VS Code + Claude Code extension")
+    if (-not (Test-VSCodeInstalled)) { throw "Verification failed: VS Code was requested but is unavailable." }
+    $checks.Add("VS Code (Claude Code extension installation is manual)")
   }
   if ($DesktopRequested) {
     if (-not (Wait-ClaudeDesktopRegistration 10)) { throw "Verification failed: Claude Desktop was requested but is not registered." }
@@ -557,7 +542,7 @@ Write-Host "Provider API keys and OAuth credentials are NOT requested here; add 
 
 Clear-PendingConsoleInput
 $installClaudeCode = Read-YesNo "Install Claude Code CLI?"
-$installVSCode = Read-YesNo "Install VS Code and the Claude Code extension?"
+$installVSCode = Read-YesNo "Install/configure VS Code (Claude Code extension is manual)?"
 $installClaudeDesktop = Read-YesNo "Install and configure Claude Desktop?"
 
 $claudeDesktopWasRunning = $false
@@ -588,6 +573,9 @@ Write-Host "Projects: $projectsDirectory"
 Write-Host "Claude Code token stack: RTK + official TypeScript LSP + Context Mode"
 Write-Host "Effective auto-compaction capacity on 1M Claude-compatible routes: $ContextWindow tokens"
 Write-Host "Provider credentials remain exclusively in the OpenAI-CC admin panel."
+if ($installVSCode) {
+  Write-Host "VS Code extension: install/enable anthropic.claude-code manually from Extensions; no VS Code code CLI command was run." -ForegroundColor Yellow
+}
 if ($installClaudeDesktop -and $claudeDesktopWasRunning) {
   Write-Host "Claude Desktop was running while its gateway profile changed. Restart Claude Desktop once before using the Code tab." -ForegroundColor Yellow
 }
