@@ -10,7 +10,6 @@ export interface ChatCompletionRequest {
   tools?: any[];
   tool_choice?: any;
   stream: boolean;
-  stream_options?: { include_usage: boolean };
 }
 
 export function anthropicToChatCompletions(req: AnthropicRequest, model: string): ChatCompletionRequest {
@@ -63,6 +62,7 @@ export function anthropicToChatCompletions(req: AnthropicRequest, model: string)
         });
       }
     }
+    messages.push(...toolResults);
     if (userParts.length) {
       const onlyText = userParts.every((part) => part.type === "text");
       messages.push({
@@ -70,7 +70,6 @@ export function anthropicToChatCompletions(req: AnthropicRequest, model: string)
         content: onlyText ? userParts.map((part) => part.text).join("\n") : userParts,
       });
     }
-    messages.push(...toolResults);
   }
 
   const tools = req.tools?.map((tool) => ({
@@ -91,7 +90,6 @@ export function anthropicToChatCompletions(req: AnthropicRequest, model: string)
     tools: tools?.length ? tools : undefined,
     tool_choice: mapToolChoice(req.tool_choice),
     stream: Boolean(req.stream),
-    stream_options: req.stream ? { include_usage: true } : undefined,
   });
 }
 
