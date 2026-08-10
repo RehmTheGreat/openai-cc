@@ -79,60 +79,70 @@ export class Dispatcher {
 
   private async handleMessages(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await readJson<AnthropicRequest>(req);
-    const account = this.store.active();
+    const upstream = anthropicToResponses(body) as any;
+    let account = this.store.active() ?? this.store.suggestedNext();
     if (!account) {
-      const next = this.store.suggestedNext();
       return void json(res, 409, {
         error: {
           type: "handoff_required",
-          message: next
-            ? `No active account. ${next.name} (${next.email ?? next.id}) is ready; activate that teammate from http://127.0.0.1:${process.env.PORT || 8082}/admin.`
-            : "No active account is ready. Wait for a five-hour reset or add an account in the admin workflow.",
+          message: "No account is ready. Wait for a five-hour reset or add an account in the admin workflow.",
         },
       });
     }
+    if (!this.store.active()) account = await this.store.activate(account.id);
 
-    await this.store.noteRequest(account.id);
-    const client = this.clientFor(account);
-    const upstream = anthropicToResponses(body) as any;
+    const attempted = new Set<string>();
+    while (account && !attempted.has(account.id)) {
+      attempted.add(account.id);
+      await this.store.noteRequest(account.id);
+      const client = this.clientFor(account);
 
-    try {
-      if (body.stream) {
-        res.statusCode = 200;
-        res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-        res.setHeader("Cache-Control", "no-cache, no-transform");
-        res.setHeader("Connection", "keep-alive");
-        res.flushHeaders();
+      try {
+        if (body.stream) {
+          // Do not expose a successful streaming response until the upstream stream object exists.
+          // A pre-stream 429 can therefore fail over without Claude Code ever seeing it.
+          const stream = await client.responses.create({ ...upstream, stream: true });
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+          res.setHeader("Cache-Control", "no-cache, no-transform");
+          res.setHeader("Connection", "keep-alive");
+          res.flushHeaders();
 
-        const stream = await client.responses.create({ ...upstream, stream: true });
-        const translator = new AnthropicSseTranslator(body.model);
-        for await (const event of stream as any) {
-          for (const chunk of translator.accept(event)) res.write(chunk);
+          const translator = new AnthropicSseTranslator(body.model);
+          for await (const event of stream as any) {
+            for (const chunk of translator.accept(event)) res.write(chunk);
+          }
+          if (!res.writableEnded) res.end();
+          return;
         }
-        if (!res.writableEnded) res.end();
-        return;
-      }
 
-      const response = await client.responses.create({ ...upstream, stream: false } as any);
-      return void json(res, 200, responsesToAnthropic(response, body.model));
-    } catch (error: any) {
-      if (isRateLimit(error)) {
-        await this.store.markRateLimited(account.id, error?.message ?? "429 rate limit");
-        if (!res.headersSent) {
+        const response = await client.responses.create({ ...upstream, stream: false } as any);
+        return void json(res, 200, responsesToAnthropic(response, body.model));
+      } catch (error: any) {
+        if (!isRateLimit(error)) throw error;
+
+        // If streaming has already started, retrying the same prompt on another account can duplicate
+        // tool calls or text. Only pre-response rate limits are transparently retried.
+        if (res.headersSent) {
+          await this.store.markRateLimited(account.id, error?.message ?? "429 rate limit", true);
+          if (!res.writableEnded) {
+            res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "The active account hit a limit after streaming began; the next teammate is active for the following request." } })}\n\n`);
+            res.end();
+          }
+          return;
+        }
+
+        const next = await this.store.markRateLimited(account.id, error?.message ?? "429 rate limit", true);
+        if (!next || attempted.has(next.id)) {
           return void json(res, 429, {
             error: {
               type: "rate_limit_error",
-              message: `${account.name}'s account hit its current limit. The admin panel shows the next ready teammate and this account's five-hour reset time.`,
+              message: "All ready teammate accounts are currently rate-limited. No upstream 429 was forwarded until failover options were exhausted.",
             },
           });
         }
-        if (!res.writableEnded) {
-          res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "Active teammate hit a rate limit; handoff required." } })}\n\n`);
-          res.end();
-        }
-        return;
+        account = next;
       }
-      throw error;
     }
   }
 
@@ -263,7 +273,7 @@ function modelAliases(): string[] {
 
 function adminHtml(): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenAI-CC</title><style>
-body{font:14px system-ui;margin:0;background:#0e1116;color:#e8edf3}.wrap{max-width:900px;margin:40px auto;padding:0 18px}h1{font-size:24px}.note,.add{background:#171c24;padding:14px;border-radius:10px;margin:16px 0}.card{display:grid;grid-template-columns:1fr auto;gap:12px;background:#171c24;margin:10px 0;padding:14px;border-radius:10px}.muted{color:#9aa6b2}.ready{color:#73d69c}.exhausted{color:#ff8f8f}.active{outline:2px solid #7aa2ff}button{background:#2b66d9;color:white;border:0;border-radius:7px;padding:8px 12px;cursor:pointer}button.secondary{background:#39414d}input{background:#0e1116;color:#e8edf3;border:1px solid #39414d;border-radius:7px;padding:9px;margin:4px 6px 4px 0}.toast{position:fixed;right:20px;bottom:20px;background:#242b36;padding:14px;border-radius:10px;max-width:360px;display:none}</style></head><body><div class="wrap"><h1>OpenAI-CC</h1><div class="note">Only one teammate is active at a time. Each teammate signs into their own ChatGPT account. The first upstream request starts that account's five-hour window; a 429 marks it exhausted until the stored reset time.</div><div class="add"><b>Add teammate with ChatGPT OAuth</b><div class="muted">Starts the same local OAuth login from this panel and opens sign-in in the machine's default browser.</div><form onsubmit="startOAuth(event)"><input id="oauth-id" required pattern="[A-Za-z0-9._-]{1,64}" placeholder="account id"><input id="oauth-name" required placeholder="display name"><button type="submit">Add account</button></form><div id="oauth-status" class="muted"></div></div><div id="status" class="muted"></div><div id="accounts"></div></div><div id="toast" class="toast"></div><script>
+body{font:14px system-ui;margin:0;background:#0e1116;color:#e8edf3}.wrap{max-width:900px;margin:40px auto;padding:0 18px}h1{font-size:24px}.note,.add{background:#171c24;padding:14px;border-radius:10px;margin:16px 0}.card{display:grid;grid-template-columns:1fr auto;gap:12px;background:#171c24;margin:10px 0;padding:14px;border-radius:10px}.muted{color:#9aa6b2}.ready{color:#73d69c}.exhausted{color:#ff8f8f}.active{outline:2px solid #7aa2ff}button{background:#2b66d9;color:white;border:0;border-radius:7px;padding:8px 12px;cursor:pointer}button.secondary{background:#39414d}input{background:#0e1116;color:#e8edf3;border:1px solid #39414d;border-radius:7px;padding:9px;margin:4px 6px 4px 0}.toast{position:fixed;right:20px;bottom:20px;background:#242b36;padding:14px;border-radius:10px;max-width:360px;display:none}</style></head><body><div class="wrap"><h1>OpenAI-CC</h1><div class="note">Only one teammate is active at a time. Each teammate signs into their own ChatGPT account. If an upstream request hits a rate limit before output begins, OpenAI-CC marks that account exhausted, automatically activates the next ready teammate, and retries the same request before Claude Code sees the failure. A rate limit after streaming has already begun switches the next teammate for the following request instead of replaying partial work.</div><div class="add"><b>Add teammate with ChatGPT OAuth</b><div class="muted">Starts the same local OAuth login from this panel and opens sign-in in the machine's default browser.</div><form onsubmit="startOAuth(event)"><input id="oauth-id" required pattern="[A-Za-z0-9._-]{1,64}" placeholder="account id"><input id="oauth-name" required placeholder="display name"><button type="submit">Add account</button></form><div id="oauth-status" class="muted"></div></div><div id="status" class="muted"></div><div id="accounts"></div></div><div id="toast" class="toast"></div><script>
 let currentState=null;
 async function load(){const s=await fetch('/admin/state').then(r=>r.json());currentState=s;render(s)}
 function remaining(iso){if(!iso)return'';const ms=Math.max(0,new Date(iso).getTime()-Date.now());const sec=Math.ceil(ms/1000),h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;return h+'h '+m+'m '+s+'s'}
@@ -272,7 +282,7 @@ async function post(url){const r=await fetch(url,{method:'POST'});const d=await 
 async function startOAuth(e){e.preventDefault();const id=document.querySelector('#oauth-id').value.trim(),name=document.querySelector('#oauth-name').value.trim(),status=document.querySelector('#oauth-status');status.textContent='Starting OAuth…';const r=await fetch('/admin/accounts',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id,name})});const d=await r.json().catch(()=>({}));if(!r.ok){status.textContent=d.error?.message||'Could not start OAuth';return}status.textContent='OAuth started. Complete ChatGPT sign-in in the browser window.';watchOAuth(id)}
 async function watchOAuth(id){const status=document.querySelector('#oauth-status');const r=await fetch('/admin/oauth/'+encodeURIComponent(id));const d=await r.json().catch(()=>({}));if(!r.ok){status.textContent='OAuth status unavailable';return}if(d.status==='complete'){status.textContent='Added '+(d.email||d.name)+'.';toast('Account added: '+(d.email||d.name));await load();return}if(d.status==='error'){status.textContent='OAuth failed: '+(d.error||'unknown error');return}setTimeout(()=>watchOAuth(id),1000)}
 function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-const es=new EventSource('/admin/events');['changed','activated','rate_limit','state'].forEach(t=>es.addEventListener(t,e=>{load();if(t==='rate_limit'){const d=JSON.parse(e.data);toast((d.account?.email||d.account?.name||'Account')+' hit its limit. '+(d.account?.limitResetsAt?'Fresh limits at '+new Date(d.account.limitResetsAt).toLocaleString()+'. ':'')+'Activate '+(d.suggestedNextAccountId||'the next teammate')+'.');if(Notification.permission==='granted')new Notification('OpenAI-CC',{body:(d.account?.email||d.account?.name||'Account')+' exhausted; handoff required.'})}}));
+const es=new EventSource('/admin/events');['changed','activated','rate_limit','state'].forEach(t=>es.addEventListener(t,e=>{load();if(t==='rate_limit'){const d=JSON.parse(e.data);toast((d.account?.email||d.account?.name||'Account')+' hit its limit. '+(d.account?.limitResetsAt?'Fresh limits at '+new Date(d.account.limitResetsAt).toLocaleString()+'. ':'')+(d.activeAccountId?'Switched automatically to '+d.activeAccountId+'.':'No ready teammate remains.'));if(Notification.permission==='granted')new Notification('OpenAI-CC',{body:(d.account?.email||d.account?.name||'Account')+' exhausted; '+(d.activeAccountId?'switched to '+d.activeAccountId+'.':'no ready teammate remains.')})}}));
 function toast(t){const x=document.querySelector('#toast');x.textContent=t;x.style.display='block';setTimeout(()=>x.style.display='none',8000)}
 if('Notification'in window&&Notification.permission==='default')Notification.requestPermission();setInterval(()=>{if(currentState)render(currentState)},1000);load();</script></body></html>`;
 }
