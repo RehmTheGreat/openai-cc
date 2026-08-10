@@ -2,25 +2,24 @@
 
 A small local Node/TypeScript service that exposes the Anthropic endpoints Claude Code expects and sends one explicitly active teammate's requests through their own ChatGPT/Codex OAuth session.
 
-## Important addition needed (please make sure the project goes this way, on next push)
+## Important addition implemented
 
-- **One active teammate at a time, with their account in rotation, email displayed on admin panel.**
-- Every teammate authenticates their **own** ChatGPT account from terminal.
-- A `429` marks that account `exhausted`, it shows that on the admin panel so that the teammate can now stop working.
-- It retries the request under next account and displays the new currently working account in admin panel. The next teammate continues exactly where the left off.
+- **One active teammate at a time, with their account in rotation and email displayed on the admin panel.**
+- Every teammate authenticates their **own** ChatGPT account from either the terminal or the browser admin panel.
+- The first upstream request made by an account starts a persisted five-hour usage window. The admin panel shows when that window started, the exact stored reset time, and a live countdown.
+- A `429` marks that account `exhausted`, clears it as the active account, and shows the exhaustion/reset state on the admin panel so that teammate can stop working.
+- The next ready teammate is suggested in the admin panel and must be explicitly activated before work continues. Requests are not silently replayed under another person's account.
+- When the stored five-hour reset time arrives, the account automatically becomes `ready` again and its next request starts a fresh five-hour window.
 - Tokens live only under `.data/accounts/<id>/auth.json`; `.data/` is gitignored. Treat those files like passwords.
 - The service binds to `127.0.0.1` by default.
 
-This intentional admin panel display avoids turning multiple individual accounts into one pooled quota. OpenAI's current business terms prohibit sharing individual credentials and configuring services to avoid usage limits, so each teammate uses their own account only.
-
-- OAuth (account-adding) support from browser panel, not just terminal.
-- It also saves which account sent it's first request and then knows it will be available with fresh limits exactly after 5 hours.
+This intentional admin-panel handoff avoids turning multiple individual accounts into one pooled quota. OpenAI's current business terms prohibit sharing individual credentials and configuring services to avoid usage limits, so each teammate uses their own account only.
 
 ## Pieces
 
-1. `src/account-store.ts` — account metadata, per-user auth paths, active-account state, exhausted state and events.
+1. `src/account-store.ts` — account metadata, email discovery, per-user auth paths, active-account state, exhaustion state, five-hour window timestamps/timers, and events.
 2. `src/translator.ts` — Anthropic messages/tools/tool-results ↔ OpenAI Responses payloads and Anthropic SSE events.
-3. `src/dispatcher.ts` — `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models`, upstream dispatch and the tiny admin surface.
+3. `src/dispatcher.ts` — `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models`, upstream dispatch, browser OAuth account setup, and the admin surface.
 
 `src/index.ts` only wires those pieces together.
 
@@ -40,7 +39,7 @@ On Windows, the shortest setup is instead:
 .\setup.ps1
 ```
 
-Add each teammate one at a time on the shared PC:
+Add each teammate one at a time on the shared PC from the terminal:
 
 ```bash
 npm run account:add -- --id faseeh --name "Faseeh"
@@ -48,6 +47,8 @@ npm run account:add -- --id teammate2 --name "Teammate 2"
 ```
 
 Each command opens the ChatGPT/Codex OAuth flow and writes that person's credentials to a separate local file.
+
+Or start the proxy, open `http://127.0.0.1:8082/admin`, enter an account id and display name under **Add teammate with ChatGPT OAuth**, and complete the browser sign-in. The authenticated email is read from the local OAuth data when available and displayed in the admin panel.
 
 Start the proxy:
 
