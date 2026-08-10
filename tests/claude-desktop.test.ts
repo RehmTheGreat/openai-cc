@@ -78,18 +78,74 @@ test("Claude Desktop 3P configuration is merged and idempotent", async () => {
   assert.equal(meta.entries.some((entry: any) => entry.id === "other"), true);
 });
 
+test("PowerShell installer requires explicit buffered Y/N choices for optional apps", async () => {
+  const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
+
+  assert.match(setup, /function Clear-PendingConsoleInput/);
+  assert.match(setup, /\[Console\]::KeyAvailable/);
+  assert.match(setup, /\[Console\]::ReadKey\(\$true\)/);
+  assert.match(setup, /if \(\$key\.Key -eq \[ConsoleKey\]::Y\)/);
+  assert.match(setup, /if \(\$key\.Key -eq \[ConsoleKey\]::N\)/);
+  assert.match(setup, /Install Claude Code CLI\?/);
+  assert.match(setup, /Install VS Code and the Claude Code extension\?/);
+  assert.match(setup, /Install and configure Claude Desktop\?/);
+
+  assert.match(setup, /Anthropic\.ClaudeCode/);
+  assert.match(setup, /Microsoft\.VisualStudioCode/);
+  assert.match(setup, /anthropic\.claude-code/);
+  assert.match(setup, /Anthropic\.Claude/);
+  assert.doesNotMatch(setup, /Invoke-WingetUpgrade\s+"Anthropic\.ClaudeCode"/);
+  assert.doesNotMatch(setup, /Invoke-WingetUpgrade\s+"Microsoft\.VisualStudioCode"/);
+  assert.doesNotMatch(setup, /Invoke-WingetUpgrade\s+"Anthropic\.Claude"/);
+  assert.match(setup, /claudeCode\.disableLoginPrompt/);
+});
+
+test("PowerShell installer configures the shared token-efficiency stack and persistent gateway", async () => {
+  const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
+
+  assert.match(setup, /Desktop\\Claude/);
+  assert.match(setup, /CLAUDE_CODE_AUTO_COMPACT_WINDOW/);
+  assert.match(setup, /700000/);
+  assert.match(setup, /CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY/);
+  assert.match(setup, /typescript-language-server/);
+  assert.match(setup, /typescript-lsp@claude-plugins-official/);
+  assert.match(setup, /context-mode@context-mode/);
+  assert.match(setup, /mksglu\/context-mode/);
+  assert.match(setup, /rtk-x86_64-pc-windows-msvc\.zip/);
+  assert.match(setup, /init -g --auto-patch/);
+  assert.match(setup, /dist\/scripts\/configure-clients\.js/);
+  assert.match(setup, /OpenAI-CC Gateway\.lnk/);
+  assert.match(setup, /http:\/\/127\.0\.0\.1:8082\/healthz/);
+  assert.match(setup, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP/);
+  assert.doesNotMatch(setup, /(?:OPENAI|NVIDIA|GEMINI|GOOGLE|ZEN|ANTHROPIC)_API_KEY\s*[=:]/i);
+  assert.doesNotMatch(setup, /DISABLE_COMPACT\s*[=:]/);
+});
+
+test("shared Claude settings use safe aliases, 700k auto-compaction, and onboarding repair", async () => {
+  const source = await readFile(path.join(process.cwd(), "src", "claude-config.ts"), "utf8");
+
+  assert.match(source, /CLAUDE_DESKTOP_MODEL_ALIASES\.fable/);
+  assert.match(source, /CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY/);
+  assert.match(source, /CLAUDE_CODE_AUTO_COMPACT_WINDOW/);
+  assert.match(source, /hasCompletedOnboarding = true/);
+  assert.match(source, /hasSeenOnboarding = true/);
+  assert.doesNotMatch(source, /DISABLE_COMPACT\s*[=:]/);
+});
+
+test("gateway startup honors persistent Claude Desktop opt-out", async () => {
+  const index = await readFile(path.join(process.cwd(), "src", "index.ts"), "utf8");
+  const launcher = await readFile(path.join(process.cwd(), "run-gateway.ps1"), "utf8");
+  const clients = await readFile(path.join(process.cwd(), "scripts", "configure-clients.ts"), "utf8");
+
+  assert.match(index, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP !== "0"/);
+  assert.match(clients, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP !== "0"/);
+  assert.match(clients, /OPENAI_CC_CONTEXT_WINDOW \|\| 700000/);
+  assert.match(launcher, /dist\/src\/index\.js/);
+  assert.match(launcher, /127\.0\.0\.1:8082\/healthz/);
+});
+
 async function writeJson(file: string, value: unknown): Promise<void> {
   const { mkdir } = await import("node:fs/promises");
   await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
-
-test("PowerShell setup installs Claude Desktop only when missing and configures the local gateway", async () => {
-  const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
-  assert.match(setup, /Test-ClaudeDesktopInstalled/);
-  assert.match(setup, /winget install --id Anthropic\.Claude --exact/);
-  assert.doesNotMatch(setup, /winget\s+upgrade/i);
-  assert.match(setup, /dist\/scripts\/configure-claude-desktop\.js/);
-  assert.match(setup, /http:\/\/127\.0\.0\.1:8082\/healthz/);
-  assert.doesNotMatch(setup, /API[_ -]?KEY\s*=|ANTHROPIC_AUTH_TOKEN\s*=/i);
-});
