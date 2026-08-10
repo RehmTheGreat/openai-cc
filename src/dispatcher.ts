@@ -6,8 +6,9 @@ import OpenAI from "openai";
 import { createOpenAIOAuthTransport } from "@openai-oauth/core";
 import { openaiCredentials } from "@openai-oauth/local";
 import { AccountRecord, AccountStore, ProviderKind, readAuthEmail, validateId } from "./account-store.js";
-import { AnthropicRequest, AnthropicSseTranslator, anthropicToResponses, estimateAnthropicTokens, mapModel, responsesToAnthropic } from "./translator.js";
+import { AnthropicRequest, AnthropicSseTranslator, anthropicToResponses, estimateAnthropicTokens, responsesToAnthropic } from "./translator.js";
 import { AnthropicChatSseTranslator, anthropicToChatCompletions, chatCompletionToAnthropic } from "./chat-translator.js";
+import { MODEL_SLOTS, ModelConfigStore, ModelRoute, ModelSlot } from "./model-config.js";
 
 type OAuthJobStatus = "pending" | "complete" | "error";
 interface OAuthJob {
@@ -27,7 +28,7 @@ export class Dispatcher {
   private eventStreams = new Set<ServerResponse>();
   private oauthJobs = new Map<string, OAuthJob>();
 
-  constructor(private readonly store: AccountStore) {
+  constructor(private readonly store: AccountStore, private readonly models: ModelConfigStore) {
     store.on("event", (event) => {
       const payload = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
       for (const res of this.eventStreams) res.write(payload);
@@ -41,11 +42,10 @@ export class Dispatcher {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 
       if (req.method === "GET" && url.pathname === "/healthz") {
-        const active = this.store.active();
-        return void json(res, 200, { ok: true, activeAccountId: active?.id ?? null, provider: active?.provider ?? null });
+        return void json(res, 200, { ok: true, contextWindow: this.models.snapshot().contextWindow });
       }
       if (req.method === "GET" && url.pathname === "/v1/models") {
-        return void json(res, 200, { object: "list", data: modelAliases().map((id) => ({ id, object: "model", created: 0, owned_by: "local-handoff" })) });
+        return void json(res, 200, { object: "list", data: modelAliases().map((id) => ({ id, object: "model", created: 0, owned_by: "openai-cc" })) });
       }
       if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
         const body = await readJson<AnthropicRequest>(req);
@@ -56,7 +56,11 @@ export class Dispatcher {
       }
 
       if (req.method === "GET" && url.pathname === "/admin") return void html(res, adminHtml());
-      if (req.method === "GET" && url.pathname === "/admin/state") return void json(res, 200, this.store.snapshot());
+      if (req.method === "GET" && url.pathname === "/admin/state") return void json(res, 200, { ...this.store.snapshot(), modelConfig: this.models.snapshot() });
+      if (req.method === "POST" && url.pathname === "/admin/model-config") {
+        const body = await readJson<any>(req);
+        return void json(res, 200, await this.models.update(body));
+      }
       if (req.method === "GET" && url.pathname === "/admin/events") return void this.handleEventStream(req, res);
       if (req.method === "POST" && url.pathname === "/admin/accounts") {
         const body = await readJson<{ id?: string; name?: string }>(req);
@@ -88,20 +92,20 @@ export class Dispatcher {
 
   private async handleMessages(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await readJson<AnthropicRequest>(req);
-    let account = this.store.active() ?? this.store.suggestedNext();
+    const route = this.models.routeForRequestedModel(body.model);
+    const attempted = new Set<string>();
+    let account = this.models.credentialForRequestedModel(body.model, attempted);
     if (!account) {
       return void json(res, 409, {
-        error: { type: "handoff_required", message: "No credential is ready. Wait for a reset/cooldown or add another account/API key in /admin." },
+        error: { type: "handoff_required", message: `No ready ${route.provider} credential is available for ${this.models.slotForRequestedModel(body.model)}.` },
       });
     }
-    if (!this.store.active()) account = await this.store.activate(account.id);
 
-    const attempted = new Set<string>();
     while (account && !attempted.has(account.id)) {
       attempted.add(account.id);
       await this.store.noteRequest(account.id);
       const client = this.clientFor(account);
-      const model = providerModel(account, body.model);
+      const model = route.model || account.model || body.model;
 
       try {
         if (usesResponsesApi(account)) {
@@ -136,26 +140,18 @@ export class Dispatcher {
       } catch (error: any) {
         if (!isRateLimit(error)) throw error;
         const cooldown = rateLimitCooldownMs(error, account);
-
         if (res.headersSent) {
-          await this.store.markRateLimited(account.id, error?.message ?? "429 rate limit", true, cooldown);
+          await this.models.markRateLimitedAndNext(body.model, account, error?.message ?? "429 rate limit", cooldown, attempted);
           if (!res.writableEnded) {
-            res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "The active credential hit a limit after streaming began; the next ready credential is active for the following request." } })}\n\n`);
+            res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "The configured credential hit a limit after streaming began; a same-provider credential will be used for the next request." } })}\n\n`);
             res.end();
           }
           return;
         }
-
-        const next = await this.store.markRateLimited(account.id, error?.message ?? "429 rate limit", true, cooldown);
-        if (!next || attempted.has(next.id)) {
-          return void json(res, 429, {
-            error: {
-              type: "rate_limit_error",
-              message: "All ready credentials are currently rate-limited. The proxy exhausted failover options before returning this 429.",
-            },
-          });
+        account = await this.models.markRateLimitedAndNext(body.model, account, error?.message ?? "429 rate limit", cooldown, attempted);
+        if (!account) {
+          return void json(res, 429, { error: { type: "rate_limit_error", message: `All ready ${route.provider} credentials for this model slot are rate-limited.` } });
         }
-        account = next;
       }
     }
   }
@@ -196,7 +192,6 @@ export class Dispatcher {
       windowsHide: true,
     });
     let settled = false;
-
     const fail = (message: string): void => {
       if (settled) return;
       settled = true;
@@ -204,7 +199,6 @@ export class Dispatcher {
       job.error = message;
       job.finishedAt = new Date().toISOString();
     };
-
     child.once("error", (error) => fail(error.message));
     child.once("exit", (code) => {
       if (settled) return;
@@ -230,7 +224,6 @@ export class Dispatcher {
         }
       })();
     });
-
     return { ...job };
   }
 
@@ -239,7 +232,6 @@ export class Dispatcher {
     if (cached) return cached;
     const provider = account.provider ?? "chatgpt";
     let client: OpenAI;
-
     if (provider === "chatgpt") {
       if (!account.authFile) throw new Error(`ChatGPT credential ${account.id} has no auth file.`);
       const credentials = openaiCredentials({ authFilePath: account.authFile });
@@ -259,14 +251,14 @@ export class Dispatcher {
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
     });
-    res.write(`event: state\ndata: ${JSON.stringify(this.store.snapshot())}\n\n`);
+    res.write(`event: state\ndata: ${JSON.stringify({ ...this.store.snapshot(), modelConfig: this.models.snapshot() })}\n\n`);
     this.eventStreams.add(res);
     req.on("close", () => this.eventStreams.delete(res));
   }
 }
 
-export function createServer(store: AccountStore): http.Server {
-  const dispatcher = new Dispatcher(store);
+export function createServer(store: AccountStore, models: ModelConfigStore): http.Server {
+  const dispatcher = new Dispatcher(store, models);
   return http.createServer((req, res) => { void dispatcher.handler(req, res); });
 }
 
@@ -274,10 +266,6 @@ function providerBaseUrl(provider: ApiProvider): string {
   if (provider === "zen") return "https://opencode.ai/zen/v1";
   if (provider === "nvidia") return "https://integrate.api.nvidia.com/v1";
   return "https://generativelanguage.googleapis.com/v1beta/openai/";
-}
-
-function providerModel(account: AccountRecord, requestedModel: string): string {
-  return account.model || mapModel(requestedModel);
 }
 
 function usesResponsesApi(account: AccountRecord): boolean {
@@ -341,44 +329,29 @@ async function readJson<T>(req: IncomingMessage): Promise<T> {
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as T;
 }
 
-function send(res: ServerResponse, status: number, body: string): void {
-  res.statusCode = status;
-  res.end(body);
-}
-function json(res: ServerResponse, status: number, body: unknown): void {
-  res.statusCode = status;
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.end(JSON.stringify(body));
-}
-function html(res: ServerResponse, body: string): void {
-  res.statusCode = 200;
-  res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.end(body);
-}
+function send(res: ServerResponse, status: number, body: string): void { res.statusCode = status; res.end(body); }
+function json(res: ServerResponse, status: number, body: unknown): void { res.statusCode = status; res.setHeader("Content-Type", "application/json; charset=utf-8"); res.end(JSON.stringify(body)); }
+function html(res: ServerResponse, body: string): void { res.statusCode = 200; res.setHeader("Content-Type", "text/html; charset=utf-8"); res.end(body); }
 function setCors(res: ServerResponse): void {
   res.setHeader("Access-Control-Allow-Origin", "http://127.0.0.1");
   res.setHeader("Access-Control-Allow-Headers", "content-type,x-api-key,anthropic-version,anthropic-beta");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
 }
-function modelAliases(): string[] {
-  return ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5", mapModel("default")];
-}
+function modelAliases(): string[] { return ["Default", "Fable", "Opus", "Sonnet", "Haiku"]; }
 
 function adminHtml(): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenAI-CC</title><style>
-body{font:14px system-ui;margin:0;background:#0e1116;color:#e8edf3}.wrap{max-width:980px;margin:36px auto;padding:0 18px}h1{font-size:24px}.note,.add{background:#171c24;padding:14px;border-radius:10px;margin:16px 0}.card{display:grid;grid-template-columns:1fr auto;gap:12px;background:#171c24;margin:10px 0;padding:14px;border-radius:10px}.muted{color:#9aa6b2}.ready{color:#73d69c}.exhausted{color:#ff8f8f}.active{outline:2px solid #7aa2ff}button{background:#2b66d9;color:white;border:0;border-radius:7px;padding:8px 12px;cursor:pointer}button.secondary{background:#39414d}input,select{background:#0e1116;color:#e8edf3;border:1px solid #39414d;border-radius:7px;padding:9px;margin:4px 6px 4px 0}.toast{position:fixed;right:20px;bottom:20px;background:#242b36;padding:14px;border-radius:10px;max-width:420px;display:none}</style></head><body><div class="wrap"><h1>OpenAI-CC</h1><div class="note">One active credential at a time across ChatGPT OAuth, OpenCode Zen, NVIDIA NIM, and Google AI Studio. A pre-output 429 marks that credential exhausted, activates the next ready credential, and transparently retries the request. API-key cooldowns use Retry-After when supplied; otherwise the default cooldown is 15 minutes.</div><div class="add"><b>Add teammate with ChatGPT OAuth</b><form onsubmit="startOAuth(event)"><input id="oauth-id" required pattern="[A-Za-z0-9._-]{1,64}" placeholder="credential id"><input id="oauth-name" required placeholder="display name"><button type="submit">Add ChatGPT account</button></form><div id="oauth-status" class="muted"></div></div><div class="add"><b>Add API key</b><div class="muted">Add as many keys as needed. Each entry participates in the same rotation.</div><form onsubmit="addKey(event)"><select id="key-provider"><option value="zen">OpenCode Zen</option><option value="nvidia">NVIDIA NIM</option><option value="google">Google AI Studio</option></select><input id="key-id" required pattern="[A-Za-z0-9._-]{1,64}" placeholder="credential id"><input id="key-name" required placeholder="display name"><input id="key-model" required placeholder="provider model id"><input id="key-value" required type="password" autocomplete="off" placeholder="API key"><button type="submit">Add API key</button></form><div id="key-status" class="muted"></div></div><div id="status" class="muted"></div><div id="accounts"></div></div><div id="toast" class="toast"></div><script>
-let currentState=null;
+body{font:14px system-ui;margin:0;background:#0e1116;color:#e8edf3}.wrap{max-width:1050px;margin:36px auto;padding:0 18px}h1{font-size:24px}.note,.add{background:#171c24;padding:14px;border-radius:10px;margin:16px 0}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.card{display:grid;grid-template-columns:1fr auto;gap:12px;background:#171c24;margin:10px 0;padding:14px;border-radius:10px}.muted{color:#9aa6b2}.ready{color:#73d69c}.exhausted{color:#ff8f8f}button{background:#2b66d9;color:white;border:0;border-radius:7px;padding:8px 12px;cursor:pointer}button.secondary{background:#39414d}input,select{background:#0e1116;color:#e8edf3;border:1px solid #39414d;border-radius:7px;padding:9px;margin:4px 6px 4px 0;min-width:0}.toast{position:fixed;right:20px;bottom:20px;background:#242b36;padding:14px;border-radius:10px;max-width:420px;display:none}@media(max-width:800px){.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><h1>OpenAI-CC</h1><div class="note">Claude Code is exposed only as <b>Default, Fable, Opus, Sonnet, Haiku</b>. Each slot routes to the provider/model below. Default context window: 700,000 tokens.</div><div class="add"><b>Model config</b><div class="muted">Choose a provider, exact upstream model id, and optionally pin a credential id. Leave credential blank to use the first ready credential for that provider.</div><div id="model-config"></div><button onclick="saveModels()">Save model config</button><div id="model-status" class="muted"></div></div><div class="add"><b>Add teammate with ChatGPT OAuth</b><form onsubmit="startOAuth(event)"><input id="oauth-id" required pattern="[A-Za-z0-9._-]{1,64}" placeholder="credential id"><input id="oauth-name" required placeholder="display name"><button type="submit">Add ChatGPT account</button></form><div id="oauth-status" class="muted"></div></div><div class="add"><b>Add API key</b><form onsubmit="addKey(event)"><select id="key-provider"><option value="zen">OpenCode Zen</option><option value="nvidia">NVIDIA NIM</option><option value="google">Google AI Studio</option></select><input id="key-id" required pattern="[A-Za-z0-9._-]{1,64}" placeholder="credential id"><input id="key-name" required placeholder="display name"><input id="key-model" required placeholder="provider model id"><input id="key-value" required type="password" autocomplete="off" placeholder="API key"><button type="submit">Add API key</button></form><div id="key-status" class="muted"></div></div><div id="status" class="muted"></div><div id="accounts"></div></div><div id="toast" class="toast"></div><script>
+const slots=['default','fable','opus','sonnet','haiku'];let currentState=null;
 async function load(){const s=await fetch('/admin/state').then(r=>r.json());currentState=s;render(s)}
-function remaining(iso){if(!iso)return'';const ms=Math.max(0,new Date(iso).getTime()-Date.now());const sec=Math.ceil(ms/1000),h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;return h+'h '+m+'m '+s+'s'}
-function render(s){const active=s.accounts.find(a=>a.id===s.activeAccountId);document.querySelector('#status').textContent='Active: '+(active?label(active):'none')+' · Next: '+(s.suggestedNextAccountId||'none');document.querySelector('#accounts').innerHTML=s.accounts.map(a=>'<div class="card '+(a.id===s.activeAccountId?'active':'')+'"><div><b>'+esc(a.name)+'</b> <span class="muted">('+esc(a.id)+')</span><div>'+esc(providerName(a.provider||'chatgpt'))+(a.model?' · '+esc(a.model):'')+(a.email?' · '+esc(a.email):'')+'</div><div class="'+a.status+'">'+a.status+(a.exhaustedAt?' · exhausted '+new Date(a.exhaustedAt).toLocaleString():'')+'</div>'+(a.limitResetsAt?'<div class="muted">Ready again '+new Date(a.limitResetsAt).toLocaleString()+' · '+remaining(a.limitResetsAt)+'</div>':'')+'<div class="muted">'+esc(a.lastError||'')+'</div></div><div>'+(a.status==='ready'?'<button onclick="post(\'/admin/accounts/'+encodeURIComponent(a.id)+'/activate\')">Activate</button>':'<button class="secondary" '+(a.limitResetsAt&&new Date(a.limitResetsAt).getTime()>Date.now()?'disabled':'')+' onclick="post(\'/admin/accounts/'+encodeURIComponent(a.id)+'/reset\')">Reset</button>')+'</div></div>').join('')}
-function label(a){return (a.email||a.name)+' ['+providerName(a.provider||'chatgpt')+']'}
+function render(s){document.querySelector('#status').textContent='Credentials: '+s.accounts.length+' · Context: '+s.modelConfig.contextWindow.toLocaleString();document.querySelector('#accounts').innerHTML=s.accounts.map(a=>'<div class="card"><div><b>'+esc(a.name)+'</b> <span class="muted">('+esc(a.id)+')</span><div>'+esc(providerName(a.provider||'chatgpt'))+(a.model?' · '+esc(a.model):'')+(a.email?' · '+esc(a.email):'')+'</div><div class="'+a.status+'">'+a.status+'</div><div class="muted">'+esc(a.lastError||'')+'</div></div><div>'+(a.status==='ready'?'<button onclick="post(\'/admin/accounts/'+encodeURIComponent(a.id)+'/activate\')">Activate</button>':'<button class="secondary" onclick="post(\'/admin/accounts/'+encodeURIComponent(a.id)+'/reset\')">Reset</button>')+'</div></div>').join('');renderModels(s)}
+function renderModels(s){const c=s.modelConfig,accounts=s.accounts;document.querySelector('#model-config').innerHTML='<div class="grid"><label>Context window<input id="context-window" type="number" min="200000" max="1000000" value="'+c.contextWindow+'"></label></div>'+slots.map(slot=>{const r=c.routes[slot];const creds=accounts.filter(a=>(a.provider||'chatgpt')===r.provider);return '<div class="grid"><b>'+slot[0].toUpperCase()+slot.slice(1)+'</b><select id="p-'+slot+'" onchange="load()">'+['chatgpt','zen','nvidia','google'].map(p=>'<option value="'+p+'" '+(p===r.provider?'selected':'')+'>'+providerName(p)+'</option>').join('')+'</select><input id="m-'+slot+'" value="'+esc(r.model)+'" placeholder="upstream model id"><input id="c-'+slot+'" value="'+esc(r.credentialId||'')+'" placeholder="credential id (optional)"></div>'}).join('')}
+async function saveModels(){const routes={};for(const slot of slots)routes[slot]={provider:document.querySelector('#p-'+slot).value,model:document.querySelector('#m-'+slot).value.trim(),credentialId:document.querySelector('#c-'+slot).value.trim()||undefined};const r=await fetch('/admin/model-config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({contextWindow:Number(document.querySelector('#context-window').value),routes})});document.querySelector('#model-status').textContent=r.ok?'Saved. Restart server to re-apply Claude Code local settings.':'Save failed';await load()}
 function providerName(p){return p==='chatgpt'?'ChatGPT OAuth':p==='zen'?'OpenCode Zen':p==='nvidia'?'NVIDIA NIM':'Google AI Studio'}
-async function post(url){const r=await fetch(url,{method:'POST'});const d=await r.json().catch(()=>({}));if(!r.ok)toast(d.error?.message||'Request failed');await load()}
-async function addKey(e){e.preventDefault();const provider=document.querySelector('#key-provider').value,id=document.querySelector('#key-id').value.trim(),name=document.querySelector('#key-name').value.trim(),model=document.querySelector('#key-model').value.trim(),apiKey=document.querySelector('#key-value').value.trim(),status=document.querySelector('#key-status');status.textContent='Saving…';const r=await fetch('/admin/keys',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({provider,id,name,model,apiKey})});const d=await r.json().catch(()=>({}));if(!r.ok){status.textContent=d.error?.message||'Could not add key';return}document.querySelector('#key-value').value='';status.textContent='Added '+name+' ('+providerName(provider)+').';await load()}
-async function startOAuth(e){e.preventDefault();const id=document.querySelector('#oauth-id').value.trim(),name=document.querySelector('#oauth-name').value.trim(),status=document.querySelector('#oauth-status');status.textContent='Starting OAuth…';const r=await fetch('/admin/accounts',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id,name})});const d=await r.json().catch(()=>({}));if(!r.ok){status.textContent=d.error?.message||'Could not start OAuth';return}status.textContent='OAuth started. Complete ChatGPT sign-in in the browser window.';watchOAuth(id)}
-async function watchOAuth(id){const status=document.querySelector('#oauth-status');const r=await fetch('/admin/oauth/'+encodeURIComponent(id));const d=await r.json().catch(()=>({}));if(!r.ok){status.textContent='OAuth status unavailable';return}if(d.status==='complete'){status.textContent='Added '+(d.email||d.name)+'.';toast('Account added: '+(d.email||d.name));await load();return}if(d.status==='error'){status.textContent='OAuth failed: '+(d.error||'unknown error');return}setTimeout(()=>watchOAuth(id),1000)}
-function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot',"'":'&#39;'}[c]))}
-const es=new EventSource('/admin/events');['changed','activated','rate_limit','state'].forEach(t=>es.addEventListener(t,e=>{load();if(t==='rate_limit'){const d=JSON.parse(e.data);toast((d.account?.name||'Credential')+' hit its limit. '+(d.activeAccountId?'Switched automatically to '+d.activeAccountId+'.':'No ready credential remains.'))}}));
-function toast(t){const x=document.querySelector('#toast');x.textContent=t;x.style.display='block';setTimeout(()=>x.style.display='none',8000)}
-setInterval(()=>{if(currentState)render(currentState)},1000);load();</script></body></html>`;
+async function post(url){await fetch(url,{method:'POST'});load()}
+async function addKey(e){e.preventDefault();const provider=document.querySelector('#key-provider').value,id=document.querySelector('#key-id').value.trim(),name=document.querySelector('#key-name').value.trim(),model=document.querySelector('#key-model').value.trim(),apiKey=document.querySelector('#key-value').value.trim(),status=document.querySelector('#key-status');const r=await fetch('/admin/keys',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({provider,id,name,model,apiKey})});const d=await r.json().catch(()=>({}));status.textContent=r.ok?'Added '+name+'.':(d.error?.message||'Could not add key');if(r.ok)document.querySelector('#key-value').value='';await load()}
+async function startOAuth(e){e.preventDefault();const id=document.querySelector('#oauth-id').value.trim(),name=document.querySelector('#oauth-name').value.trim(),status=document.querySelector('#oauth-status');const r=await fetch('/admin/accounts',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id,name})});const d=await r.json().catch(()=>({}));if(!r.ok){status.textContent=d.error?.message||'Could not start OAuth';return}status.textContent='OAuth started. Complete sign-in in the browser.';watchOAuth(id)}
+async function watchOAuth(id){const status=document.querySelector('#oauth-status');const r=await fetch('/admin/oauth/'+encodeURIComponent(id));const d=await r.json().catch(()=>({}));if(d.status==='complete'){status.textContent='Added '+(d.email||d.name)+'.';await load();return}if(d.status==='error'){status.textContent='OAuth failed: '+(d.error||'unknown error');return}setTimeout(()=>watchOAuth(id),1000)}
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+const es=new EventSource('/admin/events');['changed','activated','rate_limit','state'].forEach(t=>es.addEventListener(t,load));load();</script></body></html>`;
 }
