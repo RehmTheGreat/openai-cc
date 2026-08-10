@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { CLAUDE_DESKTOP_MODEL_ALIASES } from "./claude-desktop.js";
 import { ModelConfig } from "./model-config.js";
 
 export interface ClaudeConfigureResult {
@@ -15,21 +16,30 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig):
   await mkdir(claudeDir, { recursive: true, mode: 0o700 });
 
   const settings = await readJson(settingsFile);
-  const env = isObject(settings.env) ? settings.env as Record<string, unknown> : {};
+  const env = isObject(settings.env) ? { ...settings.env as Record<string, unknown> } : {};
+
+  // Remove the old OpenAI-CC context overrides. CLAUDE_CODE_MAX_CONTEXT_TOKENS only
+  // takes effect when DISABLE_COMPACT is set, which defeats the token-efficient setup.
+  if (env.CLAUDE_CODE_CONTEXT_WINDOW === String(config.contextWindow)) delete env.CLAUDE_CODE_CONTEXT_WINDOW;
+  if (env.CLAUDE_CODE_MAX_CONTEXT_TOKENS === String(config.contextWindow)) delete env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
+
   settings.env = {
     ...env,
-    ANTHROPIC_BASE_URL: baseUrl,
+    ANTHROPIC_BASE_URL: normalizeBaseUrl(baseUrl),
     ANTHROPIC_AUTH_TOKEN: "local-not-used",
-    ANTHROPIC_MODEL: "Default",
-    ANTHROPIC_DEFAULT_OPUS_MODEL: "Opus",
-    ANTHROPIC_DEFAULT_SONNET_MODEL: "Sonnet",
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: "Haiku",
-    ANTHROPIC_DEFAULT_FABLE_MODEL: "Fable",
-    CLAUDE_CODE_CONTEXT_WINDOW: String(config.contextWindow),
-    CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(config.contextWindow),
+    ANTHROPIC_MODEL: CLAUDE_DESKTOP_MODEL_ALIASES.fable,
+    ANTHROPIC_DEFAULT_FABLE_MODEL: CLAUDE_DESKTOP_MODEL_ALIASES.fable,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: CLAUDE_DESKTOP_MODEL_ALIASES.opus,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: CLAUDE_DESKTOP_MODEL_ALIASES.sonnet,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: CLAUDE_DESKTOP_MODEL_ALIASES.haiku,
+    CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(config.contextWindow),
+    CLAUDE_CODE_PLUGIN_PREFER_HTTPS: "1",
   };
   await writeFile(settingsFile, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
 
+  // Claude Code occasionally re-enters onboarding when routed through a local gateway.
+  // Preserve every unrelated state field and only mark the local onboarding as completed.
   const state = await readJson(stateFile);
   state.hasCompletedOnboarding = true;
   state.hasSeenOnboarding = true;
@@ -47,6 +57,10 @@ async function readJson(file: string): Promise<Record<string, any>> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw error;
   }
+}
+
+function normalizeBaseUrl(value: string): string {
+  return String(value || "").trim().replace(/\/+$/, "");
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
