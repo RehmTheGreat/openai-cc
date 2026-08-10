@@ -70,8 +70,8 @@ export class ModelConfigStore {
   credentialForRequestedModel(model: string, attempted = new Set<string>()): AccountRecord | undefined {
     const route = this.routeForRequestedModel(model);
     const candidates = this.accounts.list().filter((a) => (a.provider ?? "chatgpt") === route.provider && a.status === "ready" && !attempted.has(a.id));
-    if (route.credentialId) return candidates.find((a) => a.id === route.credentialId);
-    return candidates[0];
+    const candidate = route.credentialId ? candidates.find((a) => a.id === route.credentialId) : candidates[0];
+    return candidate ? this.accounts.get(candidate.id) : undefined;
   }
 
   async markRateLimitedAndNext(model: string, account: AccountRecord, message: string, cooldownMs?: number, attempted = new Set<string>()): Promise<AccountRecord | undefined> {
