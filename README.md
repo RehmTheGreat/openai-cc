@@ -14,6 +14,7 @@ A small local Node/TypeScript service that exposes the Anthropic endpoints Claud
 This intentional admin panel display avoids turning multiple individual accounts into one pooled quota. OpenAI's current business terms prohibit sharing individual credentials and configuring services to avoid usage limits, so each teammate uses their own account only.
 
 - OAuth (account-adding) support from browser panel, not just terminal.
+- It also saves which account sent it's first request and then knows it will be available with fresh limits exactly after 5 hours.
 
 ## Pieces
 
@@ -99,17 +100,6 @@ or a JSON mapping, where exact ids are checked first and prefixes second:
 MODEL_MAP_JSON='{"claude-opus":"gpt-5.6-sol","claude-sonnet":"gpt-5.6-sol","claude-haiku":"gpt-5.4-mini"}'
 ```
 
-## 429 handoff flow
-
-1. Faseeh is active and uses Claude Code.
-2. Upstream returns `429`.
-3. The proxy marks Faseeh exhausted, clears `activeAccountId`, and notifies `/admin`.
-4. The current Claude Code request receives `429`; it is not replayed elsewhere.
-5. Teammate 2 sits down, opens the admin panel and clicks **Activate** on their own account.
-6. New Claude Code requests now use Teammate 2's OAuth session.
-
-When an account's provider quota has actually reset, click **Reset** and it becomes eligible for activation again.
-
 ## Compatibility notes
 
 - `POST /v1/messages`: text, images, tools, tool results, streaming text, function-call argument deltas, and OpenAI reasoning **summaries** are translated.
@@ -122,5 +112,3 @@ When an account's provider quota has actually reset, click **Reset** and it beco
 
 - Keep this loopback-only unless you add real authentication and TLS.
 - Never commit `.data/`.
-- Do not copy one teammate's auth file to another person/device.
-- Revoke a teammate by deleting their local auth directory and disconnecting/revoking Codex access from their OpenAI account as appropriate.
