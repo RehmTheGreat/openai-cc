@@ -17,7 +17,10 @@ const authFile = store.authFileFor(id);
 await mkdir(path.dirname(authFile), { recursive: true, mode: 0o700 });
 
 console.log(`Signing in ${name}. The OAuth callback stays on this machine.`);
-const child = spawn(process.platform === "win32" ? "npx.cmd" : "npx", ["--yes", "openai-oauth@latest", "login", "--oauth-file", authFile], { stdio: "inherit" });
+const npxArgs = ["--yes", "openai-oauth@latest", "login", "--oauth-file", authFile];
+const child = process.platform === "win32"
+  ? spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "npx", ...npxArgs], { stdio: "inherit" })
+  : spawn("npx", npxArgs, { stdio: "inherit" });
 const code = await new Promise<number>((resolve) => child.on("exit", (c) => resolve(c ?? 1)));
 if (code !== 0) process.exit(code);
 const email = await readAuthEmail(authFile);
