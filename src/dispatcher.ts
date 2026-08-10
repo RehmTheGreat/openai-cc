@@ -172,8 +172,10 @@ export class Dispatcher {
     await mkdir(path.dirname(authFile), { recursive: true, mode: 0o700 });
     const job: OAuthJob = { id, name, status: "pending", startedAt: new Date().toISOString() };
     this.oauthJobs.set(id, job);
-    const command = process.platform === "win32" ? "npx.cmd" : "npx";
-    const child = spawn(command, ["--yes", "openai-oauth@latest", "login", "--oauth-file", authFile], { stdio: "ignore", windowsHide: true });
+    const npxArgs = ["--yes", "openai-oauth@latest", "login", "--oauth-file", authFile];
+    const child = process.platform === "win32"
+      ? spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "npx", ...npxArgs], { stdio: "ignore", windowsHide: true })
+      : spawn("npx", npxArgs, { stdio: "ignore", windowsHide: true });
     let settled = false;
     const fail = (message: string): void => { if (settled) return; settled = true; job.status = "error"; job.error = message; job.finishedAt = new Date().toISOString(); };
     child.once("error", (error) => fail(error.message));
