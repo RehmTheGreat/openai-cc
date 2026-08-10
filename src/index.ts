@@ -20,11 +20,13 @@ try {
   console.warn(`Claude Code auto-config failed: ${error?.message ?? String(error)}`);
 }
 
-try {
-  const configured = await configureClaudeDesktop(baseUrl, modelConfig.snapshot());
-  if (configured.supported) console.log(`Claude Desktop configured: ${configured.profileFile}`);
-} catch (error: any) {
-  console.warn(`Claude Desktop auto-config failed: ${error?.message ?? String(error)}`);
+if (process.env.OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP !== "0") {
+  try {
+    const configured = await configureClaudeDesktop(baseUrl, modelConfig.snapshot());
+    if (configured.supported) console.log(`Claude Desktop configured: ${configured.profileFile}`);
+  } catch (error: any) {
+    console.warn(`Claude Desktop auto-config failed: ${error?.message ?? String(error)}`);
+  }
 }
 
 const server = createServer(store, modelConfig);
