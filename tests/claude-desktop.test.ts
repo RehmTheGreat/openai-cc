@@ -98,6 +98,14 @@ test("PowerShell installer requires explicit buffered Y/N choices for optional a
   assert.match(setup, /claudeCode\.disableLoginPrompt/);
 });
 
+test("PowerShell installer resolves the VS Code CLI shim instead of the GUI executable", async () => {
+  const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
+  assert.match(setup, /function Get-VSCodeCommand/);
+  assert.match(setup, /Microsoft VS Code\\bin\\code\.cmd/);
+  assert.match(setup, /Get-Command code\.cmd/);
+  assert.doesNotMatch(setup, /Get-Command code -ErrorAction/);
+});
+
 test("PowerShell native runner does not redirect stderr under Windows PowerShell 5.1", async () => {
   const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
   assert.match(setup, /function Invoke-NativeConsole/);

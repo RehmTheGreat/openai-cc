@@ -183,8 +183,9 @@ function Wait-ClaudeDesktopRegistration([int]$TimeoutSeconds = 60) {
 }
 
 function Get-VSCodeCommand {
-  $command = Get-Command code -ErrorAction SilentlyContinue
-  if ($command) { return $command.Source }
+  # Use the CLI shim, never Code.exe or a Windows app-execution alias. On some
+  # systems `Get-Command code` resolves to the GUI executable, which launches
+  # Electron and never returns from --list-extensions during unattended setup.
   $candidates = @(
     (Join-Path $env:LOCALAPPDATA "Programs\Microsoft VS Code\bin\code.cmd"),
     (Join-Path $env:ProgramFiles "Microsoft VS Code\bin\code.cmd")
@@ -192,6 +193,11 @@ function Get-VSCodeCommand {
   if (${env:ProgramFiles(x86)}) { $candidates += (Join-Path ${env:ProgramFiles(x86)} "Microsoft VS Code\bin\code.cmd") }
   foreach ($candidate in $candidates) {
     if ($candidate -and (Test-Path $candidate)) { return $candidate }
+  }
+
+  $command = Get-Command code.cmd -ErrorAction SilentlyContinue
+  if ($command -and $command.Source -and ([IO.Path]::GetFileName($command.Source) -ieq "code.cmd")) {
+    return $command.Source
   }
   return $null
 }
