@@ -8,6 +8,7 @@ import test from "node:test";
 import { AccountStore } from "../src/account-store.js";
 import { AuthJob, ChatGptAuthRunner, StartAuthOptions } from "../src/chatgpt-auth.js";
 import { createServer } from "../src/dispatcher.js";
+import { OpenAICCError } from "../src/errors.js";
 import { ModelConfigStore } from "../src/model-config.js";
 
 class FakeAuthRunner extends EventEmitter implements ChatGptAuthRunner {
@@ -15,7 +16,7 @@ class FakeAuthRunner extends EventEmitter implements ChatGptAuthRunner {
   constructor(private store: AccountStore) { super(); }
   async start(options: StartAuthOptions): Promise<AuthJob> {
     const running = this.activeJobs();
-    if (running.length) throw Object.assign(new Error("another login"), { status: 409 });
+    if (running.length) throw new OpenAICCError("Another login is running.", 409, "auth_job_conflict");
     const job: AuthJob = {
       jobId: `job-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       credentialId: options.credentialId,
@@ -31,7 +32,7 @@ class FakeAuthRunner extends EventEmitter implements ChatGptAuthRunner {
     if (options.credentialId === "success") setTimeout(() => { void this.complete(job.jobId); }, 10);
     return { ...job };
   }
-  status(id: string): AuthJob { const job = this.jobs.get(id); if (!job) throw new Error("not found"); return { ...job }; }
+  status(id: string): AuthJob { const job = this.jobs.get(id); if (!job) throw new OpenAICCError("Authentication job not found.", 404, "auth_job_not_found"); return { ...job }; }
   async cancel(id: string): Promise<void> { const job = this.jobs.get(id)!; job.status = "cancelled"; job.finishedAt = new Date().toISOString(); this.emit("job", { ...job }); }
   activeJobs(): AuthJob[] { return [...this.jobs.values()].filter((j) => !["complete", "error", "cancelled"].includes(j.status)).map((j) => ({ ...j })); }
   async shutdown(): Promise<void> {}
@@ -148,4 +149,49 @@ test("ChatGPT auth jobs start, poll, cancel, and complete through injectable run
     assert.equal(f.auth.status(successJob.jobId).status, "complete");
     assert.equal(f.store.publicGet("success")?.email, "success@example.com");
   } finally { await new Promise<void>((resolve) => f.server.close(() => resolve())); }
+});
+
+
+test("Admin auth conflicts and unknown jobs return structured 4xx errors", async () => {
+  const f = await fixture();
+  try {
+    const first = await request(f.base, f.csrf, "/admin/chatgpt/auth", { method: "POST", body: JSON.stringify({ id: "one", name: "One" }) });
+    assert.equal(first.status, 202);
+    const second = await request(f.base, f.csrf, "/admin/chatgpt/auth", { method: "POST", body: JSON.stringify({ id: "two", name: "Two" }) });
+    assert.equal(second.status, 409);
+    assert.equal((await second.json() as any).error.code, "auth_job_conflict");
+    const job = await first.json() as any;
+    await request(f.base, f.csrf, `/admin/auth-jobs/${job.jobId}/cancel`, { method: "POST" });
+    const missing = await fetch(`${f.base}/admin/auth-jobs/job-does-not-exist`);
+    assert.equal(missing.status, 404);
+    assert.equal((await missing.json() as any).error.code, "auth_job_not_found");
+  } finally { await new Promise<void>((resolve) => f.server.close(() => resolve())); }
+});
+
+test("loopback JSON automation without a browser Origin remains supported", async () => {
+  const f = await fixture();
+  try {
+    const response = await fetch(`${f.base}/admin/credentials`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "automation", name: "Automation", provider: "nvidia", apiKey: "secret", model: "nim" }),
+    });
+    assert.equal(response.status, 201);
+    assert.equal(f.store.publicGet("automation")?.provider, "nvidia");
+  } finally { await new Promise<void>((resolve) => f.server.close(() => resolve())); }
+});
+
+test("Admin is refused when configured for non-loopback bind without explicit override", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-remote-admin-"));
+  const store = new AccountStore(root); await store.init();
+  const models = new ModelConfigStore(root, store); await models.init();
+  const auth = new FakeAuthRunner(store);
+  const server = createServer(store, models, { authRunner: auth, bindHost: "0.0.0.0", allowRemoteAdmin: false });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address(); if (!address || typeof address === "string") throw new Error("bad address");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/admin`);
+    assert.equal(response.status, 403);
+    assert.equal((await response.json() as any).error.code, "remote_admin_disabled");
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
