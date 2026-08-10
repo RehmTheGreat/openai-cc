@@ -4,19 +4,20 @@ A local Node/TypeScript gateway that exposes the Anthropic endpoints Claude Code
 
 ## Supported clients
 
-- **Claude Code** through the Anthropic-compatible endpoint at `http://127.0.0.1:8082`.
-- **Claude Desktop** through its `Claude-3p` / third-party inference gateway mode. `setup.ps1` configures the Desktop profile automatically on Windows and the gateway also re-applies the profile on startup.
+- **Claude Code CLI** through the Anthropic-compatible endpoint at `http://127.0.0.1:8082`.
+- **Claude Code for VS Code** through the same shared Claude Code configuration.
+- **Claude Desktop Code** through the same Claude Code engine/configuration plus Claude Desktop's `Claude-3p` / third-party inference gateway profile.
 
 Claude Desktop is intentionally given Claude-compatible public route names rather than raw upstream model ids:
 
-| OpenAI-CC slot | Claude Desktop route |
+| OpenAI-CC slot | Claude public route |
 | --- | --- |
 | Fable | `claude-fable-5` |
 | Opus | `claude-opus-5` |
 | Sonnet | `claude-sonnet-5` |
 | Haiku | `claude-haiku-4-5` |
 
-Those names are public aliases only. Requests are still routed internally to the provider/model selected for each OpenAI-CC slot in the admin panel. Raw GPT, Gemini, DeepSeek, NVIDIA, or other upstream ids are not exposed through Claude Desktop model discovery.
+Those names are public aliases only. Requests are still routed internally to the provider/model selected for each OpenAI-CC slot in the admin panel. Raw GPT, Gemini, DeepSeek, NVIDIA, or other upstream ids are not exposed through Claude model discovery.
 
 `GET /v1/models` and `GET /v1/models/{model_id}` return Claude-compatible model metadata including the configured context window, per-route maximum output tokens, and conservative gateway capabilities. The default model configuration advertises a 700,000-token input context. Output ceilings default to 128,000 tokens for Default/Fable/Opus/Sonnet and 64,000 for Haiku, and can be changed in the admin panel. Message requests are clamped to the configured per-route output ceiling.
 
@@ -27,7 +28,71 @@ Those names are public aliases only. Requests are still routed internally to the
 - **NVIDIA NIM API keys** through `https://integrate.api.nvidia.com/v1` using OpenAI-compatible Chat Completions.
 - **Google AI Studio / Gemini API keys** through `https://generativelanguage.googleapis.com/v1beta/openai/` using OpenAI-compatible Chat Completions.
 
-OpenCode Zen's public documentation describes Zen as a billed gateway rather than a guaranteed free-quota service. OpenAI-CC supports Zen API keys regardless of the billing/quota attached to a particular key.
+OpenAI-CC never asks the Windows installer for provider credentials. API keys and OAuth setup belong exclusively in the local admin panel.
+
+## Windows installer
+
+Run `setup.ps1` from a checkout, or download/run the script by itself and it will clone OpenAI-CC into `%LOCALAPPDATA%\OpenAI-CC`.
+
+The installer is idempotent and asks three explicit **Y/N** questions:
+
+1. Install Claude Code CLI?
+2. Install VS Code and the Claude Code extension?
+3. Install and configure Claude Desktop?
+
+The input routine drains pending console keystrokes before every question and accepts only an explicit `Y` or `N`; stray or repeated Enter presses cannot submit an empty choice.
+
+### What it installs/configures
+
+Required dependencies are checked first. Missing Git, Node.js, and ripgrep are installed with WinGet. Node is brought to at least 22.5 because the installed Context Mode release requires Node 22.5 or newer.
+
+For optional apps, the user's Y/N choice controls installation. An existing Claude Code, VS Code, Claude Code VS Code extension, or Claude Desktop installation is left at its installed version rather than being unnecessarily upgraded/reinstalled.
+
+The installer then:
+
+- installs/builds OpenAI-CC;
+- creates `~/Desktop/Claude` as the default projects directory;
+- persists the local gateway/model environment for future PowerShell and app sessions;
+- repairs Claude Code's `hasCompletedOnboarding` / `hasSeenOnboarding` state so a third-party gateway does not loop back to the login/onboarding screen;
+- enables gateway model discovery and uses the Claude-safe public aliases above;
+- sets Claude Code's auto-compaction capacity to **700,000 tokens** on routes whose actual model context permits it, instead of disabling compaction;
+- installs **RTK** and initializes its global Claude Code integration;
+- installs the official **TypeScript LSP** Claude plugin plus `typescript-language-server`;
+- installs **Context Mode** as a user-scoped Claude Code plugin;
+- configures `claudeCode.disableLoginPrompt` for the VS Code extension when VS Code support was selected;
+- configures Claude Desktop's `Claude-3p` profile when Desktop support was selected;
+- creates a per-user Startup shortcut so the local gateway is available after future Windows logins;
+- starts/verifies the proxy and validates Claude-compatible model discovery and 700k gateway metadata.
+
+Claude Code CLI, its VS Code extension, and the local Code tab in Claude Desktop share Claude Code's user configuration. The token-efficiency plugins/hooks are therefore installed once at user scope rather than duplicated per client.
+
+### 700k context behavior
+
+OpenAI-CC advertises a 700,000-token gateway context. Claude Code is configured with `CLAUDE_CODE_AUTO_COMPACT_WINDOW=700000`, which keeps automatic compaction enabled while allowing up to 700k working capacity on a 1M-capable Claude route. Claude Code still caps that value at the actual context limit of the selected public model family, so a lower-context model such as Haiku cannot be forced beyond its own client-side limit merely by changing the gateway metadata.
+
+### Credentials
+
+After installation, open:
+
+```text
+http://127.0.0.1:8082/admin
+```
+
+Add provider API keys or complete ChatGPT OAuth there. The installer never asks for, embeds, or stores provider credentials. The local Claude-facing bearer token is the non-secret placeholder `local-not-used`.
+
+## Manual install
+
+If you only want the gateway itself, Node.js 20+ is sufficient:
+
+```bash
+git clone https://github.com/RehmTheGreat/openai-cc.git
+cd openai-cc
+npm install
+npm run build
+npm start
+```
+
+The full Windows installer requires Node.js 22.5+ because it also installs Context Mode.
 
 ## Rotation behavior
 
@@ -51,57 +116,20 @@ Credentials are stored only under `.data/`, which is gitignored. API keys are ma
 3. `src/translator.ts` — Anthropic Messages ↔ OpenAI Responses translation for ChatGPT OAuth and OpenCode Zen.
 4. `src/chat-translator.ts` — Anthropic Messages ↔ OpenAI-compatible Chat Completions translation for NVIDIA NIM and Google AI Studio, including tools and streaming.
 5. `src/claude-desktop.ts` — Claude-safe model discovery plus minimal Claude Desktop `Claude-3p` gateway/profile configuration.
-6. `src/dispatcher.ts` — Anthropic HTTP surface, provider routing, transparent pre-output failover, browser OAuth, API-key setup, and the admin UI.
-
-## Install
-
-Prerequisites: Node.js 20+ and a browser if you use ChatGPT OAuth.
-
-```bash
-git clone https://github.com/RehmTheGreat/openai-cc.git
-cd openai-cc
-npm install
-npm run build
-npm start
-```
-
-### Windows setup and Claude Desktop
-
-Run:
-
-```powershell
-.\setup.ps1
-```
-
-The setup script:
-
-- leaves an existing Claude Desktop installation untouched;
-- installs Claude Desktop with the official `Anthropic.Claude` winget package only when the app is missing;
-- installs/builds OpenAI-CC;
-- writes the minimal `Claude` and `Claude-3p` deployment-mode configuration and an `OpenAI-CC` inference-gateway profile;
-- points Claude Desktop at `http://127.0.0.1:8082` with a local placeholder bearer token (never a provider credential);
-- starts the local gateway if it is not already healthy.
-
-If Claude Desktop was already running while setup changed its profile, restart the Desktop app once so it reloads the `3p` deployment configuration.
-
-Provider credentials are **not** requested by `setup.ps1`. Add them only through the OpenAI-CC admin panel.
+6. `src/claude-config.ts` — shared Claude Code gateway aliases, model discovery, auto-compaction capacity, and onboarding state.
+7. `src/dispatcher.ts` — Anthropic HTTP surface, provider routing, transparent pre-output failover, browser OAuth, API-key setup, and the admin UI.
+8. `setup.ps1` — idempotent native-Windows installer/configurator.
 
 ## Add credentials
 
-Open:
-
-```text
-http://127.0.0.1:8082/admin
-```
-
 ### ChatGPT OAuth
 
-Under **Add teammate with ChatGPT OAuth**, enter a unique credential id and display name, then finish sign-in in the browser.
+In the admin panel, under **Add teammate with ChatGPT OAuth**, enter a unique credential id and display name, then finish sign-in in the browser.
 
 You can also use the terminal flow:
 
 ```bash
-npm run account:add -- --id faseeh --name "Faseeh"
+npm run account:add -- --id my-account --name "My Account"
 ```
 
 ### API keys
@@ -115,27 +143,9 @@ Under **Add API key**:
 5. Paste the API key.
 6. Repeat for every additional key you want in rotation.
 
-The selected credential's `model` can be overridden by the slot's configured route. This makes cross-provider routing possible even though each provider names models differently.
+The selected credential's model can be overridden by the slot's configured route. This makes cross-provider routing possible even though each provider names models differently.
 
-## Point Claude Code at it
-
-### PowerShell
-
-```powershell
-$env:ANTHROPIC_BASE_URL="http://127.0.0.1:8082"
-$env:ANTHROPIC_AUTH_TOKEN="local-not-used"
-claude
-```
-
-### bash/zsh
-
-```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:8082"
-export ANTHROPIC_AUTH_TOKEN="local-not-used"
-claude
-```
-
-Endpoints:
+## Endpoints
 
 - Anthropic base URL: `http://127.0.0.1:8082`
 - Claude model discovery: `GET http://127.0.0.1:8082/v1/models`
@@ -144,12 +154,6 @@ Endpoints:
 - Token estimate: `POST http://127.0.0.1:8082/v1/messages/count_tokens`
 - Admin: `http://127.0.0.1:8082/admin`
 - Health: `http://127.0.0.1:8082/healthz`
-
-## Model mapping
-
-ChatGPT OAuth credentials without a credential-specific model still use the configured OpenAI-CC slot routing. The admin panel exposes five internal slots for Claude Code: `Default`, `Fable`, `Opus`, `Sonnet`, and `Haiku`.
-
-Claude Desktop does not expose `Default`; it exposes only the four Claude-safe public aliases listed above. The existing role matcher maps those aliases (including date-suffixed Claude family names) back to the correct internal slot.
 
 ## Compatibility notes
 
@@ -170,12 +174,12 @@ Claude Desktop does not expose `Default`; it exposes only the four Claude-safe p
 npm test
 ```
 
-The test suite covers Claude-safe alias discovery, configured context/output metadata, model retrieval, idempotent `Claude-3p` profile merging, and installer invariants that prevent an existing Claude Desktop installation from being upgraded/reinstalled.
+The test suite covers Claude-safe alias discovery, configured context/output metadata, Desktop `Claude-3p` profile merging, installer Y/N input invariants, token-efficiency stack configuration, persistent gateway settings, and Desktop opt-out behavior.
 
 ## Security
 
 - Keep the service bound to loopback unless you add real authentication and TLS.
-- The Claude Desktop gateway token is the non-secret local placeholder `local-not-used`; provider credentials remain inside OpenAI-CC.
+- The Claude-facing gateway token is the non-secret local placeholder `local-not-used`; provider credentials remain inside OpenAI-CC.
 - Never commit `.data/`.
 - API keys are stored locally in `.data/accounts.json`; filesystem permissions are tightened where the OS supports it.
 - Use only API keys/accounts you are authorized to use and stay within each provider's applicable terms and quota rules.
