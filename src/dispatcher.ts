@@ -1,13 +1,28 @@
+import { spawn } from "node:child_process";
+import { mkdir } from "node:fs/promises";
 import http, { IncomingMessage, ServerResponse } from "node:http";
+import path from "node:path";
 import OpenAI from "openai";
 import { createOpenAIOAuthTransport } from "@openai-oauth/core";
 import { openaiCredentials } from "@openai-oauth/local";
-import { AccountRecord, AccountStore } from "./account-store.js";
+import { AccountRecord, AccountStore, readAuthEmail, validateId } from "./account-store.js";
 import { AnthropicRequest, AnthropicSseTranslator, anthropicToResponses, estimateAnthropicTokens, mapModel, responsesToAnthropic } from "./translator.js";
+
+type OAuthJobStatus = "pending" | "complete" | "error";
+interface OAuthJob {
+  id: string;
+  name: string;
+  status: OAuthJobStatus;
+  startedAt: string;
+  finishedAt?: string;
+  email?: string;
+  error?: string;
+}
 
 export class Dispatcher {
   private clients = new Map<string, OpenAI>();
   private eventStreams = new Set<ServerResponse>();
+  private oauthJobs = new Map<string, OAuthJob>();
 
   constructor(private readonly store: AccountStore) {
     store.on("event", (event) => {
@@ -39,6 +54,15 @@ export class Dispatcher {
       if (req.method === "GET" && url.pathname === "/admin") return void html(res, adminHtml());
       if (req.method === "GET" && url.pathname === "/admin/state") return void json(res, 200, this.store.snapshot());
       if (req.method === "GET" && url.pathname === "/admin/events") return void this.handleEventStream(req, res);
+      if (req.method === "POST" && url.pathname === "/admin/accounts") {
+        const body = await readJson<{ id?: string; name?: string }>(req);
+        return void json(res, 202, await this.startBrowserOAuth(body));
+      }
+      if (req.method === "GET" && /^\/admin\/oauth\/[^/]+$/.test(url.pathname)) {
+        const id = decodeURIComponent(url.pathname.split("/")[3]);
+        const job = this.oauthJobs.get(id);
+        return void json(res, job ? 200 : 404, job ?? { error: { type: "not_found_error", message: "OAuth job not found" } });
+      }
       if (req.method === "POST" && /^\/admin\/accounts\/[^/]+\/activate$/.test(url.pathname)) {
         const id = decodeURIComponent(url.pathname.split("/")[3]);
         return void json(res, 200, await this.store.activate(id));
@@ -62,12 +86,13 @@ export class Dispatcher {
         error: {
           type: "handoff_required",
           message: next
-            ? `No active account. ${next.name} (${next.id}) is ready; activate that teammate from http://127.0.0.1:${process.env.PORT || 8082}/admin.`
-            : "No active account is ready. Reset or add an account in the admin workflow.",
+            ? `No active account. ${next.name} (${next.email ?? next.id}) is ready; activate that teammate from http://127.0.0.1:${process.env.PORT || 8082}/admin.`
+            : "No active account is ready. Wait for a five-hour reset or add an account in the admin workflow.",
         },
       });
     }
 
+    await this.store.noteRequest(account.id);
     const client = this.clientFor(account);
     const upstream = anthropicToResponses(body) as any;
 
@@ -97,18 +122,77 @@ export class Dispatcher {
           return void json(res, 429, {
             error: {
               type: "rate_limit_error",
-              message: `${account.name}'s account hit its current limit. The request was not retried under another teammate. Activate the next teammate in /admin.`,
+              message: `${account.name}'s account hit its current limit. The admin panel shows the next ready teammate and this account's five-hour reset time.`,
             },
           });
         }
         if (!res.writableEnded) {
-          res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "Active teammate hit a rate limit; manual handoff required." } })}\n\n`);
+          res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "Active teammate hit a rate limit; handoff required." } })}\n\n`);
           res.end();
         }
         return;
       }
       throw error;
     }
+  }
+
+  private async startBrowserOAuth(input: { id?: string; name?: string }): Promise<OAuthJob> {
+    const id = String(input.id ?? "").trim();
+    const name = String(input.name ?? id).trim();
+    if (!id) throw new Error("Account id is required.");
+    if (!name) throw new Error("Account name is required.");
+    validateId(id);
+
+    const existing = this.oauthJobs.get(id);
+    if (existing?.status === "pending") throw new Error(`OAuth is already running for ${id}.`);
+
+    const authFile = this.store.authFileFor(id);
+    await mkdir(path.dirname(authFile), { recursive: true, mode: 0o700 });
+    const job: OAuthJob = { id, name, status: "pending", startedAt: new Date().toISOString() };
+    this.oauthJobs.set(id, job);
+
+    const command = process.platform === "win32" ? "npx.cmd" : "npx";
+    const child = spawn(command, ["--yes", "openai-oauth@latest", "login", "--oauth-file", authFile], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    let settled = false;
+
+    const fail = (message: string): void => {
+      if (settled) return;
+      settled = true;
+      job.status = "error";
+      job.error = message;
+      job.finishedAt = new Date().toISOString();
+    };
+
+    child.once("error", (error) => fail(error.message));
+    child.once("exit", (code) => {
+      if (settled) return;
+      settled = true;
+      void (async () => {
+        if (code !== 0) {
+          job.status = "error";
+          job.error = `OAuth process exited with code ${code ?? "unknown"}.`;
+          job.finishedAt = new Date().toISOString();
+          return;
+        }
+        try {
+          const email = await readAuthEmail(authFile);
+          await this.store.upsert({ id, name, email, authFile });
+          this.clients.delete(id);
+          job.status = "complete";
+          job.email = email;
+          job.finishedAt = new Date().toISOString();
+        } catch (error: any) {
+          job.status = "error";
+          job.error = error?.message ?? String(error);
+          job.finishedAt = new Date().toISOString();
+        }
+      })();
+    });
+
+    return { ...job };
   }
 
   private clientFor(account: AccountRecord): OpenAI {
@@ -179,12 +263,16 @@ function modelAliases(): string[] {
 
 function adminHtml(): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenAI-CC</title><style>
-body{font:14px system-ui;margin:0;background:#0e1116;color:#e8edf3}.wrap{max-width:900px;margin:40px auto;padding:0 18px}h1{font-size:24px}.note{background:#171c24;padding:14px;border-radius:10px;margin:16px 0}.card{display:grid;grid-template-columns:1fr auto;gap:12px;background:#171c24;margin:10px 0;padding:14px;border-radius:10px}.muted{color:#9aa6b2}.ready{color:#73d69c}.exhausted{color:#ff8f8f}.active{outline:2px solid #7aa2ff}button{background:#2b66d9;color:white;border:0;border-radius:7px;padding:8px 12px;cursor:pointer}button.secondary{background:#39414d}.toast{position:fixed;right:20px;bottom:20px;background:#242b36;padding:14px;border-radius:10px;max-width:360px;display:none}</style></head><body><div class="wrap"><h1>OpenAI-CC</h1><div class="note">Only one teammate is active at a time. A 429 marks that account exhausted and stops the request. The next teammate must explicitly click <b>Activate</b>; the proxy never retries a request under another person's account.</div><div id="status" class="muted"></div><div id="accounts"></div></div><div id="toast" class="toast"></div><script>
-async function load(){const s=await fetch('/admin/state').then(r=>r.json());render(s)}
-function render(s){document.querySelector('#status').textContent='Active account: '+(s.activeAccountId||'none')+' · Suggested next: '+(s.suggestedNextAccountId||'none');document.querySelector('#accounts').innerHTML=s.accounts.map(a=>'<div class="card '+(a.id===s.activeAccountId?'active':'')+'"><div><b>'+esc(a.name)+'</b> <span class="muted">('+esc(a.id)+')</span><div class="'+a.status+'">'+a.status+(a.exhaustedAt?' · since '+new Date(a.exhaustedAt).toLocaleString():'')+'</div><div class="muted">'+esc(a.lastError||'')+'</div></div><div>'+(a.status==='ready'?'<button onclick="post(\'/admin/accounts/'+encodeURIComponent(a.id)+'/activate\')">Activate</button>':'<button class="secondary" onclick="post(\'/admin/accounts/'+encodeURIComponent(a.id)+'/reset\')">Reset</button>')+'</div></div>').join('')}
-async function post(url){await fetch(url,{method:'POST'});load()}
+body{font:14px system-ui;margin:0;background:#0e1116;color:#e8edf3}.wrap{max-width:900px;margin:40px auto;padding:0 18px}h1{font-size:24px}.note,.add{background:#171c24;padding:14px;border-radius:10px;margin:16px 0}.card{display:grid;grid-template-columns:1fr auto;gap:12px;background:#171c24;margin:10px 0;padding:14px;border-radius:10px}.muted{color:#9aa6b2}.ready{color:#73d69c}.exhausted{color:#ff8f8f}.active{outline:2px solid #7aa2ff}button{background:#2b66d9;color:white;border:0;border-radius:7px;padding:8px 12px;cursor:pointer}button.secondary{background:#39414d}input{background:#0e1116;color:#e8edf3;border:1px solid #39414d;border-radius:7px;padding:9px;margin:4px 6px 4px 0}.toast{position:fixed;right:20px;bottom:20px;background:#242b36;padding:14px;border-radius:10px;max-width:360px;display:none}</style></head><body><div class="wrap"><h1>OpenAI-CC</h1><div class="note">Only one teammate is active at a time. Each teammate signs into their own ChatGPT account. The first upstream request starts that account's five-hour window; a 429 marks it exhausted until the stored reset time.</div><div class="add"><b>Add teammate with ChatGPT OAuth</b><div class="muted">Starts the same local OAuth login from this panel and opens sign-in in the machine's default browser.</div><form onsubmit="startOAuth(event)"><input id="oauth-id" required pattern="[A-Za-z0-9._-]{1,64}" placeholder="account id"><input id="oauth-name" required placeholder="display name"><button type="submit">Add account</button></form><div id="oauth-status" class="muted"></div></div><div id="status" class="muted"></div><div id="accounts"></div></div><div id="toast" class="toast"></div><script>
+let currentState=null;
+async function load(){const s=await fetch('/admin/state').then(r=>r.json());currentState=s;render(s)}
+function remaining(iso){if(!iso)return'';const ms=Math.max(0,new Date(iso).getTime()-Date.now());const sec=Math.ceil(ms/1000),h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;return h+'h '+m+'m '+s+'s'}
+function render(s){const active=s.accounts.find(a=>a.id===s.activeAccountId);document.querySelector('#status').textContent='Active account: '+(active?(active.email||active.name)+' ('+active.id+')':'none')+' · Suggested next: '+(s.suggestedNextAccountId||'none');document.querySelector('#accounts').innerHTML=s.accounts.map(a=>'<div class="card '+(a.id===s.activeAccountId?'active':'')+'"><div><b>'+esc(a.name)+'</b> <span class="muted">('+esc(a.id)+')</span><div>'+esc(a.email||'Email unavailable')+'</div><div class="'+a.status+'">'+a.status+(a.exhaustedAt?' · exhausted '+new Date(a.exhaustedAt).toLocaleString():'')+'</div>'+(a.firstRequestAt?'<div class="muted">Window started '+new Date(a.firstRequestAt).toLocaleString()+'</div>':'')+(a.limitResetsAt?'<div class="muted">Fresh limits at '+new Date(a.limitResetsAt).toLocaleString()+' · '+remaining(a.limitResetsAt)+'</div>':'<div class="muted">Five-hour window starts on first request</div>')+'<div class="muted">'+esc(a.lastError||'')+'</div></div><div>'+(a.status==='ready'?'<button onclick="post(\'/admin/accounts/'+encodeURIComponent(a.id)+'/activate\')">Activate</button>':'<button class="secondary" '+(a.limitResetsAt&&new Date(a.limitResetsAt).getTime()>Date.now()?'disabled':'')+' onclick="post(\'/admin/accounts/'+encodeURIComponent(a.id)+'/reset\')">Reset</button>')+'</div></div>').join('')}
+async function post(url){const r=await fetch(url,{method:'POST'});const d=await r.json().catch(()=>({}));if(!r.ok)toast(d.error?.message||'Request failed');await load()}
+async function startOAuth(e){e.preventDefault();const id=document.querySelector('#oauth-id').value.trim(),name=document.querySelector('#oauth-name').value.trim(),status=document.querySelector('#oauth-status');status.textContent='Starting OAuth…';const r=await fetch('/admin/accounts',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id,name})});const d=await r.json().catch(()=>({}));if(!r.ok){status.textContent=d.error?.message||'Could not start OAuth';return}status.textContent='OAuth started. Complete ChatGPT sign-in in the browser window.';watchOAuth(id)}
+async function watchOAuth(id){const status=document.querySelector('#oauth-status');const r=await fetch('/admin/oauth/'+encodeURIComponent(id));const d=await r.json().catch(()=>({}));if(!r.ok){status.textContent='OAuth status unavailable';return}if(d.status==='complete'){status.textContent='Added '+(d.email||d.name)+'.';toast('Account added: '+(d.email||d.name));await load();return}if(d.status==='error'){status.textContent='OAuth failed: '+(d.error||'unknown error');return}setTimeout(()=>watchOAuth(id),1000)}
 function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-const es=new EventSource('/admin/events');es.onmessage=load;['changed','activated','rate_limit','state'].forEach(t=>es.addEventListener(t,e=>{load();if(t==='rate_limit'){const d=JSON.parse(e.data);toast((d.account?.name||'Account')+' hit its limit. Activate '+(d.suggestedNextAccountId||'the next teammate')+'.');if(Notification.permission==='granted')new Notification('OpenAI-CC',{body:(d.account?.name||'Account')+' exhausted; manual handoff required.'})}}));
+const es=new EventSource('/admin/events');['changed','activated','rate_limit','state'].forEach(t=>es.addEventListener(t,e=>{load();if(t==='rate_limit'){const d=JSON.parse(e.data);toast((d.account?.email||d.account?.name||'Account')+' hit its limit. '+(d.account?.limitResetsAt?'Fresh limits at '+new Date(d.account.limitResetsAt).toLocaleString()+'. ':'')+'Activate '+(d.suggestedNextAccountId||'the next teammate')+'.');if(Notification.permission==='granted')new Notification('OpenAI-CC',{body:(d.account?.email||d.account?.name||'Account')+' exhausted; handoff required.'})}}));
 function toast(t){const x=document.querySelector('#toast');x.textContent=t;x.style.display='block';setTimeout(()=>x.style.display='none',8000)}
-if('Notification'in window&&Notification.permission==='default')Notification.requestPermission();load();</script></body></html>`;
+if('Notification'in window&&Notification.permission==='default')Notification.requestPermission();setInterval(()=>{if(currentState)render(currentState)},1000);load();</script></body></html>`;
 }
