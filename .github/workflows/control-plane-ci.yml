@@ -15,7 +15,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -37,6 +37,15 @@ jobs:
           node node_modules/@openai/codex/bin/codex.js login --help
       - name: Run full test suite
         run: npm test
+      - name: Configure fresh Claude Code gateway context
+        env:
+          OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP: "0"
+          OPENAI_CC_CONTEXT_WINDOW: "850000"
+          ANTHROPIC_BASE_URL: "http://127.0.0.1:9"
+          DATA_DIR: ${{ runner.temp }}/openai-cc-context
+        run: node dist/scripts/configure-clients.js
+      - name: Verify Claude Code client context budget
+        run: node scripts/verify-claude-code-context.mjs
       - name: Parse Windows installers
         if: runner.os == 'Windows'
         shell: powershell
