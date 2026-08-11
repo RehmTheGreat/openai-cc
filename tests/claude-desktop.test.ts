@@ -4,17 +4,16 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
-  CLAUDE_DESKTOP_MODEL_ALIASES,
   CLAUDE_DESKTOP_PROFILE_ID,
   ClaudeDesktopPaths,
   claudeDesktopModel,
   claudeDesktopModelList,
   configureClaudeDesktopAtPaths,
 } from "../src/claude-desktop.js";
-import { ModelConfig } from "../src/model-config.js";
+import { MODEL_SLOTS, ModelConfig, claudeCodeModelAlias } from "../src/model-config.js";
 
 const config: ModelConfig = {
-  contextWindow: 700000,
+  contextWindow: 850000,
   routes: {
     default: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
     fable: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
@@ -24,19 +23,19 @@ const config: ModelConfig = {
   },
 };
 
-test("Claude model discovery exposes only safe public aliases and configured limits", () => {
+test("Claude model discovery exposes route-specific context caps and client capability ids", () => {
   const response = claudeDesktopModelList(config);
-  assert.deepEqual(response.data.map((model) => model.id), [
-    CLAUDE_DESKTOP_MODEL_ALIASES.fable,
-    CLAUDE_DESKTOP_MODEL_ALIASES.opus,
-    CLAUDE_DESKTOP_MODEL_ALIASES.sonnet,
-    CLAUDE_DESKTOP_MODEL_ALIASES.haiku,
-  ]);
+  const aliases = Object.fromEntries(MODEL_SLOTS.map((slot) => [slot, claudeCodeModelAlias(config, slot)])) as Record<string, string>;
+  assert.deepEqual(response.data.map((model) => model.id), MODEL_SLOTS.map((slot) => aliases[slot]));
   assert.equal(response.data.some((model) => model.id.includes("gemini") || model.id.includes("deepseek") || model.id.includes("gpt")), false);
-  assert.equal(response.data[0].max_input_tokens, 700000);
-  assert.equal(response.data.find((model) => model.id === CLAUDE_DESKTOP_MODEL_ALIASES.opus)?.max_tokens, 96000);
-  assert.equal((response.data.find((model) => model.id === CLAUDE_DESKTOP_MODEL_ALIASES.sonnet)?.capabilities.image_input as any).supported, true);
-  assert.equal((response.data.find((model) => model.id === CLAUDE_DESKTOP_MODEL_ALIASES.haiku)?.capabilities.image_input as any).supported, false);
+  assert.equal(response.data.find((model) => model.id === aliases.default)?.max_input_tokens, 850000);
+  assert.equal(response.data.find((model) => model.id === aliases.fable)?.max_input_tokens, 850000);
+  assert.equal(response.data.find((model) => model.id === aliases.opus)?.max_input_tokens, 200000);
+  assert.equal(response.data.find((model) => model.id === aliases.sonnet)?.max_input_tokens, 850000);
+  assert.equal(response.data.find((model) => model.id === aliases.haiku)?.max_input_tokens, 200000);
+  assert.equal(response.data.find((model) => model.id === aliases.opus)?.max_tokens, 96000);
+  assert.equal((response.data.find((model) => model.id === aliases.sonnet)?.capabilities.image_input as any).supported, true);
+  assert.equal((response.data.find((model) => model.id === aliases.haiku)?.capabilities.image_input as any).supported, false);
   assert.equal(response.has_more, false);
 });
 
@@ -71,7 +70,7 @@ test("Claude Desktop 3P configuration is merged and idempotent", async () => {
   assert.equal(profile.inferenceProvider, "gateway");
   assert.equal(profile.inferenceGatewayBaseUrl, "http://127.0.0.1:8082");
   assert.equal(profile.inferenceGatewayAuthScheme, "bearer");
-  assert.deepEqual(profile.inferenceModels.map((model: any) => model.name), Object.values(CLAUDE_DESKTOP_MODEL_ALIASES));
+  assert.deepEqual(profile.inferenceModels.map((model: any) => model.name), MODEL_SLOTS.map((slot) => claudeCodeModelAlias(config, slot)));
   assert.equal(profile.inferenceModels.some((model: any) => model.supports1m === true), false);
   assert.equal(meta.appliedId, CLAUDE_DESKTOP_PROFILE_ID);
   assert.equal(meta.entries.filter((entry: any) => entry.id === CLAUDE_DESKTOP_PROFILE_ID).length, 1);
@@ -137,8 +136,9 @@ test("PowerShell installer configures the shared token-efficiency stack and pers
   const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
   assert.match(setup, /Desktop\\Claude/);
   assert.match(setup, /CLAUDE_CODE_AUTO_COMPACT_WINDOW/);
-  assert.match(setup, /700000/);
+  assert.match(setup, /850000/);
   assert.match(setup, /CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY/);
+  assert.match(setup, /CLAUDE_CODE_USE_GATEWAY/);
   assert.match(setup, /typescript-language-server/);
   assert.match(setup, /typescript-lsp@claude-plugins-official/);
   assert.match(setup, /context-mode@context-mode/);
@@ -151,14 +151,16 @@ test("PowerShell installer configures the shared token-efficiency stack and pers
   assert.match(setup, /OpenAI-CC Gateway\.lnk/);
   assert.match(setup, /\$GatewayBaseUrl\/healthz/);
   assert.match(setup, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP/);
+  assert.match(setup, /deepseek-v4-flash-free/);
   assert.doesNotMatch(setup, /(?:OPENAI|NVIDIA|GEMINI|GOOGLE|ZEN|ANTHROPIC)_API_KEY\s*[=:]/i);
   assert.doesNotMatch(setup, /DISABLE_COMPACT\s*[=:]/);
 });
 
-test("shared Claude settings use safe aliases, 700k auto-compaction, and onboarding repair", async () => {
+test("shared Claude settings use gateway-aware aliases, 850k auto-compaction, and onboarding repair", async () => {
   const source = await readFile(path.join(process.cwd(), "src", "claude-config.ts"), "utf8");
-  assert.match(source, /CLAUDE_DESKTOP_MODEL_ALIASES\.fable/);
+  assert.match(source, /claudeCodeModelAlias\(config, "fable"\)/);
   assert.match(source, /CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY/);
+  assert.match(source, /CLAUDE_CODE_USE_GATEWAY/);
   assert.match(source, /CLAUDE_CODE_AUTO_COMPACT_WINDOW/);
   assert.match(source, /hasCompletedOnboarding = true/);
   assert.match(source, /hasSeenOnboarding = true/);
@@ -171,7 +173,7 @@ test("gateway startup honors persistent Claude Desktop opt-out", async () => {
   const clients = await readFile(path.join(process.cwd(), "scripts", "configure-clients.ts"), "utf8");
   assert.match(index, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP !== "0"/);
   assert.match(clients, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP !== "0"/);
-  assert.match(clients, /OPENAI_CC_CONTEXT_WINDOW \|\| 700000/);
+  assert.match(clients, /OPENAI_CC_CONTEXT_WINDOW \|\| 850000/);
   assert.match(launcher, /dist\/src\/index-replicated\.js/);
   assert.match(launcher, /127\.0\.0\.1:8082\/healthz/);
 });

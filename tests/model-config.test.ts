@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { AccountStore } from "../src/account-store.js";
 import { OpenAICCError } from "../src/errors.js";
-import { ModelConfigStore } from "../src/model-config.js";
+import { ModelConfigStore, claudeCodeModelAlias, contextWindowForRoute } from "../src/model-config.js";
 
 async function fixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-model-"));
@@ -63,5 +63,33 @@ test("route save rejects unsupported provider, empty model, and invalid limits",
   const badOutput: any = models.snapshot();
   badOutput.routes.default.maxOutputTokens = 0;
   await assert.rejects(() => models.update(badOutput), (error: unknown) => error instanceof OpenAICCError && error.code === "invalid_number");
+  accounts.close();
+});
+
+
+test("verified route contexts drive Claude Code capability aliases without over-advertising", async () => {
+  const { accounts, models } = await fixture();
+  const config = models.snapshot();
+  assert.equal(config.contextWindow, 850000);
+  assert.equal(contextWindowForRoute(config, "default"), 850000);
+  assert.equal(contextWindowForRoute(config, "fable"), 850000);
+  assert.equal(contextWindowForRoute(config, "opus"), 200000);
+  assert.equal(contextWindowForRoute(config, "sonnet"), 850000);
+  assert.equal(contextWindowForRoute(config, "haiku"), 850000);
+
+  assert.equal(claudeCodeModelAlias(config, "default"), "claude-opus-4-8[1m]");
+  assert.equal(claudeCodeModelAlias(config, "fable"), "claude-fable-5[1m]");
+  assert.equal(claudeCodeModelAlias(config, "opus"), "claude-opus-5");
+  assert.equal(claudeCodeModelAlias(config, "sonnet"), "claude-sonnet-5");
+  assert.equal(models.slotForRequestedModel("claude-opus-4-8"), "default");
+  assert.equal(models.slotForRequestedModel("claude-fable-5"), "fable");
+  assert.equal(models.slotForRequestedModel("claude-sonnet-5"), "sonnet");
+  assert.equal(models.slotForRequestedModel("claude-opus-4-7"), "haiku");
+
+  const changed = models.snapshot();
+  changed.routes.haiku = { provider: "nvidia", model: "unverified-haiku", maxOutputTokens: 32000 };
+  const conservative = await models.update(changed);
+  assert.equal(contextWindowForRoute(conservative, "haiku"), 200000);
+  assert.equal(claudeCodeModelAlias(conservative, "haiku"), "claude-haiku-4-5");
   accounts.close();
 });
