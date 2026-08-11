@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, statSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import { createServer } from "node:http";
 
@@ -70,13 +70,11 @@ const server = createServer((req, res) => {
     if (!leaf || leaf.includes("/") || leaf.includes("\\") || leaf === "." || leaf === "..") return json(res, 404, { code: "not_found" });
     const path = normalize(join(root, leaf));
     if (!existsSync(path) || !statSync(path).isFile()) return json(res, 404, { code: "not_found" });
-    const sha1 = createHash("sha1");
-    const { readFileSync } = await import("node:fs");
-    sha1.update(readFileSync(path));
+    const sha1 = createHash("sha1").update(readFileSync(path)).digest("hex");
     res.writeHead(200, {
       "content-type": "application/octet-stream",
       "content-length": String(statSync(path).size),
-      "x-bz-content-sha1": sha1.digest("hex"),
+      "x-bz-content-sha1": sha1,
       "cache-control": "no-store",
     });
     createReadStream(path).pipe(res);
