@@ -25,13 +25,14 @@ export function buildInfo(): BuildInfo {
 
 export function runtimeIdentity(contextWindow: number): Record<string, unknown> {
   const managedRoot = process.env.OPENAI_CC_HOME?.trim() || process.cwd();
+  const runtimeRoot = process.env.OPENAI_CC_RUNTIME_ROOT?.trim() || process.cwd();
   return {
     ok: true,
     contextWindow,
     ...buildInfo(),
     pid: process.pid,
     installRoot: managedRoot,
-    runtimeRoot: process.cwd(),
+    runtimeRoot,
     node: process.version,
   };
 }
