@@ -6,10 +6,6 @@ import { ProviderRegistry } from "../src/provider-registry.js";
 
 const dataDir = process.env.DATA_DIR || ".data";
 const baseUrl = String(process.env.ANTHROPIC_BASE_URL || "http://127.0.0.1:8082").replace(/\/+$/, "");
-const requestedContext = Number(process.env.OPENAI_CC_CONTEXT_WINDOW || 850000);
-if (!Number.isFinite(requestedContext) || requestedContext < 200000 || requestedContext > 1000000) {
-  throw new Error(`OPENAI_CC_CONTEXT_WINDOW must be between 200000 and 1000000; got ${process.env.OPENAI_CC_CONTEXT_WINDOW}.`);
-}
 
 const store = new AccountStore(dataDir);
 await store.init();
@@ -17,7 +13,12 @@ const providers = new ProviderRegistry(dataDir);
 await providers.init();
 const models = new ModelConfigStore(dataDir, store, providers);
 await models.init();
-const config = await models.update({ contextWindow: Math.floor(requestedContext) });
+
+// ModelConfigStore creates Session 4.5 defaults only when model-config.json is
+// absent. Existing installations are intentionally read-only here: an update
+// must not rewrite user routes, pins, custom-provider selections, output caps,
+// or their configured context target just because clients are being refreshed.
+const config = models.snapshot();
 
 const code = await configureClaudeCode(baseUrl, config, providers);
 console.log(`Claude Code configured: ${code.settingsFile}`);
