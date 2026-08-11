@@ -1,0 +1,299 @@
+name: Gated Distribution CI
+
+on:
+  push:
+    paths:
+      - "distribution/**"
+      - "install.ps1"
+      - "scripts/build-runtime-bundle.ps1"
+      - "scripts/runtime-update-fixture.mjs"
+      - ".github/workflows/distribution-ci.yml"
+  pull_request:
+    paths:
+      - "distribution/**"
+      - "install.ps1"
+      - "scripts/build-runtime-bundle.ps1"
+      - "scripts/runtime-update-fixture.mjs"
+      - ".github/workflows/distribution-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  gated-windows-bootstrap:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build with deterministic source identity
+        shell: pwsh
+        run: |
+          $env:OPENAI_CC_SOURCE_SHA = (git rev-parse HEAD).Trim()
+          $env:OPENAI_CC_BUILD_TIME = (git show -s --format=%cI HEAD).Trim()
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
+
+      - name: Parse distribution scripts
+        shell: powershell
+        run: |
+          foreach ($file in @("distribution/b2/bootstrap.ps1", "install.ps1", "scripts/build-runtime-bundle.ps1")) {
+            [void][scriptblock]::Create((Get-Content $file -Raw))
+            Write-Host "Parsed $file"
+          }
+          foreach ($file in @("distribution/b2/b2-client.mjs", "distribution/b2/publish-release.mjs", "distribution/b2/grant-release.mjs", "distribution/b2/revoke-grant.mjs", "distribution/b2/mock-server.mjs")) {
+            node --check $file
+            if ($LASTEXITCODE -ne 0) { throw "JavaScript syntax check failed: $file" }
+          }
+
+      - name: Prune development dependencies
+        run: npm prune --omit=dev --no-audit --no-fund
+
+      - name: Build production runtime bundle
+        shell: powershell
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "openai-cc-b2-bundle"
+          .\scripts\build-runtime-bundle.ps1 -OutputDirectory $out
+          $manifest = Get-Content (Join-Path $out "openai-cc-runtime-manifest.json") -Raw | ConvertFrom-Json
+          $bundle = Join-Path $out ([string]$manifest.bundleUrl)
+          if (-not (Test-Path $bundle)) { throw "Bundle referenced by manifest is missing" }
+          Copy-Item .\distribution\b2\bootstrap.ps1 (Join-Path $out "bootstrap.ps1") -Force
+          $versionPart = ([string]$manifest.appVersion) -replace '[^0-9A-Za-z._+-]', '-'
+          $prefix = "releases/$versionPart-$(([string]$manifest.sourceCommit).ToLowerInvariant())/"
+          "BUNDLE_DIR=$out" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BUNDLE_NAME=$([string]$manifest.bundleUrl)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "DIST_RELEASE_PREFIX=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Assert distributable artifact boundary
+        shell: powershell
+        run: |
+          $manifest = Get-Content (Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json") -Raw | ConvertFrom-Json
+          foreach ($file in @("bootstrap.ps1", "install.ps1", "openai-cc-runtime-manifest.json", [string]$manifest.bundleUrl)) {
+            if (-not (Test-Path (Join-Path $env:BUNDLE_DIR $file) -PathType Leaf)) { throw "Missing distributable file: $file" }
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $env:BUNDLE_DIR ([string]$manifest.bundleUrl)))
+          try {
+            foreach ($entry in $zip.Entries) {
+              $name = $entry.FullName.Replace('\\','/').ToLowerInvariant()
+              foreach ($needle in @(".data/", "accounts.json", "providers.json", "model-config.json", "auth.json", ".env", ".git/")) {
+                if ($name -eq $needle -or $name.StartsWith($needle) -or $name.EndsWith("/$needle")) {
+                  throw "Forbidden user/provider state leaked into runtime ZIP: $($entry.FullName)"
+                }
+              }
+            }
+          } finally { $zip.Dispose() }
+          $bootstrap = Get-Content .\distribution\b2\bootstrap.ps1 -Raw
+          if ($bootstrap -match 'github\.com|raw\.githubusercontent\.com|git clone') { throw "Target bootstrap depends on GitHub source access" }
+
+      - name: Publisher grant and revocation helpers work against local B2 API
+        shell: powershell
+        run: |
+          $published = Join-Path $env:RUNNER_TEMP "openai-cc-b2-published"
+          New-Item -ItemType Directory -Force -Path $published | Out-Null
+          $env:DIST_ROOT = $published
+          $env:DIST_PORT = "18096"
+          $env:DIST_BUCKET_ID = "bucket-ci"
+          $env:DIST_BUCKET_NAME = "openai-cc-ci"
+          $server = Start-Process -FilePath node.exe -ArgumentList @("distribution/b2/mock-server.mjs") -PassThru -WindowStyle Hidden
+          try {
+            Start-Sleep -Seconds 1
+            if ($server.HasExited) { throw "B2 publisher fixture exited during startup" }
+            $env:OPENAI_CC_B2_AUTHORIZE_URL = "http://127.0.0.1:18096/b2api/v4/b2_authorize_account"
+            $env:B2_BUCKET_ID = "bucket-ci"
+            $env:B2_PUBLISH_KEY_ID = "ci-publish-id"
+            $env:B2_PUBLISH_KEY = "ci-publish-key"
+            node .\distribution\b2\publish-release.mjs $env:BUNDLE_DIR
+            if ($LASTEXITCODE -ne 0) { throw "Local B2 publisher integration failed" }
+
+            $manifest = Get-Content (Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json") -Raw | ConvertFrom-Json
+            foreach ($file in @("bootstrap.ps1", "install.ps1", "openai-cc-runtime-manifest.json", [string]$manifest.bundleUrl)) {
+              if (-not (Test-Path (Join-Path $published $file) -PathType Leaf)) { throw "Publisher did not upload $file" }
+            }
+
+            $env:B2_ISSUER_KEY_ID = "ci-issuer-id"
+            $env:B2_ISSUER_KEY = "ci-issuer-key"
+            $grantPath = Join-Path $env:RUNNER_TEMP "openai-cc-test.grant.json"
+            node .\distribution\b2\grant-release.mjs --manifest (Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json") --output $grantPath --ttl-seconds 600
+            if ($LASTEXITCODE -ne 0) { throw "Local B2 grant integration failed" }
+            $grant = Get-Content $grantPath -Raw | ConvertFrom-Json
+            if (-not $grant.applicationKeyId -or -not $grant.applicationKey -or [string]$grant.releasePrefix -ne $env:DIST_RELEASE_PREFIX) { throw "Grant helper returned incomplete or wrong release scope" }
+            $bootstrapSha = (Get-FileHash .\distribution\b2\bootstrap.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ([string]$grant.bootstrapSha256 -ne $bootstrapSha) { throw "Grant bootstrap hash does not match exact checkout" }
+
+            $basic = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$($grant.applicationKeyId):$($grant.applicationKey)"))
+            $authorized = Invoke-RestMethod -Uri $env:OPENAI_CC_B2_AUTHORIZE_URL -Headers @{ Authorization = "Basic $basic" } -Method Get
+            if (@($authorized.apiInfo.storageApi.allowed.capabilities).Count -ne 1 -or [string]$authorized.apiInfo.storageApi.allowed.capabilities[0] -ne "readFiles") { throw "Generated target grant is not readFiles-only" }
+            if ([string]$authorized.apiInfo.storageApi.allowed.namePrefix -ne $env:DIST_RELEASE_PREFIX) { throw "Generated target grant has the wrong release prefix" }
+
+            node .\distribution\b2\revoke-grant.mjs --key-id ([string]$grant.applicationKeyId)
+            if ($LASTEXITCODE -ne 0) { throw "Local B2 grant revocation failed" }
+            $revoked = $false
+            try { Invoke-RestMethod -Uri $env:OPENAI_CC_B2_AUTHORIZE_URL -Headers @{ Authorization = "Basic $basic" } -Method Get | Out-Null } catch { $revoked = $true }
+            if (-not $revoked) { throw "Revoked application key could still create a new authorization token" }
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:OPENAI_CC_B2_AUTHORIZE_URL,Env:B2_BUCKET_ID,Env:B2_PUBLISH_KEY_ID,Env:B2_PUBLISH_KEY,Env:B2_ISSUER_KEY_ID,Env:B2_ISSUER_KEY -ErrorAction SilentlyContinue
+          }
+
+      - name: Start local private B2 fixture
+        shell: powershell
+        run: |
+          $env:DIST_ROOT = $env:BUNDLE_DIR
+          $env:DIST_PORT = "18094"
+          $env:DIST_BUCKET_ID = "bucket-ci"
+          $env:DIST_BUCKET_NAME = "openai-cc-ci"
+          $server = Start-Process -FilePath node.exe -ArgumentList @("distribution/b2/mock-server.mjs") -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 1
+          if ($server.HasExited) { throw "B2 fixture exited during startup" }
+          "DIST_SERVER_PID=$($server.Id)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "DIST_AUTHORIZE=http://127.0.0.1:18094/b2api/v4/b2_authorize_account" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Invalid and revoked authorization are rejected
+        shell: powershell
+        run: |
+          foreach ($pair in @(@("ci-invalid-id", "ci-invalid-key"), @("ci-revoked-id", "ci-revoked-key"))) {
+            $env:OPENAI_CC_DIST_KEY_ID = $pair[0]
+            $env:OPENAI_CC_DIST_KEY = $pair[1]
+            $env:OPENAI_CC_B2_AUTHORIZE_URL = $env:DIST_AUTHORIZE
+            $root = Join-Path $env:RUNNER_TEMP ("OpenAI-CC-" + $pair[0])
+            $failed = $false
+            try { & .\distribution\b2\bootstrap.ps1 -InstallRoot $root -SkipDesktopConfig -NoStartupShortcut } catch { $failed = $true }
+            if (-not $failed) { throw "Invalid/revoked B2 distribution key was accepted" }
+            if (Test-Path (Join-Path $root "current")) { throw "Rejected authorization reached runtime installation" }
+          }
+
+      - name: Expired authorization is rejected
+        shell: powershell
+        run: |
+          $env:OPENAI_CC_DIST_KEY_ID = "ci-expired-id"
+          $env:OPENAI_CC_DIST_KEY = "ci-expired-key"
+          $env:OPENAI_CC_B2_AUTHORIZE_URL = $env:DIST_AUTHORIZE
+          $root = Join-Path $env:RUNNER_TEMP "OpenAI-CC-expired"
+          $failed = $false
+          try { & .\distribution\b2\bootstrap.ps1 -InstallRoot $root -SkipDesktopConfig -NoStartupShortcut } catch { $failed = $_.Exception.Message -match "expired" }
+          if (-not $failed) { throw "Expired B2 distribution key was accepted" }
+          if (Test-Path (Join-Path $root "current")) { throw "Expired authorization reached runtime installation" }
+
+      - name: Overbroad authorization is rejected
+        shell: powershell
+        run: |
+          $env:OPENAI_CC_DIST_KEY_ID = "ci-overbroad-id"
+          $env:OPENAI_CC_DIST_KEY = "ci-overbroad-key"
+          $env:OPENAI_CC_B2_AUTHORIZE_URL = $env:DIST_AUTHORIZE
+          $root = Join-Path $env:RUNNER_TEMP "OpenAI-CC-overbroad"
+          $failed = $false
+          try { & .\distribution\b2\bootstrap.ps1 -InstallRoot $root -SkipDesktopConfig -NoStartupShortcut } catch { $failed = $_.Exception.Message -match "exactly readFiles" }
+          if (-not $failed) { throw "Overbroad B2 distribution key was accepted" }
+          if (Test-Path (Join-Path $root "current")) { throw "Overbroad authorization reached runtime installation" }
+
+      - name: Valid authorization performs clean install
+        shell: powershell
+        run: |
+          $env:OPENAI_CC_DIST_KEY_ID = "ci-valid-id"
+          $env:OPENAI_CC_DIST_KEY = "ci-valid-key"
+          $env:OPENAI_CC_B2_AUTHORIZE_URL = $env:DIST_AUTHORIZE
+          $root = Join-Path $env:RUNNER_TEMP "OpenAI-CC-b2-target"
+          & .\distribution\b2\bootstrap.ps1 -InstallRoot $root -SkipDesktopConfig -NoStartupShortcut
+          if (-not (Test-Path (Join-Path $root "current\runtime-manifest.json"))) { throw "B2-gated clean install did not activate runtime" }
+          if (-not (Test-Path (Join-Path $root ".data\model-config.json"))) { throw "B2-gated clean install did not initialize .data" }
+          if ($env:OPENAI_CC_DIST_KEY_ID -or $env:OPENAI_CC_DIST_KEY -or $env:OPENAI_CC_B2_AUTHORIZE_URL) { throw "Bootstrap did not clear distribution credentials before application startup" }
+          "INSTALL_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Existing data and custom provider survive gated update
+        shell: powershell
+        run: |
+          $health = Invoke-RestMethod http://127.0.0.1:8082/healthz
+          taskkill.exe /PID ([int]$health.pid) /T /F | Out-Null
+          node .\scripts\runtime-update-fixture.mjs seed $env:INSTALL_ROOT
+          if ($LASTEXITCODE -ne 0) { throw "Could not seed update fixture" }
+          $env:OPENAI_CC_DIST_KEY_ID = "ci-valid-id"
+          $env:OPENAI_CC_DIST_KEY = "ci-valid-key"
+          $env:OPENAI_CC_B2_AUTHORIZE_URL = $env:DIST_AUTHORIZE
+          & .\distribution\b2\bootstrap.ps1 -InstallRoot $env:INSTALL_ROOT -SkipDesktopConfig -NoStartupShortcut
+          node .\scripts\runtime-update-fixture.mjs verify $env:INSTALL_ROOT
+          if ($LASTEXITCODE -ne 0) { throw "Persistent custom-provider/credential/routing state did not survive B2-gated update" }
+
+      - name: Distribution credentials are not persisted
+        shell: powershell
+        run: |
+          foreach ($needle in @("ci-valid-id", "ci-valid-key")) {
+            foreach ($path in @((Join-Path $env:INSTALL_ROOT "install-state.json"), (Join-Path $env:INSTALL_ROOT ".data"))) {
+              if (-not (Test-Path $path)) { continue }
+              $files = if (Test-Path $path -PathType Container) { Get-ChildItem $path -File -Recurse -Force } else { @(Get-Item $path) }
+              foreach ($file in $files) {
+                $text = $null
+                try { $text = Get-Content $file.FullName -Raw -ErrorAction Stop } catch { continue }
+                if ($text.Contains($needle)) { throw "Distribution credential was persisted in $($file.FullName)" }
+              }
+            }
+          }
+
+      - name: Corrupted gated bundle is rejected without replacing runtime
+        shell: powershell
+        run: |
+          $beforeState = Get-Content (Join-Path $env:INSTALL_ROOT "install-state.json") -Raw | ConvertFrom-Json
+          $beforeHealth = Invoke-RestMethod http://127.0.0.1:8082/healthz
+          if (-not $beforeHealth.ok) { throw "Existing runtime unhealthy before corruption test" }
+
+          $badRoot = Join-Path $env:RUNNER_TEMP "openai-cc-b2-corrupt"
+          New-Item -ItemType Directory -Force -Path $badRoot | Out-Null
+          Copy-Item (Join-Path $env:BUNDLE_DIR "install.ps1") $badRoot -Force
+          Copy-Item (Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json") $badRoot -Force
+          Copy-Item (Join-Path $env:BUNDLE_DIR $env:BUNDLE_NAME) $badRoot -Force
+          [IO.File]::AppendAllText((Join-Path $badRoot $env:BUNDLE_NAME), "corruption")
+
+          $env:DIST_ROOT = $badRoot
+          $env:DIST_PORT = "18095"
+          $env:DIST_BUCKET_ID = "bucket-ci"
+          $env:DIST_BUCKET_NAME = "openai-cc-ci"
+          $server = Start-Process -FilePath node.exe -ArgumentList @("distribution/b2/mock-server.mjs") -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 1
+          if ($server.HasExited) { throw "Corrupt B2 fixture exited during startup" }
+          "BAD_DIST_SERVER_PID=$($server.Id)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          $env:OPENAI_CC_DIST_KEY_ID = "ci-valid-id"
+          $env:OPENAI_CC_DIST_KEY = "ci-valid-key"
+          $env:OPENAI_CC_B2_AUTHORIZE_URL = "http://127.0.0.1:18095/b2api/v4/b2_authorize_account"
+          $stdout = Join-Path $env:RUNNER_TEMP "corrupt-bootstrap.stdout.txt"
+          $stderr = Join-Path $env:RUNNER_TEMP "corrupt-bootstrap.stderr.txt"
+          $bootstrapPath = (Resolve-Path .\distribution\b2\bootstrap.ps1).Path
+          $quotedBootstrap = '"' + $bootstrapPath + '"'
+          $quotedInstallRoot = '"' + $env:INSTALL_ROOT + '"'
+          $process = Start-Process -FilePath powershell.exe -ArgumentList @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $quotedBootstrap,
+            "-InstallRoot", $quotedInstallRoot, "-SkipDesktopConfig", "-NoStartupShortcut"
+          ) -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          if (Test-Path $stdout) { Get-Content $stdout | Out-Host }
+          if (Test-Path $stderr) { Get-Content $stderr | Out-Host }
+          if ([int]$process.ExitCode -eq 0) { throw "Corrupted B2-gated bundle was accepted" }
+
+          $afterState = Get-Content (Join-Path $env:INSTALL_ROOT "install-state.json") -Raw | ConvertFrom-Json
+          $afterHealth = Invoke-RestMethod http://127.0.0.1:8082/healthz
+          if ([string]$afterState.sourceCommit -ne [string]$beforeState.sourceCommit) { throw "Corrupted gated update changed installed source commit" }
+          if ([string]$afterState.bundleSha256 -ne [string]$beforeState.bundleSha256) { throw "Corrupted gated update changed installed bundle identity" }
+          if (-not $afterHealth.ok -or [string]$afterHealth.buildSha -ne [string]$beforeState.sourceCommit) { throw "Existing runtime changed or became unhealthy after corrupted gated update" }
+
+      - name: Cleanup test processes
+        if: always()
+        shell: powershell
+        run: |
+          foreach ($name in @("DIST_SERVER_PID", "BAD_DIST_SERVER_PID")) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($value) { Stop-Process -Id ([int]$value) -Force -ErrorAction SilentlyContinue }
+          }
+          try {
+            $health = Invoke-RestMethod http://127.0.0.1:8082/healthz -TimeoutSec 2
+            if ($health.pid) { taskkill.exe /PID ([int]$health.pid) /T /F | Out-Null }
+          } catch { }
