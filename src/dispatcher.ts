@@ -24,6 +24,7 @@ import { upstreamApiFor } from "./upstream-api.js";
 type ApiProvider = Exclude<ProviderKind, "chatgpt">;
 const MESSAGE_BODY_LIMIT = 32 * 1024 * 1024;
 const ADMIN_BODY_LIMIT = 64 * 1024;
+const CODEX_CLIENT_VERSION = "0.146.0";
 
 export interface DispatcherOptions {
   authRunner?: ChatGptAuthRunner;
@@ -313,7 +314,16 @@ export class Dispatcher {
     if (provider === "chatgpt") {
       if (!account.authFile) throw new OpenAICCError(`ChatGPT credential ${account.id} has no auth file.`, 409, "missing_auth_file");
       const credentials = openaiCredentials({ authFilePath: account.authFile });
-      const transport = createOpenAIOAuthTransport({ auth: () => credentials.getSession(), responsesState: false });
+      const transport = createOpenAIOAuthTransport({
+        auth: () => credentials.getSession(),
+        responsesState: false,
+        codexVersion: CODEX_CLIENT_VERSION,
+        headers: {
+          originator: "codex_cli_rs",
+          version: CODEX_CLIENT_VERSION,
+          "User-Agent": `codex_cli_rs/${CODEX_CLIENT_VERSION}`,
+        },
+      });
       client = new OpenAI({ apiKey: "openai-oauth", baseURL: transport.baseURL, fetch: transport.fetch });
     } else {
       if (!account.apiKey) throw new OpenAICCError(`${provider} credential ${account.id} has no API key.`, 409, "missing_api_key");
