@@ -97,6 +97,56 @@ jobs:
           $bootstrap = Get-Content .\distribution\b2\bootstrap.ps1 -Raw
           if ($bootstrap -match 'github\.com|raw\.githubusercontent\.com|git clone') { throw "Target bootstrap depends on GitHub source access" }
 
+      - name: Publisher grant and revocation helpers work against local B2 API
+        shell: powershell
+        run: |
+          $published = Join-Path $env:RUNNER_TEMP "openai-cc-b2-published"
+          New-Item -ItemType Directory -Force -Path $published | Out-Null
+          $env:DIST_ROOT = $published
+          $env:DIST_PORT = "18096"
+          $env:DIST_BUCKET_ID = "bucket-ci"
+          $env:DIST_BUCKET_NAME = "openai-cc-ci"
+          $server = Start-Process -FilePath node.exe -ArgumentList @("distribution/b2/mock-server.mjs") -PassThru -WindowStyle Hidden
+          try {
+            Start-Sleep -Seconds 1
+            if ($server.HasExited) { throw "B2 publisher fixture exited during startup" }
+            $env:OPENAI_CC_B2_AUTHORIZE_URL = "http://127.0.0.1:18096/b2api/v4/b2_authorize_account"
+            $env:B2_BUCKET_ID = "bucket-ci"
+            $env:B2_PUBLISH_KEY_ID = "ci-publish-id"
+            $env:B2_PUBLISH_KEY = "ci-publish-key"
+            node .\distribution\b2\publish-release.mjs $env:BUNDLE_DIR
+            if ($LASTEXITCODE -ne 0) { throw "Local B2 publisher integration failed" }
+
+            $manifest = Get-Content (Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json") -Raw | ConvertFrom-Json
+            foreach ($file in @("bootstrap.ps1", "install.ps1", "openai-cc-runtime-manifest.json", [string]$manifest.bundleUrl)) {
+              if (-not (Test-Path (Join-Path $published $file) -PathType Leaf)) { throw "Publisher did not upload $file" }
+            }
+
+            $env:B2_ISSUER_KEY_ID = "ci-issuer-id"
+            $env:B2_ISSUER_KEY = "ci-issuer-key"
+            $grantPath = Join-Path $env:RUNNER_TEMP "openai-cc-test.grant.json"
+            node .\distribution\b2\grant-release.mjs --manifest (Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json") --output $grantPath --ttl-seconds 600
+            if ($LASTEXITCODE -ne 0) { throw "Local B2 grant integration failed" }
+            $grant = Get-Content $grantPath -Raw | ConvertFrom-Json
+            if (-not $grant.applicationKeyId -or -not $grant.applicationKey -or [string]$grant.releasePrefix -ne $env:DIST_RELEASE_PREFIX) { throw "Grant helper returned incomplete or wrong release scope" }
+            $bootstrapSha = (Get-FileHash .\distribution\b2\bootstrap.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ([string]$grant.bootstrapSha256 -ne $bootstrapSha) { throw "Grant bootstrap hash does not match exact checkout" }
+
+            $basic = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$($grant.applicationKeyId):$($grant.applicationKey)"))
+            $authorized = Invoke-RestMethod -Uri $env:OPENAI_CC_B2_AUTHORIZE_URL -Headers @{ Authorization = "Basic $basic" } -Method Get
+            if (@($authorized.apiInfo.storageApi.allowed.capabilities).Count -ne 1 -or [string]$authorized.apiInfo.storageApi.allowed.capabilities[0] -ne "readFiles") { throw "Generated target grant is not readFiles-only" }
+            if ([string]$authorized.apiInfo.storageApi.allowed.namePrefix -ne $env:DIST_RELEASE_PREFIX) { throw "Generated target grant has the wrong release prefix" }
+
+            node .\distribution\b2\revoke-grant.mjs --key-id ([string]$grant.applicationKeyId)
+            if ($LASTEXITCODE -ne 0) { throw "Local B2 grant revocation failed" }
+            $revoked = $false
+            try { Invoke-RestMethod -Uri $env:OPENAI_CC_B2_AUTHORIZE_URL -Headers @{ Authorization = "Basic $basic" } -Method Get | Out-Null } catch { $revoked = $true }
+            if (-not $revoked) { throw "Revoked application key could still create a new authorization token" }
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:OPENAI_CC_B2_AUTHORIZE_URL,Env:B2_BUCKET_ID,Env:B2_PUBLISH_KEY_ID,Env:B2_PUBLISH_KEY,Env:B2_ISSUER_KEY_ID,Env:B2_ISSUER_KEY -ErrorAction SilentlyContinue
+          }
+
       - name: Start local private B2 fixture
         shell: powershell
         run: |
