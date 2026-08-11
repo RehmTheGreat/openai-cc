@@ -117,10 +117,11 @@ const KNOWN_MODELS = new Map<string, KnownModelMetadata>([
   }],
   [modelKey("cloudflare", "@cf/google/gemma-4-26b-a4b-it"), {
     friendlyName: "Gemma 4 26B A4B IT",
-    // Operational cap: Cloudflare advertises a larger context for this model,
-    // but OpenAI-CC stays at 131,072 until an authenticated deployment probe
-    // proves the hosted endpoint reliably accepts more.
-    contextWindow: 131_072,
+    // Cloudflare's hosted catalog documents a 256K context window. Keep the
+    // gateway at 200K so Claude Code's standard model capability tier and the
+    // public gateway metadata describe the same usable budget without
+    // over-advertising the upstream.
+    contextWindow: 200_000,
     // This is an OpenAI-CC safety cap, not a claim about an upstream hard max.
     maxOutputTokens: 16_384,
     capabilities: CLOUDFLARE_GEMMA_CAPABILITIES,
@@ -154,6 +155,10 @@ export function knownModelMetadata(provider: ProviderKind, model: string): Known
 
 export function verifiedModelContextWindow(provider: ProviderKind, model: string): number | undefined {
   return knownModelMetadata(provider, model)?.contextWindow;
+}
+
+export function verifiedModelMaxOutputTokens(provider: ProviderKind, model: string): number | undefined {
+  return knownModelMetadata(provider, model)?.maxOutputTokens;
 }
 
 export function modelCapabilities(provider: ProviderKind, model: string): ModelCapabilities {
