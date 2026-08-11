@@ -118,13 +118,14 @@ test("openai-oauth owns Codex Responses normalization", async () => {
   assert.ok((capturedBody?.include as string[]).includes("reasoning.encrypted_content"));
 });
 
-test("dispatcher delegates ChatGPT Codex normalization to openai-oauth", async () => {
+test("canonical dispatcher keeps Terra on FCC translation plus the raw OAuth boundary", async () => {
   const source = await readFile(path.resolve("src/dispatcher.ts"), "utf8");
 
-  assert.doesNotMatch(source, /CODEX_CLIENT_VERSION/);
-  assert.doesNotMatch(source, /prepareChatGptCodexRequest/);
-  assert.doesNotMatch(source, /codexVersion:/);
-  assert.doesNotMatch(source, /originator:\s*"codex_cli_rs"/);
-  assert.match(source, /const upstream = \{ \.\.\.anthropicToResponses\(routedBody, toolNames\), model \};/);
-  assert.match(source, /createOpenAIOAuthTransport\(\{\s*auth: \(\) => credentials\.getSession\(\),\s*responsesState: false,\s*\}\)/s);
+  assert.match(source, /anthropicToFccResponses\(routedBody, toolNames\)/);
+  assert.match(source, /createChatGptOAuthBoundary\(account\.authFile\)/);
+  assert.match(source, /await boundary\.responses\(requestBody\)/);
+  assert.doesNotMatch(source, /createOpenAIOAuthTransport/);
+  assert.doesNotMatch(source, /openaiCredentials/);
+  assert.doesNotMatch(source, /new OpenAI\(\{\s*apiKey:\s*["']openai-oauth["']/s);
+  assert.doesNotMatch(source, /CODEX_CLIENT_VERSION|prepareChatGptCodexRequest|originator:\s*["']codex_cli_rs["']/);
 });
