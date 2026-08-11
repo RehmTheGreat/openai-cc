@@ -65,6 +65,7 @@ test("runtime bundle builder is production-only, manifest-driven, and independen
   assert.match(builder, /Copy-RuntimeItem "dist\\scripts\\configure-clients\.js"/);
   assert.match(builder, /Copy-RuntimeItem "dist\\scripts\\codex-doctor\.js"/);
   assert.match(builder, /Copy-RuntimeItem "node_modules"/);
+  assert.match(builder, /Copy-RuntimeItem "package\.json"/);
   assert.match(builder, /Copy-RuntimeItem "uninstall\.ps1"/);
   assert.match(builder, /runtime-manifest\.json/);
   assert.match(builder, /bundleSha256/);
@@ -72,16 +73,19 @@ test("runtime bundle builder is production-only, manifest-driven, and independen
   assert.match(builder, /sourceCommit/);
   assert.match(builder, /appVersion/);
   assert.match(builder, /buildTimestamp/);
-  assert.match(builder, /forbidden in @\("\.data", "\.git", "src", "tests", "setup\.ps1", "install\.ps1"\)/);
+  assert.match(builder, /forbidden in @\("\.data", "\.git", "src", "tests", "setup\.ps1", "install\.ps1", "package-lock\.json"\)/);
+  assert.match(builder, /Source maps leaked into the runtime bundle/);
   assert.doesNotMatch(builder, /Copy-RuntimeItem "\.data/);
+  assert.doesNotMatch(builder, /Copy-RuntimeItem "package-lock\.json"/);
 });
 
-test("uninstall requires explicit keep-data or purge-data mode", async () => {
+test("uninstall requires explicit keep-data or purge-data mode and validates listener ownership", async () => {
   const uninstall = await readFile(path.join(process.cwd(), "uninstall.ps1"), "utf8");
   assert.match(uninstall, /\[switch\]\$KeepData/);
   assert.match(uninstall, /\[switch\]\$PurgeData/);
   assert.match(uninstall, /Choose an uninstall mode explicitly/);
   assert.match(uninstall, /Refusing to remove \.data without -PurgeData/);
+  assert.match(uninstall, /health\.pid -eq \$listenerPid/);
   assert.match(uninstall, /Port 8082 is owned by unrelated PID/);
   assert.match(uninstall, /Runtime removed\. Persistent \.data was kept/);
   assert.match(uninstall, /Purging OpenAI-CC persistent credentials and configuration/);
@@ -90,6 +94,7 @@ test("uninstall requires explicit keep-data or purge-data mode", async () => {
 test("default runtime and launcher both use the canonical inference entrypoint", async () => {
   const packageJson = JSON.parse(await readFile(path.join(process.cwd(), "package.json"), "utf8"));
   const launcher = await readFile(path.join(process.cwd(), "run-gateway.ps1"), "utf8");
+  const claudeLauncher = await readFile(path.join(process.cwd(), "run-claude.ps1"), "utf8");
   const entrypoint = await readFile(path.join(process.cwd(), "src", "index.ts"), "utf8");
   const buildInfo = await readFile(path.join(process.cwd(), "src", "build-info.ts"), "utf8");
 
@@ -99,6 +104,7 @@ test("default runtime and launcher both use the canonical inference entrypoint",
   assert.match(launcher, /dist\\src\\index\.js/);
   assert.match(launcher, /OPENAI_CC_HOME/);
   assert.match(launcher, /OPENAI_CC_RUNTIME_ROOT/);
+  assert.match(claudeLauncher, /Microsoft\\WindowsApps\\Claude\.exe/);
   assert.match(entrypoint, /runtimeIdentity/);
   assert.match(entrypoint, /new Dispatcher/);
   assert.match(buildInfo, /appVersion/);
