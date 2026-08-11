@@ -75,9 +75,14 @@ try {
   if ($SkipDesktopConfig) { $installerArgs += "-SkipDesktopConfig" }
   if ($NoStartupShortcut) { $installerArgs += "-NoStartupShortcut" }
 
-  & powershell.exe @installerArgs
-  if ($LASTEXITCODE -ne 0) {
-    throw "Session 6A installer failed with exit code $LASTEXITCODE."
+  $installerOutput = @(& powershell.exe @installerArgs 2>&1)
+  $installerExitCode = $LASTEXITCODE
+  $installerOutput | Out-Host
+  if ($installerExitCode -ne 0) {
+    $detail = (@($installerOutput | ForEach-Object { [string]$_ }) -join "`n").Trim()
+    if ($detail.Length -gt 2000) { $detail = $detail.Substring($detail.Length - 2000) }
+    if ($detail) { throw "Session 6A installer failed with exit code $installerExitCode.`n$detail" }
+    throw "Session 6A installer failed with exit code $installerExitCode."
   }
 } catch {
   # Never print headers or token values. The exception message is enough to
