@@ -77,14 +77,24 @@ try {
   Copy-RuntimeItem "dist\scripts\configure-clients.js"
   Copy-RuntimeItem "dist\scripts\codex-doctor.js"
   Copy-RuntimeItem "node_modules"
+  # package.json is required at runtime because the compiled .js tree relies on
+  # its `type: module`; package-lock.json is intentionally not bundled.
   Copy-RuntimeItem "package.json"
-  Copy-RuntimeItem "package-lock.json"
   Copy-RuntimeItem "run-gateway.ps1"
   Copy-RuntimeItem "run-claude.ps1"
   Copy-RuntimeItem "uninstall.ps1"
 
-  foreach ($forbidden in @(".data", ".git", "src", "tests", "setup.ps1", "install.ps1")) {
+  # Source maps and npm's install-state lock are useful for development/install
+  # bookkeeping, not for executing the already-built runtime.
+  Get-ChildItem -Path (Join-Path $stage "dist") -File -Filter "*.map" -Recurse -ErrorAction SilentlyContinue |
+    Remove-Item -Force
+  Remove-Item (Join-Path $stage "node_modules\.package-lock.json") -Force -ErrorAction SilentlyContinue
+
+  foreach ($forbidden in @(".data", ".git", "src", "tests", "setup.ps1", "install.ps1", "package-lock.json")) {
     if (Test-Path (Join-Path $stage $forbidden)) { throw "Forbidden item leaked into runtime bundle: $forbidden" }
+  }
+  if (Get-ChildItem -Path (Join-Path $stage "dist") -File -Filter "*.map" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1) {
+    throw "Source maps leaked into the runtime bundle."
   }
 
   $files = @(
