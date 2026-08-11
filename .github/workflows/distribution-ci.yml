@@ -152,11 +152,9 @@ jobs:
             if (-not (Test-Path $path)) { continue }
             $files = if (Test-Path $path -PathType Container) { Get-ChildItem $path -File -Recurse -Force } else { @(Get-Item $path) }
             foreach ($file in $files) {
-              try {
-                $text = Get-Content $file.FullName -Raw -ErrorAction Stop
-                if ($text.Contains($needle)) { throw "Distribution token was persisted in $($file.FullName)" }
-              } catch [System.Management.Automation.ItemNotFoundException] { throw }
-              catch { }
+              $text = $null
+              try { $text = Get-Content $file.FullName -Raw -ErrorAction Stop } catch { continue }
+              if ($text.Contains($needle)) { throw "Distribution token was persisted in $($file.FullName)" }
             }
           }
 
