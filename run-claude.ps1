@@ -1,20 +1,36 @@
+[CmdletBinding()]
+param(
+  [string]$InstallRoot
+)
+
 $ErrorActionPreference = "Stop"
+$RuntimeRoot = [IO.Path]::GetFullPath($PSScriptRoot)
+if (-not $InstallRoot) { $InstallRoot = Split-Path $RuntimeRoot -Parent }
+$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
+$GatewayBaseUrl = "http://127.0.0.1:8082"
 
-if (-not (Test-Path "dist/src/index.js")) { npm run build }
-if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
-  throw "Claude Code CLI was not found on PATH. Install Claude Code first."
+$claude = Get-Command claude -ErrorAction SilentlyContinue
+if (-not $claude) {
+  $native = Join-Path $HOME ".local\bin\claude.exe"
+  if (Test-Path $native) { $claude = Get-Item $native }
 }
+if (-not $claude) { throw "Claude Code CLI was not found. Install Claude Code, then rerun this launcher." }
 
-$hostName = if ($env:HOST) { $env:HOST } else { "127.0.0.1" }
-$port = if ($env:PORT) { $env:PORT } else { "8082" }
-$baseUrl = "http://${hostName}:${port}"
+$gateway = Join-Path $RuntimeRoot "run-gateway.ps1"
+Start-Process -FilePath "powershell.exe" -ArgumentList @(
+  "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File", $gateway, "-InstallRoot", $InstallRoot
+) -WindowStyle Hidden | Out-Null
 
-$proxy = Start-Process -FilePath "node" -ArgumentList "dist/src/index.js" -PassThru
-Start-Sleep -Milliseconds 800
-
-try {
-  Start-Process "${baseUrl}/admin"
-  & claude
-} finally {
-  if ($proxy -and -not $proxy.HasExited) { Stop-Process -Id $proxy.Id -Force }
+$healthy = $false
+for ($i = 0; $i -lt 40; $i++) {
+  Start-Sleep -Milliseconds 250
+  try {
+    $health = Invoke-RestMethod -Uri "$GatewayBaseUrl/healthz" -TimeoutSec 2
+    if ($health.ok -and ([IO.Path]::GetFullPath([string]$health.installRoot).TrimEnd('\') -ieq $InstallRoot.TrimEnd('\'))) { $healthy = $true; break }
+  } catch { }
 }
+if (-not $healthy) { throw "OpenAI-CC did not become healthy at $GatewayBaseUrl/healthz." }
+
+Start-Process "$GatewayBaseUrl/admin" | Out-Null
+& $claude.FullName
+exit $LASTEXITCODE
