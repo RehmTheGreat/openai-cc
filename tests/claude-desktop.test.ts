@@ -77,87 +77,33 @@ test("Claude Desktop 3P configuration is merged and idempotent", async () => {
   assert.equal(meta.entries.some((entry: any) => entry.id === "other"), true);
 });
 
-test("PowerShell installer requires explicit buffered Y/N choices for optional apps", async () => {
+test("bare-PC installer only requires the cleaned runtime dependency and never revives Git or VS Code CLI automation", async () => {
+  const install = await readFile(path.join(process.cwd(), "install.ps1"), "utf8");
   const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
-  assert.match(setup, /function Clear-PendingConsoleInput/);
-  assert.match(setup, /\[Console\]::KeyAvailable/);
-  assert.match(setup, /\[Console\]::ReadKey\(\$true\)/);
-  assert.match(setup, /if \(\$key\.Key -eq \[ConsoleKey\]::Y\)/);
-  assert.match(setup, /if \(\$key\.Key -eq \[ConsoleKey\]::N\)/);
-  assert.match(setup, /Install Claude Code CLI\?/);
-  assert.match(setup, /Install\/configure VS Code \(Claude Code extension is manual\)\?/);
-  assert.match(setup, /Install and configure Claude Desktop\?/);
-  assert.match(setup, /Anthropic\.ClaudeCode/);
-  assert.match(setup, /Microsoft\.VisualStudioCode/);
-  assert.match(setup, /anthropic\.claude-code/);
-  assert.match(setup, /Anthropic\.Claude/);
-  assert.doesNotMatch(setup, /Invoke-WingetUpgrade\s+"Anthropic\.ClaudeCode"/);
-  assert.doesNotMatch(setup, /Invoke-WingetUpgrade\s+"Microsoft\.VisualStudioCode"/);
-  assert.doesNotMatch(setup, /Invoke-WingetUpgrade\s+"Anthropic\.Claude"/);
-  assert.match(setup, /claudeCode\.disableLoginPrompt/);
+
+  assert.match(install, /MinimumNodeVersion = \[Version\]"20\.0\.0"/);
+  assert.match(install, /OpenJS\.NodeJS\.LTS/);
+  assert.match(install, /Test-ClaudeCodeInstalled/);
+  assert.match(install, /Test-ClaudeDesktopInstalled/);
+  assert.match(install, /dist\\scripts\\configure-clients\.js/);
+  assert.match(install, /Claude Code is not installed; gateway settings were prepared/);
+  assert.match(install, /Existing Claude Desktop integration refreshed/);
+  assert.doesNotMatch(install, /Git\.Git/);
+  assert.doesNotMatch(install, /git\s+(clone|fetch|reset|clean)/i);
+  assert.doesNotMatch(install, /Microsoft\.VisualStudioCode/);
+  assert.doesNotMatch(install, /--install-extension|--list-extensions/);
+  assert.doesNotMatch(install, /Get-Command code(?:\.cmd)?/);
+  assert.doesNotMatch(install, /typescript-language-server|context-mode@|rtk-x86_64/);
+
+  assert.match(setup, /compatibility entrypoint/);
+  assert.match(setup, /does not require Git/);
+  assert.match(setup, /-ManifestUrl/);
+  assert.doesNotMatch(setup, /git\s+(clone|pull|fetch|reset|clean)/i);
 });
 
-test("PowerShell installer never invokes the VS Code code CLI", async () => {
-  const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
-  assert.match(setup, /function Test-VSCodeInstalled/);
-  assert.match(setup, /Microsoft VS Code\\Code\.exe/);
-  assert.match(setup, /Test-WingetPackageInstalled "Microsoft\.VisualStudioCode"/);
-  assert.match(setup, /VS Code CLI automation intentionally skipped/);
-  assert.match(setup, /install\/enable Claude Code \(anthropic\.claude-code\) manually/);
-  assert.doesNotMatch(setup, /--list-extensions/);
-  assert.doesNotMatch(setup, /--install-extension/);
-  assert.doesNotMatch(setup, /Get-Command code(?:\.cmd)?/);
-});
-
-test("PowerShell native runner does not redirect stderr under Windows PowerShell 5.1", async () => {
-  const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
-  assert.match(setup, /function Invoke-NativeConsole/);
-  assert.match(setup, /& \$Command @Arguments \| Out-Host/);
-  assert.match(setup, /\$nativeExitCode = \$LASTEXITCODE/);
-  assert.match(setup, /return \[int\]\$nativeExitCode/);
-  assert.doesNotMatch(setup, /& \$Command @Arguments 2>&1/);
-  assert.match(setup, /Invoke-NativeConsole \$gitCommand @\("clone"/);
-  assert.match(setup, /Invoke-NativeConsole \$gitCommand @\("-C", \$target, "pull"/);
-  assert.match(setup, /return Invoke-NativeConsole \$Runner\.Command \$allArgs/);
-});
-
-test("PowerShell installer detects current Claude Desktop MSIX installs and waits for registration", async () => {
-  const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
-  assert.match(setup, /Microsoft\\WindowsApps\\Claude\.exe/);
-  assert.match(setup, /Get-AppxPackage/);
-  assert.match(setup, /PackageFamilyName -like "Claude_\*"/);
-  assert.match(setup, /Test-WingetPackageInstalled "Anthropic\.Claude"/);
-  assert.match(setup, /function Wait-ClaudeDesktopRegistration/);
-  assert.match(setup, /Wait-ClaudeDesktopRegistration 60/);
-  assert.match(setup, /winget list --id Anthropic\.Claude --exact/);
-});
-
-test("PowerShell installer configures the shared token-efficiency stack and persistent gateway", async () => {
-  const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
-  assert.match(setup, /Desktop\\Claude/);
-  assert.match(setup, /CLAUDE_CODE_AUTO_COMPACT_WINDOW/);
-  assert.match(setup, /850000/);
-  assert.match(setup, /CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY/);
-  assert.match(setup, /CLAUDE_CODE_USE_GATEWAY/);
-  assert.match(setup, /typescript-language-server/);
-  assert.match(setup, /typescript-lsp@claude-plugins-official/);
-  assert.match(setup, /context-mode@context-mode/);
-  assert.match(setup, /mksglu\/context-mode/);
-  assert.match(setup, /rtk-x86_64-pc-windows-msvc\.zip/);
-  assert.match(setup, /"init", "-g", "--auto-patch"/);
-  assert.match(setup, /dist\/scripts\/configure-clients\.js/);
-  assert.match(setup, /Invoke-NativeConsole \(Get-Command npm\)\.Source @\("ci", "--no-audit", "--no-fund"\)/);
-  assert.doesNotMatch(setup, /Invoke-NativeConsole \(Get-Command npm\)\.Source @\("install", "--no-audit", "--no-fund"\)/);
-  assert.match(setup, /OpenAI-CC Gateway\.lnk/);
-  assert.match(setup, /\$GatewayBaseUrl\/healthz/);
-  assert.match(setup, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP/);
-  assert.match(setup, /deepseek-v4-flash-free/);
-  assert.doesNotMatch(setup, /(?:OPENAI|NVIDIA|GEMINI|GOOGLE|ZEN|ANTHROPIC)_API_KEY\s*[=:]/i);
-  assert.doesNotMatch(setup, /DISABLE_COMPACT\s*[=:]/);
-});
-
-test("shared Claude settings use gateway-aware aliases, 850k auto-compaction, and onboarding repair", async () => {
+test("shared Claude settings retain gateway-aware aliases, route capability behavior, and onboarding repair", async () => {
   const source = await readFile(path.join(process.cwd(), "src", "claude-config.ts"), "utf8");
+  const clients = await readFile(path.join(process.cwd(), "scripts", "configure-clients.ts"), "utf8");
   assert.match(source, /claudeCodeModelAlias\(config, "fable", providers\)/);
   assert.match(source, /CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY/);
   assert.match(source, /CLAUDE_CODE_USE_GATEWAY/);
@@ -165,17 +111,23 @@ test("shared Claude settings use gateway-aware aliases, 850k auto-compaction, an
   assert.match(source, /hasCompletedOnboarding = true/);
   assert.match(source, /hasSeenOnboarding = true/);
   assert.doesNotMatch(source, /DISABLE_COMPACT\s*[=:]/);
+
+  assert.match(clients, /const config = models\.snapshot\(\)/);
+  assert.doesNotMatch(clients, /models\.update\(/);
+  assert.doesNotMatch(clients, /OPENAI_CC_CONTEXT_WINDOW/);
 });
 
-test("gateway startup honors persistent Claude Desktop opt-out", async () => {
+test("gateway launcher binds persistent data to managed root and refuses an unrelated 8082 listener", async () => {
   const index = await readFile(path.join(process.cwd(), "src", "index.ts"), "utf8");
   const launcher = await readFile(path.join(process.cwd(), "run-gateway.ps1"), "utf8");
   const clients = await readFile(path.join(process.cwd(), "scripts", "configure-clients.ts"), "utf8");
   assert.match(index, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP !== "0"/);
   assert.match(clients, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP !== "0"/);
-  assert.match(clients, /OPENAI_CC_CONTEXT_WINDOW \|\| 850000/);
-  assert.match(launcher, /dist\/src\/index\.js/);
-  assert.match(launcher, /127\.0\.0\.1:8082\/healthz/);
+  assert.match(launcher, /OPENAI_CC_HOME/);
+  assert.match(launcher, /OPENAI_CC_RUNTIME_ROOT/);
+  assert.match(launcher, /DATA_DIR/);
+  assert.match(launcher, /dist\\src\\index\.js/);
+  assert.match(launcher, /Port 8082 is already occupied/);
 });
 
 async function writeJson(file: string, value: unknown): Promise<void> {
