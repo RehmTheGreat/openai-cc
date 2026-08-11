@@ -216,9 +216,16 @@ jobs:
           $env:OPENAI_CC_DIST_KEY_ID = "ci-valid-id"
           $env:OPENAI_CC_DIST_KEY = "ci-valid-key"
           $env:OPENAI_CC_B2_AUTHORIZE_URL = "http://127.0.0.1:18095/b2api/v4/b2_authorize_account"
-          $failed = $false
-          try { & .\distribution\b2\bootstrap.ps1 -InstallRoot $env:INSTALL_ROOT -SkipDesktopConfig -NoStartupShortcut } catch { $failed = $true }
-          if (-not $failed) { throw "Corrupted B2-gated bundle was accepted" }
+          $oldErrorActionPreference = $ErrorActionPreference
+          try {
+            $ErrorActionPreference = "Continue"
+            $bootstrapOutput = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\distribution\b2\bootstrap.ps1 -InstallRoot $env:INSTALL_ROOT -SkipDesktopConfig -NoStartupShortcut 2>&1)
+            $bootstrapExitCode = $LASTEXITCODE
+          } finally {
+            $ErrorActionPreference = $oldErrorActionPreference
+          }
+          $bootstrapOutput | Out-Host
+          if ($bootstrapExitCode -eq 0) { throw "Corrupted B2-gated bundle was accepted" }
 
           $afterState = Get-Content (Join-Path $env:INSTALL_ROOT "install-state.json") -Raw | ConvertFrom-Json
           $afterHealth = Invoke-RestMethod http://127.0.0.1:8082/healthz
