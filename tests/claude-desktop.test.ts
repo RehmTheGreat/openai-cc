@@ -168,13 +168,13 @@ test("shared Claude settings use gateway-aware aliases, 850k auto-compaction, an
 });
 
 test("gateway startup honors persistent Claude Desktop opt-out", async () => {
-  const index = await readFile(path.join(process.cwd(), "src", "index-replicated.ts"), "utf8");
+  const index = await readFile(path.join(process.cwd(), "src", "index.ts"), "utf8");
   const launcher = await readFile(path.join(process.cwd(), "run-gateway.ps1"), "utf8");
   const clients = await readFile(path.join(process.cwd(), "scripts", "configure-clients.ts"), "utf8");
   assert.match(index, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP !== "0"/);
   assert.match(clients, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP !== "0"/);
   assert.match(clients, /OPENAI_CC_CONTEXT_WINDOW \|\| 850000/);
-  assert.match(launcher, /dist\/src\/index-replicated\.js/);
+  assert.match(launcher, /dist\/src\/index\.js/);
   assert.match(launcher, /127\.0\.0\.1:8082\/healthz/);
 });
 

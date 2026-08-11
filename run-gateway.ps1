@@ -13,4 +13,4 @@ function Test-OpenAICCProxy {
 if (Test-OpenAICCProxy) { exit 0 }
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) { throw "Node.js is not on PATH; OpenAI-CC cannot start." }
-& $node.Source "dist/src/index-replicated.js"
+& $node.Source "dist/src/index.js"
