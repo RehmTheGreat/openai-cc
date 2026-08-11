@@ -61,15 +61,70 @@ test("pinned transport consumes the current official Codex auth.json shape", asy
   assert.equal(capturedAccountId, accountId);
 });
 
-test("dispatcher identifies ChatGPT traffic as the pinned official Codex client", async () => {
-  const source = await readFile(path.resolve("src/dispatcher.ts"), "utf8");
-  const packageJson = JSON.parse(await readFile(path.resolve("package.json"), "utf8"));
-  const pinnedCodexVersion = packageJson.dependencies["@openai/codex"];
+test("openai-oauth owns Codex Responses normalization", async () => {
+  let capturedBody: Record<string, unknown> | undefined;
+  let capturedHeaders: Headers | undefined;
+  const transport = createOpenAIOAuthTransport({
+    auth: {
+      accessToken: "synthetic-access-token",
+      accountId: "acct_transport_test",
+    },
+    responsesState: false,
+    codexVersion: "0.146.0",
+    fetch: async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.includes("/models?client_version=")) {
+        return new Response(JSON.stringify({
+          models: [{
+            slug: "gpt-5.6-terra",
+            visibility: "list",
+            supported_in_api: true,
+          }],
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/responses")) {
+        capturedHeaders = new Headers(init?.headers);
+        capturedBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        return new Response("event: response.completed\ndata: {}\n\n", {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    },
+  });
 
-  assert.equal(pinnedCodexVersion, "0.146.0");
-  assert.match(source, /const CODEX_CLIENT_VERSION = "0\.146\.0"/);
-  assert.match(source, /codexVersion: CODEX_CLIENT_VERSION/);
-  assert.match(source, /originator: "codex_cli_rs"/);
-  assert.match(source, /version: CODEX_CLIENT_VERSION/);
-  assert.match(source, /"User-Agent": `codex_cli_rs\/\$\{CODEX_CLIENT_VERSION\}`/);
+  const response = await transport.request("/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.6-terra",
+      input: "Say ok",
+      max_output_tokens: 128000,
+      stream: true,
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(capturedHeaders?.get("authorization"), "Bearer synthetic-access-token");
+  assert.equal(capturedHeaders?.get("chatgpt-account-id"), "acct_transport_test");
+  assert.equal(capturedBody?.model, "gpt-5.6-terra");
+  assert.equal(capturedBody?.store, false);
+  assert.equal("max_output_tokens" in (capturedBody ?? {}), false);
+  assert.ok(Array.isArray(capturedBody?.include));
+  assert.ok((capturedBody?.include as string[]).includes("reasoning.encrypted_content"));
+});
+
+test("dispatcher delegates ChatGPT Codex normalization to openai-oauth", async () => {
+  const source = await readFile(path.resolve("src/dispatcher.ts"), "utf8");
+
+  assert.doesNotMatch(source, /CODEX_CLIENT_VERSION/);
+  assert.doesNotMatch(source, /prepareChatGptCodexRequest/);
+  assert.doesNotMatch(source, /codexVersion:/);
+  assert.doesNotMatch(source, /originator:\s*"codex_cli_rs"/);
+  assert.match(source, /const upstream = \{ \.\.\.anthropicToResponses\(routedBody, toolNames\), model \};/);
+  assert.match(source, /createOpenAIOAuthTransport\(\{\s*auth: \(\) => credentials\.getSession\(\),\s*responsesState: false,\s*\}\)/s);
 });
