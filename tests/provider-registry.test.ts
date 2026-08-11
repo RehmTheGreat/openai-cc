@@ -6,9 +6,9 @@ import test from "node:test";
 import { AccountStore } from "../src/account-store.js";
 import { AnthropicChatSseTranslator, anthropicToChatCompletions } from "../src/chat-translator.js";
 import { claudeDesktopModelList } from "../src/claude-desktop.js";
-import { createServer } from "../src/dispatcher.js";
 import { CLOUDFLARE_GEMMA_MODEL, ModelConfigStore } from "../src/model-config.js";
 import { discoverModelsForCredential, knownModelMetadata, providerBaseUrl } from "../src/provider-registry.js";
+import { createReplicatedServer } from "../src/replicated-dispatcher.js";
 import { upstreamApiFor } from "../src/upstream-api.js";
 
 test("Cloudflare credentials generate internal ids and do not require credential-level model ids", async () => {
@@ -70,7 +70,7 @@ test("Cloudflare discovery uses account-scoped official catalog and only enriche
   assert.equal(requestedUrl, "https://api.cloudflare.com/client/v4/accounts/abc123/ai/models/search");
   assert.equal(authorization, "Bearer cf-token");
   assert.equal(models[0].upstreamModelId, CLOUDFLARE_GEMMA_MODEL);
-  assert.equal(models[0].contextWindow, 131072);
+  assert.equal(models[0].contextWindow, 200000);
   assert.equal(models[0].maxOutputTokens, 16384);
   assert.equal(models[0].capabilities?.image, true);
   assert.equal(models[0].capabilities?.tools, true);
@@ -83,9 +83,9 @@ test("Cloudflare discovery uses account-scoped official catalog and only enriche
   store.close();
 });
 
-test("known Cloudflare Gemma metadata is conservative and capability driven", () => {
+test("known Cloudflare Gemma metadata stays below the hosted 256K context and keeps the safety output cap", () => {
   const metadata = knownModelMetadata("cloudflare", CLOUDFLARE_GEMMA_MODEL);
-  assert.equal(metadata?.contextWindow, 131072);
+  assert.equal(metadata?.contextWindow, 200000);
   assert.equal(metadata?.maxOutputTokens, 16384);
   assert.deepEqual(metadata?.capabilities, {
     text: true,
@@ -106,8 +106,8 @@ test("Claude-facing model discovery keeps aliases clean while retaining route-sp
   assert.doesNotMatch(visible, /OpenAI-CC|gpt-5\.6-terra|deepseek-v4-flash-free|gemma-4-26b|cloudflare/i);
   const sonnet = list.data.find((model) => model.display_name === "Sonnet")!;
   const haiku = list.data.find((model) => model.display_name === "Haiku")!;
-  assert.equal(sonnet.max_input_tokens, 131072);
-  assert.equal(haiku.max_input_tokens, 131072);
+  assert.equal(sonnet.max_input_tokens, 200000);
+  assert.equal(haiku.max_input_tokens, 200000);
   assert.equal(sonnet.max_tokens, 16384);
   assert.equal((sonnet.capabilities.image_input as any).supported, true);
   store.close();
@@ -160,13 +160,13 @@ test("streamed tool arguments stay incremental and finish as Anthropic tool_use"
   assert.match(chunks, /"stop_reason":"tool_use"/);
 });
 
-test("Sonnet route sends exact Cloudflare model, clamps output, and preserves tools/images", async () => {
+test("production dispatcher exposes clean Cloudflare metadata and sends exact model with output/tool/image contracts", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-cf-route-"));
   const store = new AccountStore(root); await store.init();
   await store.createApiKey({ id: "cf1", provider: "cloudflare", apiKey: "token", accountId: "acct" });
   const models = new ModelConfigStore(root, store); await models.init();
   let captured: any;
-  const server = createServer(store, models, {
+  const server = createReplicatedServer(store, models, {
     bindHost: "127.0.0.1",
     clientFactory: () => ({
       chat: { completions: { create: async (request: any) => {
@@ -184,8 +184,18 @@ test("Sonnet route sends exact Cloudflare model, clamps output, and preserves to
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address(); if (!address || typeof address === "string") throw new Error("bad address");
+  const base = `http://127.0.0.1:${address.port}`;
   try {
-    const response = await fetch(`http://127.0.0.1:${address.port}/v1/messages`, {
+    const discovery = await fetch(`${base}/v1/models`);
+    assert.equal(discovery.status, 200);
+    const modelList = await discovery.json() as any;
+    const sonnet = modelList.data.find((model: any) => model.display_name === "Sonnet");
+    assert.equal(sonnet.id, "claude-sonnet-4-6");
+    assert.equal(sonnet.max_input_tokens, 200000);
+    assert.equal(sonnet.max_tokens, 16384);
+    assert.doesNotMatch(JSON.stringify({ id: sonnet.id, display_name: sonnet.display_name }), /cloudflare|gemma/i);
+
+    const response = await fetch(`${base}/v1/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -208,6 +218,41 @@ test("Sonnet route sends exact Cloudflare model, clamps output, and preserves to
     assert.equal(captured.messages[0].content[1].type, "image_url");
     assert.equal(body.stop_reason, "tool_use");
     assert.equal(body.content[0].name, "lookup");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("production Cloudflare route streams through the real replicated dispatcher", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-cf-stream-"));
+  const store = new AccountStore(root); await store.init();
+  await store.createApiKey({ id: "cf1", provider: "cloudflare", apiKey: "token", accountId: "acct" });
+  const models = new ModelConfigStore(root, store); await models.init();
+  const server = createReplicatedServer(store, models, {
+    bindHost: "127.0.0.1",
+    clientFactory: () => ({
+      chat: { completions: { create: async ({ stream, model }: any) => {
+        assert.equal(stream, true);
+        assert.equal(model, CLOUDFLARE_GEMMA_MODEL);
+        return (async function*() {
+          yield { id: "stream-1", choices: [{ delta: { content: "hello" } }] };
+          yield { id: "stream-1", choices: [{ delta: {}, finish_reason: "stop" }], usage: { completion_tokens: 1 } };
+        })();
+      } } },
+    }),
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address(); if (!address || typeof address === "string") throw new Error("bad address");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "sonnet", max_tokens: 32, stream: true, messages: [{ role: "user", content: "hello" }] }),
+    });
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.match(text, /hello/);
+    assert.match(text, /message_stop/);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
