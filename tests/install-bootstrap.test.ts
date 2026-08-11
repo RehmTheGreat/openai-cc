@@ -24,15 +24,16 @@ test("deterministic bootstrap eliminates stale checkout, build, and port ambigui
   assert.match(install, /gpt-5\.6-terra/);
 });
 
-test("default runtime and launcher both use the replicated inference entrypoint", async () => {
+test("default runtime and launcher both use the canonical inference entrypoint", async () => {
   const packageJson = JSON.parse(await readFile(path.join(process.cwd(), "package.json"), "utf8"));
   const launcher = await readFile(path.join(process.cwd(), "run-gateway.ps1"), "utf8");
-  const entrypoint = await readFile(path.join(process.cwd(), "src", "index-replicated.ts"), "utf8");
+  const entrypoint = await readFile(path.join(process.cwd(), "src", "index.ts"), "utf8");
 
-  assert.equal(packageJson.scripts.start, "node dist/src/index-replicated.js");
-  assert.equal(packageJson.scripts.dev, "tsx watch src/index-replicated.ts");
+  assert.equal(packageJson.scripts.start, "node dist/src/index.js");
+  assert.equal(packageJson.scripts.dev, "tsx watch src/index.ts");
   assert.equal(packageJson.scripts["codex:doctor"], "tsx scripts/codex-doctor.ts");
-  assert.match(launcher, /dist\/src\/index-replicated\.js/);
+  assert.match(launcher, /dist\/src\/index\.js/);
   assert.match(entrypoint, /runtimeIdentity/);
   assert.match(entrypoint, /buildSha/);
+  assert.match(entrypoint, /new Dispatcher/);
 });

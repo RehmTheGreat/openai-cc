@@ -78,7 +78,7 @@ test("stream 429 after output does not replay partial response and next request 
     let response = await fetch(`${f.base}/v1/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(requestBody(true)) });
     let text = await response.text();
     assert.match(text, /partial/);
-    assert.match(text, /no partial response was replayed/i);
+    assert.match(text, /next request may use another eligible credential/i);
     assert.deepEqual(calls, ["n1"]);
     assert.equal(f.accounts.publicGet("n1")?.status, "exhausted");
 
