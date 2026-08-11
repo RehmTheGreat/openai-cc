@@ -12,7 +12,6 @@ import {
   OpenAIToolNameCodec,
   anthropicToResponses,
   estimateAnthropicTokens,
-  prepareChatGptCodexRequest,
   responsesToAnthropic,
 } from "./translator.js";
 import { AnthropicChatSseTranslator, anthropicToChatCompletions, chatCompletionToAnthropic } from "./chat-translator.js";
@@ -24,7 +23,6 @@ import { upstreamApiFor } from "./upstream-api.js";
 type ApiProvider = Exclude<ProviderKind, "chatgpt">;
 const MESSAGE_BODY_LIMIT = 32 * 1024 * 1024;
 const ADMIN_BODY_LIMIT = 64 * 1024;
-const CODEX_CLIENT_VERSION = "0.146.0";
 
 export interface DispatcherOptions {
   authRunner?: ChatGptAuthRunner;
@@ -213,8 +211,7 @@ export class Dispatcher {
       const model = route.model || account.model || body.model;
       try {
         if (upstreamApiFor(account.provider, model) === "responses") {
-          const converted = { ...anthropicToResponses(routedBody, toolNames), model };
-          const upstream = account.provider === "chatgpt" ? prepareChatGptCodexRequest(converted) : converted;
+          const upstream = { ...anthropicToResponses(routedBody, toolNames), model };
           if (body.stream) {
             const stream = await client.responses.create({ ...upstream, stream: true });
             const translator = new AnthropicSseTranslator(body.model, toolNames);
@@ -317,12 +314,6 @@ export class Dispatcher {
       const transport = createOpenAIOAuthTransport({
         auth: () => credentials.getSession(),
         responsesState: false,
-        codexVersion: CODEX_CLIENT_VERSION,
-        headers: {
-          originator: "codex_cli_rs",
-          version: CODEX_CLIENT_VERSION,
-          "User-Agent": `codex_cli_rs/${CODEX_CLIENT_VERSION}`,
-        },
       });
       client = new OpenAI({ apiKey: "openai-oauth", baseURL: transport.baseURL, fetch: transport.fetch });
     } else {
