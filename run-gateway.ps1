@@ -33,6 +33,7 @@ $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) { throw "Node.js is not on PATH; OpenAI-CC cannot start." }
 
 $env:OPENAI_CC_HOME = $InstallRoot
+$env:OPENAI_CC_RUNTIME_ROOT = $RuntimeRoot
 $env:DATA_DIR = Join-Path $InstallRoot ".data"
 Set-Location $InstallRoot
 & $node.Source $entrypoint
