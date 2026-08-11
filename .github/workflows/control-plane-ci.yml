@@ -37,8 +37,9 @@ jobs:
           node node_modules/@openai/codex/bin/codex.js login --help
       - name: Run full test suite
         run: npm test
-      - name: Parse Windows installer
+      - name: Parse Windows installers
         if: runner.os == 'Windows'
         shell: powershell
         run: |
           [void][scriptblock]::Create((Get-Content setup.ps1 -Raw))
+          [void][scriptblock]::Create((Get-Content install.ps1 -Raw))

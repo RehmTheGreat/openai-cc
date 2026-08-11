@@ -5,13 +5,14 @@
   "type": "module",
   "description": "Loopback Anthropic-compatible gateway for Claude Code and Claude Desktop with routed upstream credentials.",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index-replicated.ts",
+    "build": "tsc -p tsconfig.json && node dist/scripts/write-build-info.js",
     "test": "npm run build && node dist/scripts/run-tests.js",
-    "start": "node dist/src/index.js",
+    "start": "node dist/src/index-replicated.js",
     "desktop:configure": "tsx scripts/configure-claude-desktop.ts",
     "account:add": "tsx scripts/account-add.ts",
-    "account:list": "tsx scripts/account-list.ts"
+    "account:list": "tsx scripts/account-list.ts",
+    "codex:doctor": "tsx scripts/codex-doctor.ts"
   },
   "engines": {
     "node": ">=20"
