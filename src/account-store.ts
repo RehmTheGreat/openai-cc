@@ -5,8 +5,10 @@ import path from "node:path";
 import { conflict, notFound, OpenAICCError } from "./errors.js";
 
 export type AccountStatus = "ready" | "exhausted" | "auth_error" | "disabled";
-export type ProviderKind = "chatgpt" | "zen" | "nvidia" | "google" | "cloudflare";
-export type ApiProviderKind = Exclude<ProviderKind, "chatgpt">;
+export type BuiltInProviderKind = "chatgpt" | "zen" | "nvidia" | "google" | "cloudflare";
+export type CustomProviderKind = `custom-${string}`;
+export type ProviderKind = BuiltInProviderKind | CustomProviderKind;
+export type ApiProviderKind = Exclude<BuiltInProviderKind, "chatgpt"> | CustomProviderKind;
 
 export const LIMIT_WINDOW_MS = 5 * 60 * 60 * 1000;
 export const DEFAULT_API_KEY_COOLDOWN_MS = 15 * 60 * 1000;
@@ -665,7 +667,8 @@ function defaultCredentialName(provider: ProviderKind): string {
   if (provider === "zen") return "OpenCode Zen";
   if (provider === "nvidia") return "NVIDIA NIM";
   if (provider === "google") return "Google AI Studio";
-  return "Cloudflare Workers AI";
+  if (provider === "cloudflare") return "Cloudflare Workers AI";
+  return "Custom provider credential";
 }
 
 function sanitizeError(value: string): string {
@@ -729,7 +732,7 @@ function looksLikeEmail(value: string): boolean {
 }
 
 function isApiProvider(provider: string): provider is ApiProviderKind {
-  return provider === "zen" || provider === "nvidia" || provider === "google" || provider === "cloudflare";
+  return provider === "zen" || provider === "nvidia" || provider === "google" || provider === "cloudflare" || /^custom-[a-f0-9]{12}$/.test(provider);
 }
 
 const PROVIDERS: ProviderKind[] = ["chatgpt", "zen", "nvidia", "google", "cloudflare"];

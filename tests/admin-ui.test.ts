@@ -104,6 +104,7 @@ test("Admin UI is lean, responsive, and does not expose manual credential/model 
     assert.match(f.html, /<h2>Routes<\/h2>/);
     assert.match(f.html, /<h2>Credentials<\/h2>/);
     assert.match(f.html, /<h2>Available models<\/h2>/);
+    assert.match(f.html, /<h2>Custom providers<\/h2>/);
 
     assert.match(f.html, /id="key-provider"/);
     assert.match(f.html, /id="key-value" type="password"/);
@@ -161,15 +162,15 @@ test("Admin exposes technical upstream routing while Claude-facing names remain 
     const state = await stateResponse.json() as any;
     assert.equal(state.modelConfig.routes.fable.provider, "chatgpt");
     assert.equal(state.modelConfig.routes.fable.model, "gpt-5.6-terra");
-    assert.equal(state.modelConfig.routes.sonnet.provider, "cloudflare");
-    assert.equal(state.modelConfig.routes.sonnet.model, "@cf/google/gemma-4-26b-a4b-it");
+    assert.equal(state.modelConfig.routes.sonnet.provider, "google");
+    assert.equal(state.modelConfig.routes.sonnet.model, "gemini-3.5-flash-lite");
     assert.equal(typeof state.routeHealth.fable.contextWindow, "number");
 
     const publicModels = await (await fetch(`${f.base}/v1/models`)).json() as any;
     assert.deepEqual(publicModels.data.map((model: any) => model.display_name), ["Default", "Fable", "Opus", "Sonnet", "Haiku"]);
     const publicJson = JSON.stringify(publicModels);
     assert.equal(publicJson.includes("gpt-5.6-terra"), false);
-    assert.equal(publicJson.includes("@cf/google/gemma-4-26b-a4b-it"), false);
+    assert.equal(publicJson.includes("gemini-3.5-flash-lite"), false);
 
     assert.match(f.html, /Actual upstream configuration/);
     assert.match(f.html, /r\.model/);

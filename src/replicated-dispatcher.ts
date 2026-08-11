@@ -12,11 +12,12 @@ import { AnthropicChatSseTranslator, anthropicToChatCompletions, chatCompletionT
 import { Dispatcher, DispatcherOptions } from "./dispatcher.js";
 import { anthropicToFccResponses, ResponsesConversionError } from "./fcc-responses.js";
 import { ModelConfigStore } from "./model-config.js";
-import { providerBaseUrl } from "./provider-registry.js";
+import { ProviderRegistry, providerBaseUrl } from "./provider-registry.js";
 import {
   AnthropicRequest,
   AnthropicSseTranslator,
   OpenAIToolNameCodec,
+  estimateAnthropicTokens,
   responsesToAnthropic,
 } from "./translator.js";
 import { upstreamApiFor } from "./upstream-api.js";
@@ -34,15 +35,18 @@ export class ReplicatedDispatcher {
   private readonly controlPlane: Dispatcher;
   private readonly clients = new Map<string, UpstreamClient>();
   private readonly clientFactory?: (account: AccountRecord) => any;
+  private readonly providers: ProviderRegistry;
 
   constructor(
     private readonly store: AccountStore,
     private readonly models: ModelConfigStore,
     options: DispatcherOptions = {},
   ) {
-    this.controlPlane = new Dispatcher(store, models, options);
+    this.providers = options.providerRegistry ?? new ProviderRegistry();
+    this.controlPlane = new Dispatcher(store, models, { ...options, providerRegistry: this.providers });
     this.clientFactory = options.clientFactory;
     store.on("event", () => this.clients.clear());
+    this.providers.on("event", () => this.clients.clear());
   }
 
   handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -71,6 +75,9 @@ export class ReplicatedDispatcher {
       ...body,
       max_tokens: Math.max(1, Math.min(Math.floor(requestedMaxTokens), route.maxOutputTokens)),
     };
+    const contextWindow = this.models.contextWindowForRequestedModel(body.model);
+    const estimatedInput = estimateAnthropicTokens(body);
+    if (estimatedInput > contextWindow) return void anthropicError(res, 400, "invalid_request_error", `context_window_exceeded: estimated input ${estimatedInput} exceeds this route's ${contextWindow}-token limit.`);
     const toolNames = OpenAIToolNameCodec.fromRequest(routedBody);
     const attempted = new Set<string>();
     let account = this.models.credentialForRequestedModel(body.model, attempted);
@@ -119,7 +126,7 @@ export class ReplicatedDispatcher {
         }
 
         const client = this.clientFor(account) as OpenAI;
-        if (upstreamApiFor(account.provider, model) === "responses") {
+        if (upstreamApiFor(account.provider, model, this.providers) === "responses") {
           const upstream = { ...anthropicToFccResponses(routedBody, toolNames), model };
           if (body.stream) {
             const stream = await client.responses.create({ ...upstream, stream: true } as any);
@@ -207,7 +214,7 @@ export class ReplicatedDispatcher {
       client = this.clientFactory(account) as OpenAI;
     } else {
       if (!account.apiKey) throw new Error(`${account.provider} credential ${account.id} has no API key.`);
-      client = new OpenAI({ apiKey: account.apiKey, baseURL: providerBaseUrl(account) });
+      client = new OpenAI({ apiKey: account.apiKey, baseURL: providerBaseUrl(account, this.providers) });
     }
     this.clients.set(account.id, client);
     return client;

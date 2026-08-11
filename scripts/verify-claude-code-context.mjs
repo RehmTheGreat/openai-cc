@@ -37,11 +37,11 @@ if (!version.includes(CLAUDE_VERSION)) {
 }
 
 const probes = [
-  ["default", configured.ANTHROPIC_MODEL, 850000, Infinity],
-  ["fable", configured.ANTHROPIC_DEFAULT_FABLE_MODEL, 850000, Infinity],
+  ["default/deepseek-free", configured.ANTHROPIC_MODEL, 0, 250000],
+  ["fable/terra", configured.ANTHROPIC_DEFAULT_FABLE_MODEL, 850000, Infinity],
   ["opus/deepseek-free", configured.ANTHROPIC_DEFAULT_OPUS_MODEL, 0, 250000],
-  ["sonnet/cloudflare", configured.ANTHROPIC_DEFAULT_SONNET_MODEL, 0, 250000],
-  ["haiku/cloudflare", configured.ANTHROPIC_DEFAULT_HAIKU_MODEL, 0, 250000],
+  ["sonnet/gemini-flash-lite", configured.ANTHROPIC_DEFAULT_SONNET_MODEL, 850000, Infinity],
+  ["haiku/gemini-flash-lite", configured.ANTHROPIC_DEFAULT_HAIKU_MODEL, 850000, Infinity],
 ];
 
 console.log("Claude Code version:", version.split("\n")[0]);
