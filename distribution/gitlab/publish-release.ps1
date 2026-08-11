@@ -15,7 +15,7 @@ if ($GitLabProjectId -notmatch '^\d+$') {
 }
 $token = [string]$env:GITLAB_PACKAGE_WRITE_TOKEN
 if (-not $token) {
-  throw "GITLAB_PACKAGE_WRITE_TOKEN is required. Use a GitLab deploy token scoped only to read_package_registry + write_package_registry for the distribution project."
+  throw "GITLAB_PACKAGE_WRITE_TOKEN is required. Use a GitLab deploy token scoped only to write_package_registry for the distribution project."
 }
 
 $artifactRoot = [IO.Path]::GetFullPath($ArtifactDirectory)
@@ -60,7 +60,7 @@ foreach ($file in $files) {
   }
 }
 
-Write-Host "" 
+Write-Host ""
 Write-Host "Published gated runtime package." -ForegroundColor Green
 Write-Host "Package version: $packageVersion"
 Write-Host "Source commit:   $($manifest.sourceCommit)"
