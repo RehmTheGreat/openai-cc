@@ -6,18 +6,18 @@ permissions:
   contents: write
 jobs:
   apply:
-    if: ${{ !contains(github.event.head_commit.message, '[session45-security-applied]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[session45-security2-applied]') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
-      - run: node scripts/session45-security-finalize.mjs
+      - run: node scripts/session45-security-finalize2.mjs
       - shell: bash
         run: |
           git config user.name "openai-cc-session45"
           git config user.email "actions@users.noreply.github.com"
           git add -A
-          git commit -m "Harden Session 4.5 provider secret handling [session45-security-applied]"
+          git commit -m "Harden Session 4.5 provider secret handling [session45-security2-applied]"
           git push origin HEAD:${GITHUB_REF_NAME}
