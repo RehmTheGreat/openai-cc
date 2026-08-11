@@ -38,18 +38,19 @@ function Get-ProcessInfo([int]$PidValue) {
 function Stop-ManagedRuntime {
   try { $listener = Get-NetTCPConnection -LocalPort 8082 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 } catch { $listener = $null }
   if ($listener) {
+    $listenerPid = [int]$listener.OwningProcess
     $health = $null
     try { $health = Invoke-RestMethod -Uri "$GatewayBaseUrl/healthz" -TimeoutSec 2 } catch { }
-    $info = Get-ProcessInfo ([int]$listener.OwningProcess)
+    $info = Get-ProcessInfo $listenerPid
     $managedByHealth = $false
-    if ($health -and $health.ok -and $health.installRoot) {
+    if ($health -and $health.ok -and $health.installRoot -and [int]$health.pid -eq $listenerPid) {
       try { $managedByHealth = ([IO.Path]::GetFullPath([string]$health.installRoot).TrimEnd('\') -ieq $InstallRoot) } catch { }
     }
     $managedByCommand = [bool]($info -and $info.CommandLine -and $info.CommandLine.IndexOf($InstallRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $info.CommandLine -match '(?i)dist[\\/]src[\\/]index\.js')
     if (-not $managedByHealth -and -not $managedByCommand) {
-      throw "Port 8082 is owned by unrelated PID $($listener.OwningProcess); refusing to terminate it."
+      throw "Port 8082 is owned by unrelated PID $listenerPid; refusing to terminate it."
     }
-    & taskkill.exe /PID ([int]$listener.OwningProcess) /T /F | Out-Null
+    & taskkill.exe /PID $listenerPid /T /F | Out-Null
   }
 
   try {
