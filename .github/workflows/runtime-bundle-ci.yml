@@ -1,0 +1,219 @@
+name: Runtime Bundle CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-runtime-bundle:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build with deterministic source identity
+        shell: pwsh
+        run: |
+          $env:OPENAI_CC_SOURCE_SHA = (git rev-parse HEAD).Trim()
+          $env:OPENAI_CC_BUILD_TIME = (git show -s --format=%cI HEAD).Trim()
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
+          $build = Get-Content dist/build-info.json -Raw | ConvertFrom-Json
+          if ($build.buildSha -ne $env:OPENAI_CC_SOURCE_SHA) { throw "Build SHA mismatch before packaging" }
+          if (-not $build.appVersion) { throw "Build appVersion missing" }
+
+      - name: Parse Windows packaging scripts
+        shell: powershell
+        run: |
+          foreach ($file in @("install.ps1", "setup.ps1", "uninstall.ps1", "run-gateway.ps1", "run-claude.ps1", "scripts/build-runtime-bundle.ps1")) {
+            [void][scriptblock]::Create((Get-Content $file -Raw))
+            Write-Host "Parsed $file"
+          }
+
+      - name: Prune development dependencies
+        run: npm prune --omit=dev --no-audit --no-fund
+
+      - name: Build production runtime bundle
+        shell: powershell
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "openai-cc-bundle"
+          .\scripts\build-runtime-bundle.ps1 -OutputDirectory $out
+          $manifest = Get-Content (Join-Path $out "openai-cc-runtime-manifest.json") -Raw | ConvertFrom-Json
+          if (-not (Test-Path (Join-Path $out $manifest.bundleUrl))) { throw "Bundle referenced by manifest is missing" }
+          "BUNDLE_DIR=$out" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Fresh install from bundle only
+        shell: powershell
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "OpenAI-CC-clean-target"
+          $bootstrap = Join-Path $env:BUNDLE_DIR "install.ps1"
+          $manifest = Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json"
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $bootstrap -ManifestUrl $manifest -InstallRoot $root -SkipDesktopConfig -NoStartupShortcut
+          if ($LASTEXITCODE -ne 0) { throw "Fresh bundle install failed" }
+          if (-not (Test-Path (Join-Path $root ".data\model-config.json"))) { throw "Fresh install did not initialize persistent model config" }
+          if (-not (Test-Path (Join-Path $root "current\runtime-manifest.json"))) { throw "Fresh install did not create managed current runtime" }
+          "INSTALL_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Repeated install is idempotent
+        shell: powershell
+        run: |
+          $bootstrap = Join-Path $env:BUNDLE_DIR "install.ps1"
+          $manifest = Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json"
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $bootstrap -ManifestUrl $manifest -InstallRoot $env:INSTALL_ROOT -SkipDesktopConfig -NoStartupShortcut
+          if ($LASTEXITCODE -ne 0) { throw "Idempotent reinstall failed" }
+          $health = Invoke-RestMethod http://127.0.0.1:8082/healthz
+          if (-not $health.ok) { throw "Gateway unhealthy after idempotent reinstall" }
+
+      - name: Seed existing custom provider, credentials, status, preference, and route
+        shell: powershell
+        run: |
+          $health = Invoke-RestMethod http://127.0.0.1:8082/healthz
+          taskkill.exe /PID ([int]$health.pid) /T /F | Out-Null
+          node .\scripts\runtime-update-fixture.mjs seed $env:INSTALL_ROOT
+          if ($LASTEXITCODE -ne 0) { throw "Could not seed update fixture" }
+
+      - name: Update preserves all persistent state
+        shell: powershell
+        run: |
+          $bootstrap = Join-Path $env:BUNDLE_DIR "install.ps1"
+          $manifest = Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json"
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $bootstrap -ManifestUrl $manifest -InstallRoot $env:INSTALL_ROOT -SkipDesktopConfig -NoStartupShortcut
+          if ($LASTEXITCODE -ne 0) { throw "Update install failed" }
+          node .\scripts\runtime-update-fixture.mjs verify $env:INSTALL_ROOT
+          if ($LASTEXITCODE -ne 0) { throw "Persistent state verification failed" }
+
+      - name: Stale managed process is terminated safely
+        shell: powershell
+        run: |
+          $health = Invoke-RestMethod http://127.0.0.1:8082/healthz
+          taskkill.exe /PID ([int]$health.pid) /T /F | Out-Null
+          $entry = Join-Path $env:INSTALL_ROOT "current\dist\src\index.js"
+          $oldPort = $env:PORT
+          $oldData = $env:DATA_DIR
+          $oldHome = $env:OPENAI_CC_HOME
+          $oldRuntime = $env:OPENAI_CC_RUNTIME_ROOT
+          try {
+            $env:PORT = "0"
+            $env:DATA_DIR = Join-Path $env:INSTALL_ROOT ".data"
+            $env:OPENAI_CC_HOME = $env:INSTALL_ROOT
+            $env:OPENAI_CC_RUNTIME_ROOT = Join-Path $env:INSTALL_ROOT "current"
+            $stale = Start-Process -FilePath node.exe -ArgumentList @($entry) -PassThru -WindowStyle Hidden
+            Start-Sleep -Seconds 1
+          } finally {
+            $env:PORT = $oldPort
+            $env:DATA_DIR = $oldData
+            $env:OPENAI_CC_HOME = $oldHome
+            $env:OPENAI_CC_RUNTIME_ROOT = $oldRuntime
+          }
+          $bootstrap = Join-Path $env:BUNDLE_DIR "install.ps1"
+          $manifest = Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json"
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $bootstrap -ManifestUrl $manifest -InstallRoot $env:INSTALL_ROOT -SkipDesktopConfig -NoStartupShortcut
+          if ($LASTEXITCODE -ne 0) { throw "Install failed while cleaning stale managed process" }
+          $stale.Refresh()
+          if (-not $stale.HasExited) { Stop-Process -Id $stale.Id -Force -ErrorAction SilentlyContinue; throw "Stale managed process survived installer cleanup" }
+
+      - name: Unrelated process on 8082 is never killed
+        shell: powershell
+        run: |
+          $health = Invoke-RestMethod http://127.0.0.1:8082/healthz
+          taskkill.exe /PID ([int]$health.pid) /T /F | Out-Null
+          $otherScript = Join-Path $env:RUNNER_TEMP "unrelated-8082.cjs"
+          Set-Content -Path $otherScript -Encoding ascii -Value "require('node:http').createServer((req,res)=>{res.statusCode=200;res.end('unrelated')}).listen(8082,'127.0.0.1'); setInterval(()=>{},1000);"
+          $other = Start-Process -FilePath node.exe -ArgumentList @($otherScript) -PassThru -WindowStyle Hidden
+          try {
+            Start-Sleep -Seconds 1
+            $bootstrap = Join-Path $env:BUNDLE_DIR "install.ps1"
+            $manifest = Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json"
+            $failed = $false
+            try {
+              & $bootstrap -ManifestUrl $manifest -InstallRoot $env:INSTALL_ROOT -SkipDesktopConfig -NoStartupShortcut
+            } catch {
+              if ($_.Exception.Message -notmatch "unrelated PID|Refusing to terminate") { throw }
+              $failed = $true
+            }
+            if (-not $failed) { throw "Installer unexpectedly accepted unrelated port 8082 owner" }
+            $other.Refresh()
+            if ($other.HasExited) { throw "Installer killed unrelated port 8082 process" }
+          } finally {
+            Stop-Process -Id $other.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Corrupted bundle and failed download are rejected
+        shell: powershell
+        run: |
+          $manifestPath = Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json"
+          $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+          $sourceBundle = Join-Path $env:BUNDLE_DIR $manifest.bundleUrl
+          $badBundle = Join-Path $env:BUNDLE_DIR "corrupted-runtime.zip"
+          Copy-Item $sourceBundle $badBundle -Force
+          [IO.File]::AppendAllText($badBundle, "corruption")
+          $badManifest = $manifest.PSObject.Copy()
+          $badManifest.bundleUrl = "corrupted-runtime.zip"
+          $badManifest.bundleSize = (Get-Item $badBundle).Length
+          $badManifestPath = Join-Path $env:BUNDLE_DIR "corrupted-manifest.json"
+          $badManifest | ConvertTo-Json -Depth 8 | Set-Content -Path $badManifestPath -Encoding utf8
+
+          $failed = $false
+          try {
+            & (Join-Path $env:BUNDLE_DIR "install.ps1") -ManifestUrl $badManifestPath -InstallRoot $env:INSTALL_ROOT -SkipDesktopConfig -NoStartupShortcut
+          } catch {
+            if ($_.Exception.Message -notmatch "Corrupted/hash-mismatched bundle") { throw }
+            $failed = $true
+          }
+          if (-not $failed) { throw "Corrupted bundle was accepted" }
+
+          $missingManifest = $manifest.PSObject.Copy()
+          $missingManifest.bundleUrl = "definitely-missing-runtime.zip"
+          $missingManifestPath = Join-Path $env:BUNDLE_DIR "missing-manifest.json"
+          $missingManifest | ConvertTo-Json -Depth 8 | Set-Content -Path $missingManifestPath -Encoding utf8
+          $failed = $false
+          try {
+            & (Join-Path $env:BUNDLE_DIR "install.ps1") -ManifestUrl $missingManifestPath -InstallRoot $env:INSTALL_ROOT -SkipDesktopConfig -NoStartupShortcut
+          } catch { $failed = $true }
+          if (-not $failed) { throw "Missing bundle download was unexpectedly accepted" }
+
+      - name: Uninstall keep-data and full-purge modes
+        shell: powershell
+        run: |
+          $uninstall = Join-Path $env:INSTALL_ROOT "current\uninstall.ps1"
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $uninstall -KeepData -InstallRoot $env:INSTALL_ROOT
+          if ($LASTEXITCODE -ne 0) { throw "Keep-data uninstall failed" }
+          if (Test-Path (Join-Path $env:INSTALL_ROOT "current")) { throw "Runtime survived keep-data uninstall" }
+          if (-not (Test-Path (Join-Path $env:INSTALL_ROOT ".data\model-config.json"))) { throw ".data was lost during keep-data uninstall" }
+
+          $bootstrap = Join-Path $env:BUNDLE_DIR "install.ps1"
+          $manifest = Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json"
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $bootstrap -ManifestUrl $manifest -InstallRoot $env:INSTALL_ROOT -SkipDesktopConfig -NoStartupShortcut
+          if ($LASTEXITCODE -ne 0) { throw "Reinstall after keep-data uninstall failed" }
+          node .\scripts\runtime-update-fixture.mjs verify $env:INSTALL_ROOT
+          if ($LASTEXITCODE -ne 0) { throw "State did not survive runtime-only uninstall/reinstall" }
+
+          $uninstall = Join-Path $env:INSTALL_ROOT "current\uninstall.ps1"
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $uninstall -PurgeData -InstallRoot $env:INSTALL_ROOT
+          if ($LASTEXITCODE -ne 0) { throw "Full-purge uninstall failed" }
+          if (Test-Path (Join-Path $env:INSTALL_ROOT ".data")) { throw ".data survived explicit full purge" }
+          if (Test-Path (Join-Path $env:INSTALL_ROOT "current")) { throw "Runtime survived explicit full purge" }
+
+      - name: Upload Session 6A runtime artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openai-cc-runtime-windows
+          path: |
+            ${{ env.BUNDLE_DIR }}/install.ps1
+            ${{ env.BUNDLE_DIR }}/openai-cc-runtime-manifest.json
+            ${{ env.BUNDLE_DIR }}/openai-cc-runtime-*.zip
+          if-no-files-found: error
