@@ -19,10 +19,22 @@ $baseUri = $null
 if (-not [Uri]::TryCreate($PackageBaseUrl, [UriKind]::Absolute, [ref]$baseUri)) {
   throw "PackageBaseUrl must be an absolute URL."
 }
-$loopback = @("127.0.0.1", "localhost", "::1") -contains $baseUri.Host
-if ($baseUri.Scheme -ne "https" -and -not ($baseUri.Scheme -eq "http" -and $loopback)) {
-  throw "PackageBaseUrl must use HTTPS; plain HTTP is allowed only for loopback CI tests."
+if ($baseUri.Query -or $baseUri.Fragment) {
+  throw "PackageBaseUrl must not contain a query string or fragment."
 }
+
+$loopback = @("127.0.0.1", "localhost", "::1") -contains $baseUri.Host
+if ($loopback) {
+  if ($baseUri.Scheme -notin @("http", "https")) { throw "Loopback PackageBaseUrl must use HTTP(S)." }
+} else {
+  if ($baseUri.Scheme -ne "https" -or $baseUri.Host -ne "gitlab.com" -or $baseUri.Port -ne 443) {
+    throw "Production PackageBaseUrl must use https://gitlab.com."
+  }
+  if ($baseUri.AbsolutePath -notmatch '^/api/v4/projects/[0-9]+/packages/generic/openai-cc-runtime/[0-9A-Za-z._+-]+/?$') {
+    throw "Production PackageBaseUrl is not an OpenAI-CC Generic Package endpoint."
+  }
+}
+
 $packageBase = $baseUri.AbsoluteUri.TrimEnd('/')
 $headers = @{ "DEPLOY-TOKEN" = $token }
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("openai-cc-gitlab-" + [Guid]::NewGuid().ToString("N"))
