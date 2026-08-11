@@ -1,0 +1,77 @@
+name: Publish Gated Runtime
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish-windows-runtime:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      GITLAB_PROJECT_ID: ${{ vars.GITLAB_PROJECT_ID }}
+      GITLAB_PACKAGE_WRITE_TOKEN: ${{ secrets.GITLAB_PACKAGE_WRITE_TOKEN }}
+    steps:
+      - name: Require distribution configuration
+        shell: powershell
+        run: |
+          if (-not $env:GITLAB_PROJECT_ID) { throw "Missing repository variable GITLAB_PROJECT_ID" }
+          if (-not $env:GITLAB_PACKAGE_WRITE_TOKEN) { throw "Missing repository secret GITLAB_PACKAGE_WRITE_TOKEN" }
+          if ($env:GITLAB_PROJECT_ID -notmatch '^\d+$') { throw "GITLAB_PROJECT_ID must be numeric" }
+
+      - name: Checkout exact selected commit
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run application tests with exact build identity
+        shell: pwsh
+        run: |
+          $env:OPENAI_CC_SOURCE_SHA = (git rev-parse HEAD).Trim()
+          $env:OPENAI_CC_BUILD_TIME = (git show -s --format=%cI HEAD).Trim()
+          npm test
+          if ($LASTEXITCODE -ne 0) { throw "npm test failed" }
+          $build = Get-Content dist/build-info.json -Raw | ConvertFrom-Json
+          if ($build.buildSha -ne $env:OPENAI_CC_SOURCE_SHA) { throw "Build SHA mismatch before packaging" }
+
+      - name: Prune development dependencies
+        run: npm prune --omit=dev --no-audit --no-fund
+
+      - name: Build deterministic runtime bundle
+        shell: powershell
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "openai-cc-publish"
+          .\scripts\build-runtime-bundle.ps1 -OutputDirectory $out
+          $manifest = Get-Content (Join-Path $out "openai-cc-runtime-manifest.json") -Raw | ConvertFrom-Json
+          if (-not (Test-Path (Join-Path $out ([string]$manifest.bundleUrl)))) { throw "Bundle referenced by manifest is missing" }
+          "PUBLISH_DIR=$out" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify no persistent user state is distributable
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $manifest = Get-Content (Join-Path $env:PUBLISH_DIR "openai-cc-runtime-manifest.json") -Raw | ConvertFrom-Json
+          $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $env:PUBLISH_DIR ([string]$manifest.bundleUrl)))
+          try {
+            foreach ($entry in $zip.Entries) {
+              $name = $entry.FullName.Replace('\\','/').ToLowerInvariant()
+              foreach ($needle in @(".data/", "accounts.json", "providers.json", "model-config.json", "auth.json", ".env", ".git/")) {
+                if ($name -eq $needle -or $name.StartsWith($needle) -or $name.EndsWith("/$needle")) {
+                  throw "Forbidden persistent/provider state in distributable runtime: $($entry.FullName)"
+                }
+              }
+            }
+          } finally { $zip.Dispose() }
+
+      - name: Publish to private GitLab Generic Package Registry
+        shell: powershell
+        run: |
+          .\distribution\gitlab\publish-release.ps1 -ArtifactDirectory $env:PUBLISH_DIR -GitLabProjectId $env:GITLAB_PROJECT_ID
