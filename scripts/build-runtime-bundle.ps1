@@ -12,7 +12,7 @@ if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
 }
 
 $RepoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-$OutputDirectory = [IO.Path]::GetFullPath((Join-Path (Get-Location) $OutputDirectory))
+$OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 $buildInfoFile = Join-Path $RepoRoot "dist\build-info.json"
 $packageFile = Join-Path $RepoRoot "package.json"
 $nodeModules = Join-Path $RepoRoot "node_modules"
@@ -90,7 +90,7 @@ try {
   $files = @(
     Get-ChildItem -Path $stage -File -Recurse -Force |
       ForEach-Object {
-        $relative = $_.FullName.Substring($stage.Length).TrimStart('\', '/').Replace('\', '/')
+        $relative = $_.FullName.Substring($stage.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Replace([IO.Path]::DirectorySeparatorChar, '/')
         [pscustomobject]@{ path = $relative; sha256 = Get-Sha256 $_.FullName; size = [int64]$_.Length }
       } |
       Sort-Object path
