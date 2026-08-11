@@ -22,6 +22,7 @@ export interface RouteHealth {
   slot: ModelSlot;
   provider: ProviderKind;
   model: string;
+  contextWindow: number;
   mode: "auto" | "pinned";
   credentialId?: string;
   readyCredentialIds: string[];
@@ -38,8 +39,33 @@ export const DEFAULT_MAX_OUTPUT_TOKENS: Record<ModelSlot, number> = {
   haiku: 64000,
 };
 
+export const DEFAULT_CONTEXT_WINDOW = 850000;
+export const FALLBACK_CONTEXT_WINDOW = 200000;
+
+// Claude Code currently derives its usable window from its own model catalog, not
+// from /v1/models alone. These ids are therefore client capability carriers;
+// OpenAI-CC still routes by slot and sends the configured upstream model.
+const CLAUDE_CODE_STANDARD_MODEL_IDS: Record<ModelSlot, string> = {
+  default: "claude-opus-4-8",
+  fable: "claude-fable-5",
+  opus: "claude-opus-5",
+  sonnet: "claude-sonnet-4-6",
+  haiku: "claude-haiku-4-5",
+};
+
+const CLAUDE_CODE_EXTENDED_MODEL_IDS: Record<ModelSlot, string> = {
+  // Keep the public Sonnet id stable so existing Sonnet routing remains intact.
+  // Sonnet 5 becomes native-1M when Claude Code resolves provider=gateway;
+  // the other extended carriers use raw [1m] ids whose suffix is client-side.
+  default: "claude-opus-4-8[1m]",
+  fable: "claude-fable-5[1m]",
+  opus: "claude-opus-5[1m]",
+  sonnet: "claude-sonnet-5",
+  haiku: "claude-opus-4-7[1m]",
+};
+
 const DEFAULTS: ModelConfig = {
-  contextWindow: 700000,
+  contextWindow: DEFAULT_CONTEXT_WINDOW,
   routes: {
     default: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.default },
     fable: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.fable },
@@ -97,7 +123,9 @@ export class ModelConfigStore extends EventEmitter {
   }
 
   slotForRequestedModel(model: string): ModelSlot {
-    const id = String(model || "").toLowerCase();
+    const id = String(model || "").trim().toLowerCase();
+    const explicit = slotForClaudeCodeModel(this.state, id);
+    if (explicit) return explicit;
     if (id === "fable" || id.includes("fable")) return "fable";
     if (id === "opus" || id.includes("opus")) return "opus";
     if (id === "sonnet" || id.includes("sonnet")) return "sonnet";
@@ -143,27 +171,28 @@ export class ModelConfigStore extends EventEmitter {
 
   healthFor(slot: ModelSlot): RouteHealth {
     const route = this.state.routes[slot];
+    const contextWindow = contextWindowForRoute(this.state, slot);
     const sameProvider = this.accounts.list().filter((credential) => credential.provider === route.provider);
     const ready = sameProvider.filter((credential) => credential.status === "ready");
     if (route.credentialId) {
       const pinned = sameProvider.find((credential) => credential.id === route.credentialId);
       if (!pinned) {
-        return baseHealth(slot, route, ready, "unavailable", "Pinned credential is missing or belongs to another provider.");
+        return baseHealth(slot, route, ready, contextWindow, "unavailable", "Pinned credential is missing or belongs to another provider.");
       }
       if (pinned.status !== "ready") {
         const reset = pinned.limitResetsAt ? ` until ${pinned.limitResetsAt}` : "";
-        return baseHealth(slot, route, ready, "unavailable", `Pinned credential is ${pinned.status}${reset}.`);
+        return baseHealth(slot, route, ready, contextWindow, "unavailable", `Pinned credential is ${pinned.status}${reset}.`);
       }
-      return baseHealth(slot, route, ready, "healthy", `Pinned to ${pinned.name}.`);
+      return baseHealth(slot, route, ready, contextWindow, "healthy", `Pinned to ${pinned.name}.`);
     }
-    if (!ready.length) return baseHealth(slot, route, ready, "unavailable", `No ready ${route.provider} credential is available.`);
+    if (!ready.length) return baseHealth(slot, route, ready, contextWindow, "unavailable", `No ready ${route.provider} credential is available.`);
     const preferred = this.accounts.preferredId(route.provider);
     const preferredReady = preferred && ready.some((credential) => credential.id === preferred);
     const status = preferred && !preferredReady ? "degraded" : "healthy";
     const message = preferred && !preferredReady
       ? `Preferred credential is unavailable; ${ready.length} fallback credential${ready.length === 1 ? "" : "s"} ready.`
       : `${ready.length} ready credential${ready.length === 1 ? "" : "s"}; preferred first, then provider-local rotation.`;
-    return baseHealth(slot, route, ready, status, message);
+    return baseHealth(slot, route, ready, contextWindow, status, message);
   }
 
   credentialsForProvider(provider: ProviderKind): PublicCredential[] {
@@ -195,6 +224,36 @@ export class ModelConfigStore extends EventEmitter {
 }
 
 export const MODEL_SLOTS: ModelSlot[] = ["default", "fable", "opus", "sonnet", "haiku"];
+
+export function contextWindowForRoute(config: ModelConfig, slot: ModelSlot): number {
+  const configuredTarget = Math.max(FALLBACK_CONTEXT_WINDOW, Math.floor(Number(config.contextWindow) || FALLBACK_CONTEXT_WINDOW));
+  return Math.min(configuredTarget, verifiedUpstreamContextWindow(config.routes[slot]));
+}
+
+export function claudeCodeModelAlias(config: ModelConfig, slot: ModelSlot): string {
+  return contextWindowForRoute(config, slot) > FALLBACK_CONTEXT_WINDOW
+    ? CLAUDE_CODE_EXTENDED_MODEL_IDS[slot]
+    : CLAUDE_CODE_STANDARD_MODEL_IDS[slot];
+}
+
+export function slotForClaudeCodeModel(config: ModelConfig, model: string): ModelSlot | undefined {
+  const id = String(model || "").trim().toLowerCase();
+  for (const slot of MODEL_SLOTS) {
+    const alias = claudeCodeModelAlias(config, slot).toLowerCase();
+    const stripped = alias.replace(/\[1m\]$/i, "");
+    if (id === alias || id === stripped) return slot;
+  }
+  return undefined;
+}
+
+function verifiedUpstreamContextWindow(route: ModelRoute): number {
+  const model = String(route.model || "").trim().toLowerCase();
+  if (route.provider === "chatgpt" && model === "gpt-5.6-terra") return 1050000;
+  if (route.provider === "google" && model === "gemini-3.6-flash") return 1048576;
+  if (route.provider === "zen" && model === "deepseek-v4-flash-free") return 200000;
+  // Unknown routes stay conservative until their upstream capacity is verified.
+  return FALLBACK_CONTEXT_WINDOW;
+}
 
 function normalizeStrict(input: Partial<ModelConfig>): ModelConfig {
   const contextWindow = finiteInteger(input.contextWindow, "contextWindow", 200000, 1000000);
@@ -242,11 +301,12 @@ function isProvider(value: unknown): value is ProviderKind {
   return value === "chatgpt" || value === "zen" || value === "nvidia" || value === "google";
 }
 
-function baseHealth(slot: ModelSlot, route: ModelRoute, ready: PublicCredential[], status: RouteHealth["status"], message: string): RouteHealth {
+function baseHealth(slot: ModelSlot, route: ModelRoute, ready: PublicCredential[], contextWindow: number, status: RouteHealth["status"], message: string): RouteHealth {
   return {
     slot,
     provider: route.provider,
     model: route.model,
+    contextWindow,
     mode: route.credentialId ? "pinned" : "auto",
     credentialId: route.credentialId,
     readyCredentialIds: ready.map((credential) => credential.id),

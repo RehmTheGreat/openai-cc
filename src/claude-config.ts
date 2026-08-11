@@ -1,8 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { CLAUDE_DESKTOP_MODEL_ALIASES } from "./claude-desktop.js";
-import { ModelConfig } from "./model-config.js";
+import { ModelConfig, claudeCodeModelAlias } from "./model-config.js";
 
 export interface ClaudeConfigureResult {
   settingsFile: string;
@@ -18,21 +17,25 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig):
   const settings = await readJson(settingsFile);
   const env = isObject(settings.env) ? { ...settings.env as Record<string, unknown> } : {};
 
-  // Remove the old OpenAI-CC context overrides. CLAUDE_CODE_MAX_CONTEXT_TOKENS only
-  // takes effect when DISABLE_COMPACT is set, which defeats the token-efficient setup.
-  if (env.CLAUDE_CODE_CONTEXT_WINDOW === String(config.contextWindow)) delete env.CLAUDE_CODE_CONTEXT_WINDOW;
-  if (env.CLAUDE_CODE_MAX_CONTEXT_TOKENS === String(config.contextWindow)) delete env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
+  // Remove OpenAI-CC's obsolete hard context overrides. MAX_CONTEXT only becomes
+  // effective with DISABLE_COMPACT, which would defeat automatic compaction.
+  const oldContextValues = new Set(["700000", String(config.contextWindow)]);
+  if (oldContextValues.has(String(env.CLAUDE_CODE_CONTEXT_WINDOW ?? ""))) delete env.CLAUDE_CODE_CONTEXT_WINDOW;
+  if (oldContextValues.has(String(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? ""))) delete env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
 
   settings.env = {
     ...env,
     ANTHROPIC_BASE_URL: normalizeBaseUrl(baseUrl),
     ANTHROPIC_AUTH_TOKEN: "local-not-used",
-    ANTHROPIC_MODEL: CLAUDE_DESKTOP_MODEL_ALIASES.fable,
-    ANTHROPIC_DEFAULT_FABLE_MODEL: CLAUDE_DESKTOP_MODEL_ALIASES.fable,
-    ANTHROPIC_DEFAULT_OPUS_MODEL: CLAUDE_DESKTOP_MODEL_ALIASES.opus,
-    ANTHROPIC_DEFAULT_SONNET_MODEL: CLAUDE_DESKTOP_MODEL_ALIASES.sonnet,
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: CLAUDE_DESKTOP_MODEL_ALIASES.haiku,
+    ANTHROPIC_MODEL: claudeCodeModelAlias(config, "default"),
+    ANTHROPIC_DEFAULT_FABLE_MODEL: claudeCodeModelAlias(config, "fable"),
+    ANTHROPIC_DEFAULT_OPUS_MODEL: claudeCodeModelAlias(config, "opus"),
+    ANTHROPIC_DEFAULT_SONNET_MODEL: claudeCodeModelAlias(config, "sonnet"),
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeCodeModelAlias(config, "haiku"),
     CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
+    // Claude Code 2.1.x otherwise resolves a plain ANTHROPIC_BASE_URL as
+    // first-party-with-a-custom-host and hard-falls back to a 200K budget.
+    CLAUDE_CODE_USE_GATEWAY: "1",
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(config.contextWindow),
     CLAUDE_CODE_PLUGIN_PREFER_HTTPS: "1",
   };

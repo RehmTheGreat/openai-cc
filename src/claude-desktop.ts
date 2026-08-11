@@ -1,20 +1,22 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { ModelConfig, ModelRoute, ModelSlot } from "./model-config.js";
+import {
+  MODEL_SLOTS,
+  ModelConfig,
+  ModelRoute,
+  ModelSlot,
+  claudeCodeModelAlias,
+  contextWindowForRoute,
+  slotForClaudeCodeModel,
+} from "./model-config.js";
 
-export type ClaudeDesktopSlot = Exclude<ModelSlot, "default">;
+export type ClaudeDesktopSlot = ModelSlot;
 
 export const CLAUDE_DESKTOP_PROFILE_ID = "00000000-0000-4000-8000-000000008082";
 export const CLAUDE_DESKTOP_PROFILE_NAME = "OpenAI-CC";
-export const CLAUDE_DESKTOP_MODEL_ALIASES: Record<ClaudeDesktopSlot, string> = {
-  fable: "claude-fable-5",
-  opus: "claude-opus-5",
-  sonnet: "claude-sonnet-5",
-  haiku: "claude-haiku-4-5",
-};
 
-const DESKTOP_SLOTS: ClaudeDesktopSlot[] = ["fable", "opus", "sonnet", "haiku"];
+const DESKTOP_SLOTS: ClaudeDesktopSlot[] = [...MODEL_SLOTS];
 const UNKNOWN_CREATED_AT = "1970-01-01T00:00:00Z";
 
 export interface ClaudeDesktopPaths {
@@ -50,7 +52,7 @@ export function claudeDesktopModel(config: ModelConfig, modelId: string): Claude
   const exact = claudeDesktopModels(config).find((model) => model.id.toLowerCase() === normalized);
   if (exact) return exact;
 
-  const slot = desktopSlotForModel(normalized);
+  const slot = slotForClaudeCodeModel(config, normalized) ?? desktopSlotForModel(normalized);
   return slot ? modelInfo(slot, config) : undefined;
 }
 
@@ -88,7 +90,7 @@ export function claudeDesktopProfile(baseUrl: string, config: ModelConfig): Reco
     return {
       name: info.id,
       labelOverride: info.display_name,
-      ...(config.contextWindow >= 1000000 ? { supports1m: true } : {}),
+      ...(info.max_input_tokens >= 1000000 ? { supports1m: true } : {}),
     };
   });
 
@@ -145,11 +147,11 @@ export async function currentPlatformPaths(): Promise<ClaudeDesktopPaths | undef
 function modelInfo(slot: ClaudeDesktopSlot, config: ModelConfig): ClaudeModelInfo {
   const route = config.routes[slot];
   return {
-    id: CLAUDE_DESKTOP_MODEL_ALIASES[slot],
+    id: claudeCodeModelAlias(config, slot),
     type: "model",
     display_name: `OpenAI-CC ${title(slot)} (${route.model})`,
     created_at: UNKNOWN_CREATED_AT,
-    max_input_tokens: config.contextWindow,
+    max_input_tokens: contextWindowForRoute(config, slot),
     max_tokens: route.maxOutputTokens,
     capabilities: routeCapabilities(route),
   };

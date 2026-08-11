@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $RepositoryUrl = "https://github.com/RehmTheGreat/openai-cc.git"
 $GatewayBaseUrl = "http://127.0.0.1:8082"
-$ContextWindow = 700000
+$ContextWindow = 850000
 $MinimumNodeVersion = [Version]"22.5.0"
 
 function Write-Step([string]$Message) {
@@ -83,11 +83,11 @@ function Set-PersistentEnvironment([string]$Name, [string]$Value) {
 function Remove-OldOpenAICCContextOverrides {
   foreach ($name in @("CLAUDE_CODE_CONTEXT_WINDOW", "CLAUDE_CODE_MAX_CONTEXT_TOKENS")) {
     $userValue = [Environment]::GetEnvironmentVariable($name, "User")
-    if ($userValue -eq [string]$ContextWindow) {
+    if (@("700000", [string]$ContextWindow) -contains [string]$userValue) {
       [Environment]::SetEnvironmentVariable($name, $null, "User")
     }
     $current = Get-Item -Path "Env:$name" -ErrorAction SilentlyContinue
-    if ($current -and $current.Value -eq [string]$ContextWindow) {
+    if ($current -and @("700000", [string]$ContextWindow) -contains [string]$current.Value) {
       Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue
     }
   }
@@ -427,12 +427,15 @@ function Configure-PersistentClaudeEnvironment([bool]$DesktopRequested) {
   Set-PersistentEnvironment "OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP" ($(if ($DesktopRequested) { "1" } else { "0" }))
   Set-PersistentEnvironment "ANTHROPIC_BASE_URL" $GatewayBaseUrl
   Set-PersistentEnvironment "ANTHROPIC_AUTH_TOKEN" "local-not-used"
-  Set-PersistentEnvironment "ANTHROPIC_MODEL" "claude-fable-5"
-  Set-PersistentEnvironment "ANTHROPIC_DEFAULT_FABLE_MODEL" "claude-fable-5"
+  # These ids carry Claude Code's client-side context capability only. The
+  # gateway still dispatches to the configured upstream model for each slot.
+  Set-PersistentEnvironment "ANTHROPIC_MODEL" "claude-opus-4-8[1m]"
+  Set-PersistentEnvironment "ANTHROPIC_DEFAULT_FABLE_MODEL" "claude-fable-5[1m]"
   Set-PersistentEnvironment "ANTHROPIC_DEFAULT_OPUS_MODEL" "claude-opus-5"
   Set-PersistentEnvironment "ANTHROPIC_DEFAULT_SONNET_MODEL" "claude-sonnet-5"
-  Set-PersistentEnvironment "ANTHROPIC_DEFAULT_HAIKU_MODEL" "claude-haiku-4-5"
+  Set-PersistentEnvironment "ANTHROPIC_DEFAULT_HAIKU_MODEL" "claude-opus-4-7[1m]"
   Set-PersistentEnvironment "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" "1"
+  Set-PersistentEnvironment "CLAUDE_CODE_USE_GATEWAY" "1"
   Set-PersistentEnvironment "CLAUDE_CODE_AUTO_COMPACT_WINDOW" ([string]$ContextWindow)
   Set-PersistentEnvironment "CLAUDE_CODE_PLUGIN_PREFER_HTTPS" "1"
   Remove-OldOpenAICCContextOverrides
@@ -473,10 +476,25 @@ function Start-OrVerifyGateway {
   Invoke-RestMethod -Uri "$GatewayBaseUrl/admin/model-config" -Method Post -ContentType "application/json" -Body $payload -TimeoutSec 5 | Out-Null
   $models = Invoke-RestMethod -Uri "$GatewayBaseUrl/v1/models" -TimeoutSec 5
   $publicModels = @($models.data)
-  if ($publicModels.Count -lt 4) { throw "Gateway model discovery returned fewer than four Claude-compatible routes." }
+  if ($publicModels.Count -lt 5) { throw "Gateway model discovery returned fewer than five Claude-compatible routes." }
   foreach ($model in $publicModels) {
     if ($model.id -notmatch '^claude-') { throw "Gateway exposed an unsafe model id: $($model.id)" }
-    if ([int64]$model.max_input_tokens -ne $ContextWindow) { throw "Gateway model $($model.id) does not advertise $ContextWindow input tokens." }
+    if ([int64]$model.max_input_tokens -gt $ContextWindow) { throw "Gateway model $($model.id) advertises above the configured context target." }
+  }
+  $terraModels = @($publicModels | Where-Object { $_.display_name -match 'gpt-5\.6-terra' })
+  if ($terraModels.Count -lt 2) { throw "Gateway discovery did not expose both Terra routes." }
+  foreach ($model in $terraModels) {
+    if ([int64]$model.max_input_tokens -ne $ContextWindow) { throw "Terra route $($model.id) does not advertise the configured context target." }
+  }
+  $geminiModels = @($publicModels | Where-Object { $_.display_name -match 'gemini-3\.6-flash' })
+  if ($geminiModels.Count -lt 2) { throw "Gateway discovery did not expose both Gemini routes." }
+  foreach ($model in $geminiModels) {
+    if ([int64]$model.max_input_tokens -ne $ContextWindow) { throw "Gemini route $($model.id) does not advertise the configured context target." }
+  }
+  $deepSeekModels = @($publicModels | Where-Object { $_.display_name -match 'deepseek-v4-flash-free' })
+  if ($deepSeekModels.Count -lt 1) { throw "Gateway discovery did not expose the DeepSeek Free route." }
+  foreach ($model in $deepSeekModels) {
+    if ([int64]$model.max_input_tokens -gt 200000) { throw "DeepSeek Free route $($model.id) advertises above its verified 200K limit." }
   }
 }
 
@@ -505,7 +523,7 @@ function Verify-Installation([bool]$ClaudeCodeRequested, [bool]$VSCodeRequested,
   if (-not (Test-PluginEnabled "typescript-lsp@claude-plugins-official")) { throw "Verification failed: official TypeScript LSP plugin is not enabled." }
   if (-not (Test-PluginEnabled "context-mode@context-mode")) { throw "Verification failed: Context Mode plugin is not enabled." }
   if (-not (Test-OpenAICCProxy)) { throw "Verification failed: OpenAI-CC proxy is not healthy." }
-  $checks.Add("OpenAI-CC proxy + 700k model metadata")
+  $checks.Add("OpenAI-CC proxy + route-specific context metadata")
   $checks.Add("RTK global integration")
   $checks.Add("TypeScript LSP plugin + language server")
   $checks.Add("Context Mode plugin")
