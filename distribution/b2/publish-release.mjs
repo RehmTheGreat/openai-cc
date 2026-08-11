@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import { authorize, apiJson, requireBucketScope, requireExactCapabilities, uploadFile } from "./b2-client.mjs";
 
 function fail(message) { throw new Error(message); }
@@ -20,6 +21,8 @@ const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 
 if (!/^[0-9a-f]{40}$/i.test(String(manifest.sourceCommit || ""))) fail("Manifest sourceCommit must be a 40-character Git SHA.");
 if (!String(manifest.appVersion || "")) fail("Manifest appVersion is missing.");
+const currentSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim().toLowerCase();
+if (currentSha !== String(manifest.sourceCommit).toLowerCase()) fail("Artifact sourceCommit does not match the checked-out source. Publish from the exact release commit.");
 const bundleName = String(manifest.bundleUrl || "");
 if (!bundleName || basename(bundleName) !== bundleName || /[\\/]/.test(bundleName)) fail("Manifest bundleUrl must be a local leaf filename.");
 const bundlePath = join(artifactRoot, bundleName);
