@@ -76,6 +76,11 @@ try {
   if ($NoStartupShortcut) { $args += "-NoStartupShortcut" }
 
   & $installer @args
+} catch {
+  # Never print headers or token values. The exception message is enough to
+  # diagnose transport/integrity/install failures without exposing credentials.
+  Write-Error ("Gated distribution bootstrap failed: " + $_.Exception.Message)
+  throw
 } finally {
   Remove-Item Env:OPENAI_CC_DIST_TOKEN -ErrorAction SilentlyContinue
   $token = $null
