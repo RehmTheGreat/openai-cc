@@ -18,9 +18,10 @@ This distribution is intended to stop working before it becomes paid.
 
 - Do not add a payment method to the Backblaze account used for OpenAI-CC.
 - Keep the private B2 bucket below the current free storage allowance; remove obsolete release versions before approaching it.
+- Backblaze documents daily transaction caps for non-paying B2 accounts. Hitting a free-account cap is an availability failure, not a reason to add billing.
 - Use B2 Caps & Alerts as an additional safety control. Do not raise a cap or add billing merely to keep distribution running.
 - If Backblaze requires a payment method to increase storage, bandwidth, transactions, or another limit, stop and reduce usage instead.
-- After the GitHub source repository becomes private, GitHub-hosted Actions consume the account's included private-repository allowance. Keep the GitHub billing account without a valid payment method, or configure an Actions budget with **Stop usage when budget limit is reached**. Never enable paid Actions overage for this project.
+- After the GitHub source repository becomes private, GitHub-hosted Actions consume the account's included private-repository allowance. Prefer an account with no valid GitHub payment method. If a payment method is already present, configure an Actions budget with **Stop usage when budget limit is reached** before any private-repository workflow run; if the available GitHub billing controls cannot provide a true zero-paid-usage hard stop, do not make the repository private until a self-hosted runner or another hard-free build path is configured.
 - Do not use GitHub larger runners.
 
 Backblaze's current pricing and free allowances can change. Re-check them before any infrastructure change. The repository never provisions or changes billing.
@@ -65,7 +66,7 @@ Repository secret: B2_PUBLISH_KEY
 Repository variable: B2_BUCKET_ID
 ```
 
-`distribution/b2/publish-release.mjs` refuses a publisher key whose authorized bucket, prefix, or capabilities are broader/different than that contract.
+`distribution/b2/publish-release.mjs` refuses a publisher key whose authorized bucket, prefix, or capabilities are broader/different than that contract. It also refuses to publish when the manifest's source commit differs from the checked-out Git commit.
 
 The publisher key cannot create target download grants and never goes to target PCs.
 
@@ -95,6 +96,8 @@ Do **not** store this issuer credential in the runtime bundle, target `.data`, G
 - `namePrefix`: one exact release directory;
 - expiry: 60–3600 seconds, default 900 seconds.
 
+Grant creation is bound to the exact checked-out Git commit. To authorize an older published release, first check out that exact source commit and use its matching manifest.
+
 The target grant cannot list unrelated files, upload/delete files, create keys, access GitHub, or authorize inference.
 
 ## Publish a release
@@ -123,7 +126,7 @@ Remove-Item Env:B2_PUBLISH_KEY_ID,Env:B2_PUBLISH_KEY -ErrorAction SilentlyContin
 
 ## Create a short-lived authorization grant
 
-Use the exact manifest for the published release:
+Use the exact manifest from the same checked-out source commit as the published release:
 
 ```powershell
 node distribution/b2/grant-release.mjs `
@@ -134,7 +137,7 @@ node distribution/b2/grant-release.mjs `
 
 The helper writes a private JSON file containing the temporary key ID, temporary key secret, expiry, release prefix, bucket ID, and expected SHA-256 of `bootstrap.ps1`. The secret is intentionally not printed.
 
-Do not commit or upload the grant JSON. Share its values with the intended target through a private channel and revoke the key after installation.
+Do not commit or upload the grant JSON. Share its values with the intended target through a private channel and delete/revoke the application key after installation.
 
 ## Fresh install on the target PC
 
@@ -149,10 +152,10 @@ $env:OPENAI_CC_DIST_BOOTSTRAP_SHA256 = '<bootstrapSha256>'
 Then run this one-line bootstrap:
 
 ```powershell
-$p="$env:TEMP\openai-cc-bootstrap.ps1";try{$b=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$env:OPENAI_CC_DIST_KEY_ID`:$env:OPENAI_CC_DIST_KEY"));$a=irm -Headers @{Authorization="Basic $b"} https://api.backblazeb2.com/b2api/v4/b2_authorize_account;$s=$a.apiInfo.storageApi;$k=@($s.allowed.buckets);if($k.Count-ne1){throw 'Invalid distribution grant scope'};$q=((($s.allowed.namePrefix+'bootstrap.ps1')-split '/')|%{[Uri]::EscapeDataString($_)})-join '/';irm -Headers @{Authorization=$a.authorizationToken} "$($s.downloadUrl)/file/$([Uri]::EscapeDataString([string]$k[0].name))/$q" -OutFile $p;if((Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant()-ne $env:OPENAI_CC_DIST_BOOTSTRAP_SHA256.ToLowerInvariant()){throw 'Bootstrap integrity verification failed'};powershell -NoProfile -ExecutionPolicy Bypass -File $p;if($LASTEXITCODE-ne0){throw "Bootstrap failed with exit code $LASTEXITCODE"}}finally{Remove-Item Env:OPENAI_CC_DIST_KEY_ID,Env:OPENAI_CC_DIST_KEY,Env:OPENAI_CC_DIST_BOOTSTRAP_SHA256 -ErrorAction SilentlyContinue;Remove-Item $p -Force -ErrorAction SilentlyContinue}
+$p="$env:TEMP\openai-cc-bootstrap.ps1";try{$b=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$env:OPENAI_CC_DIST_KEY_ID`:$env:OPENAI_CC_DIST_KEY"));$a=irm -Headers @{Authorization="Basic $b"} https://api.backblazeb2.com/b2api/v4/b2_authorize_account;$s=$a.apiInfo.storageApi;$k=@($s.allowed.buckets);if($k.Count-ne1){throw 'Invalid distribution grant scope'};$q=((($s.allowed.namePrefix+'bootstrap.ps1')-split '/')|%{[Uri]::EscapeDataString($_)})-join '/';irm -Headers @{Authorization=$a.authorizationToken} "$($s.downloadUrl)/file/$([Uri]::EscapeDataString([string]$k[0].name))/$q" -OutFile $p;if((Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant()-ne $env:OPENAI_CC_DIST_BOOTSTRAP_SHA256.ToLowerInvariant()){throw 'Bootstrap integrity verification failed'};powershell -NoProfile -ExecutionPolicy Bypass -File $p;if($LASTEXITCODE-ne0){throw "Bootstrap failed with exit code $LASTEXITCODE"}}finally{$a=$null;$b=$null;Remove-Item Env:OPENAI_CC_DIST_KEY_ID,Env:OPENAI_CC_DIST_KEY,Env:OPENAI_CC_DIST_BOOTSTRAP_SHA256 -ErrorAction SilentlyContinue;Remove-Item $p -Force -ErrorAction SilentlyContinue}
 ```
 
-The first line authorizes directly with Backblaze, downloads only `bootstrap.ps1` from the key's server-enforced private bucket/prefix, verifies the bootstrap SHA-256 supplied with the grant, executes it, then removes the temporary credentials from the parent shell.
+The first line authorizes directly with Backblaze, downloads only `bootstrap.ps1` from the key's server-enforced private bucket/prefix, verifies the bootstrap SHA-256 supplied with the grant, executes it, then clears the temporary values from the parent shell and removes the temporary bootstrap file.
 
 `bootstrap.ps1` performs stricter checks before it downloads the actual release:
 
@@ -184,27 +187,29 @@ The Session 6A update path remains unchanged. Existing `.data` is fingerprinted 
 
 ## Revoke a grant
 
-Immediately after the install/update succeeds:
+After the install/update succeeds, prevent any **new** authorization with that temporary application key:
 
 ```powershell
 node distribution/b2/revoke-grant.mjs --key-id '<temporary applicationKeyId>'
 ```
 
-Backblaze also expires the key automatically at the seconds-level expiry set during creation. Deleting the key is the explicit immediate revocation mechanism.
+Backblaze also stops accepting the application key for new authorization after its seconds-level expiry. Deleting the key prevents it from being used to mint another B2 account authorization token.
 
-If a target grant leaks before revocation/expiry, it can download only files whose names begin with that one release prefix in the one authorized private bucket. It cannot read the GitHub source repository or access provider credentials.
+Backblaze documents account authorization tokens as valid for **at most 24 hours**. Its public key-deletion documentation says that a deleted key is no longer valid for authorization, but does not promise that every authorization token already minted from that key is synchronously invalidated. Therefore this design does **not** claim instant revocation of a token an attacker obtained before key deletion. The mitigation is a very short application-key lifetime, one-release read-only scope, immediate credential clearing on the target, and deleting the key as soon as the install completes.
 
 ## Security contract
 
-**What authorizes a download:** a Backblaze B2 application key created specifically for one install/update.
+**What authorizes a download:** a Backblaze B2 application key created specifically for one install/update is first exchanged with `b2_authorize_account` for a scoped B2 account authorization token. That token is used only inside the bootstrap process to download the authorized release.
 
-**Where authorization is validated:** Backblaze validates the key during `b2_authorize_account` and enforces its bucket/prefix/capability restriction on private file downloads. The local bootstrap independently rejects overbroad/expired grants.
+**Where authorization is validated:** Backblaze validates the application key during `b2_authorize_account` and enforces its bucket/prefix/capability restriction on private file downloads. The local bootstrap independently rejects overbroad or expired application keys before installing anything.
 
-**Lifetime:** 15 minutes by default; repository helper allows 60 seconds to one hour.
+**Application-key lifetime:** 15 minutes by default; repository helper allows 60 seconds to one hour.
 
-**Revocation:** delete the application key with `b2_delete_key`; expiry is the automatic fallback.
+**Authorization-token lifetime:** Backblaze documents `b2_authorize_account` tokens as valid for at most 24 hours. The bootstrap does not persist the token and clears it before launching OpenAI-CC.
 
-**Leaked token/key effect:** read-only access to the one exact release prefix until revocation/expiry. It is not a GitHub credential and not an inference credential.
+**Revocation:** `b2_delete_key` prevents the deleted application key from creating new authorization tokens. Expiry provides the automatic equivalent for new authorization. Already-issued B2 authorization tokens are treated conservatively as potentially usable until their own expiry because Backblaze does not document synchronous invalidation on key deletion.
+
+**Leaked credential effect:** before authorization, the leaked application key is limited to one bucket, one exact release prefix, `readFiles`, and its short expiry. If an attacker already exchanged it for an authorization token, that token remains restricted to the same read-only release scope but may remain usable until the B2 token itself expires. Neither credential is a GitHub credential or an inference credential.
 
 **Encryption:** the runtime bundle is access-controlled, not DRM-encrypted. HTTPS protects transport. A user who can execute the runtime can inspect its compiled files.
 
@@ -220,8 +225,10 @@ If a target grant leaks before revocation/expiry, it can download only files who
 
 `.github/workflows/distribution-ci.yml` uses a local private-B2 protocol fixture and proves the repository-side behavior without pretending that a live Backblaze account has been deployed. It tests:
 
+- publisher upload with the write-only distribution scope;
+- creation of a short-lived exact-release target grant;
+- deletion of that grant and rejection of subsequent authorization attempts;
 - invalid authorization;
-- revoked-key behavior;
 - expired authorization;
 - rejection of an overbroad key;
 - valid gated clean-target install;
@@ -237,14 +244,16 @@ Before source-repository privacy is changed, the real external deployment must a
 
 1. valid short-lived key downloads and installs;
 2. invalid key rejection;
-3. actual seconds-level expiry;
-4. actual deletion/revocation;
+3. actual seconds-level application-key expiry blocks new authorization;
+4. actual key deletion blocks new authorization;
 5. corrupted-object rejection;
 6. clean Windows target installation;
 7. update of an existing target with `.data` intact;
 8. custom-provider state surviving the update;
 9. no target/provider secrets in B2 objects;
 10. no GitHub source/raw-file/git-clone access during install/update.
+
+Do not claim that the live revocation test invalidates an already-issued account authorization token unless Backblaze explicitly documents or demonstrates that behavior.
 
 ## Private source transition
 
