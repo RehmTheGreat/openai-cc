@@ -22,6 +22,19 @@ Use a plain Free account/project. Do not enable a paid subscription, on-demand b
 
 Service abuse/rate limits or future GitLab policy changes can still make downloads unavailable. They do not justify adding a payment method. The intended failure mode is **stop/blocked**, never automatic paid overage.
 
+## Hard-free billing guardrail
+
+"Free" in this design means the infrastructure is configured to stop rather than incur paid overage.
+
+- Do not add a payment method or paid subscription to the GitLab distribution project.
+- Do not use GitLab.com shared runners for this distribution path. GitLab is storage/authentication only.
+- The GitHub source repository may use standard GitHub-hosted Actions within the repository owner's included private-repository allowance after the source becomes private.
+- Before making the GitHub source private, either keep the GitHub billing account without a valid payment method **or** configure a GitHub Actions budget of `$0` with **Stop usage when budget limit is reached** enabled.
+- If the included GitHub Actions allowance is exhausted, builds/publishing must stop until the allowance resets or a self-hosted runner is deliberately configured. Do not raise a paid budget to keep distribution working.
+- Do not use GitHub larger runners for this workflow.
+
+This keeps both sides hard-free: GitLab has no card to charge, and GitHub Actions is prevented from entering paid usage. Service availability is allowed to fail before the cost boundary is crossed.
+
 ## Distribution project setup
 
 Create one private GitLab project dedicated to binary distribution, for example `openai-cc-distribution`. It should not contain the OpenAI-CC source tree.
@@ -48,7 +61,6 @@ There are two completely separate distribution credentials.
 
 Create a GitLab **project deploy token** for the distribution project with only:
 
-- `read_package_registry`
 - `write_package_registry`
 
 Store it only in the GitHub source repository as the Actions secret:
@@ -107,12 +119,12 @@ $env:OPENAI_CC_DIST_URL = 'https://gitlab.com/api/v4/projects/<PROJECT_ID>/packa
 Then the target runs this one-line bootstrap:
 
 ```powershell
-$p="$env:TEMP\openai-cc-bootstrap.ps1"; irm -Headers @{'DEPLOY-TOKEN'=$env:OPENAI_CC_DIST_TOKEN} "$env:OPENAI_CC_DIST_URL/bootstrap.ps1" -OutFile $p; & $p -PackageBaseUrl $env:OPENAI_CC_DIST_URL
+$p="$env:TEMP\openai-cc-bootstrap.ps1"; irm -Headers @{'DEPLOY-TOKEN'=$env:OPENAI_CC_DIST_TOKEN} "$env:OPENAI_CC_DIST_URL/bootstrap.ps1" -OutFile $p; powershell -NoProfile -ExecutionPolicy Bypass -File $p -PackageBaseUrl $env:OPENAI_CC_DIST_URL
 ```
 
-`bootstrap.ps1` uses the temporary token only to download `install.ps1`, the manifest, and the referenced ZIP into a temporary directory. Before invoking the Session 6A installer it removes `OPENAI_CC_DIST_TOKEN` from its environment, so the gateway and child processes do not inherit the distribution credential. The Session 6A installer then consumes only local files and does not know that GitLab exists.
+`bootstrap.ps1` uses the temporary token only to download `install.ps1`, the manifest, and the referenced ZIP into a temporary directory. Before invoking the Session 6A installer it removes `OPENAI_CC_DIST_TOKEN` from its environment, so the gateway and child processes do not inherit the distribution credential. It launches the downloaded Session 6A installer in a fresh PowerShell process with the explicit execution-policy bypass already used by Session 6A. The Session 6A installer then consumes only local files and does not know that GitLab exists.
 
-The bootstrap accepts plain HTTP only for loopback CI fixtures. Real distribution must use HTTPS.
+The bootstrap accepts plain HTTP only for loopback CI fixtures. Production distribution is restricted to `https://gitlab.com` Generic Package endpoints for the `openai-cc-runtime` package, which prevents a supplied URL from forwarding the deploy token to an arbitrary host.
 
 ## Update
 
@@ -199,8 +211,8 @@ A real GitLab deployment must additionally prove:
 - successful clean Windows install from GitLab only;
 - successful existing-state update from GitLab only.
 
-Do not make the GitHub source repository private until those live checks pass.
+Do not make the GitHub source repository private until those live checks pass and the GitHub Actions hard-free billing guardrail is configured.
 
 ## Source-repository privacy transition
 
-Once independent GitLab package installation/update has been proven from a clean target PC, change the GitHub source repository visibility to **Private**. The target installation command will continue to use only GitLab package URLs and a temporary package-read token; it never needs Git, a GitHub login, a PAT, or private GitHub repository access.
+Once independent GitLab package installation/update has been proven from a clean target PC and the Actions hard-stop/no-payment-method guardrail is confirmed, change the GitHub source repository visibility to **Private**. The target installation command will continue to use only GitLab package URLs and a temporary package-read token; it never needs Git, a GitHub login, a PAT, or private GitHub repository access.
