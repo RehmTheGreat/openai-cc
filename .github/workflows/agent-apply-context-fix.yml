@@ -25,6 +25,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Normalize legacy test label
+        run: sed -i 's/shared Claude settings use safe aliases, 700k/shared Claude settings use safe aliases, 850k/' tests/claude-desktop.test.ts
       - name: Apply scoped context fix
         run: node scripts/apply-agent-context-fix.mjs
       - name: Install locked dependencies
