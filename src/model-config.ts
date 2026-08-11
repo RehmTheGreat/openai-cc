@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { AccountRecord, AccountStore, ProviderKind, PublicCredential } from "./account-store.js";
 import { OpenAICCError, unprocessable } from "./errors.js";
+import { verifiedModelContextWindow } from "./provider-registry.js";
 
 export type ModelSlot = "default" | "fable" | "opus" | "sonnet" | "haiku";
 
@@ -35,12 +36,13 @@ export const DEFAULT_MAX_OUTPUT_TOKENS: Record<ModelSlot, number> = {
   default: 128000,
   fable: 128000,
   opus: 128000,
-  sonnet: 128000,
-  haiku: 64000,
+  sonnet: 16384,
+  haiku: 16384,
 };
 
 export const DEFAULT_CONTEXT_WINDOW = 850000;
 export const FALLBACK_CONTEXT_WINDOW = 200000;
+export const CLOUDFLARE_GEMMA_MODEL = "@cf/google/gemma-4-26b-a4b-it";
 
 // Claude Code currently derives its usable window from its own model catalog, not
 // from /v1/models alone. These ids are therefore client capability carriers;
@@ -70,10 +72,12 @@ const DEFAULTS: ModelConfig = {
     default: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.default },
     fable: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.fable },
     opus: { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.opus },
-    sonnet: { provider: "google", model: "gemini-3.6-flash", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.sonnet },
-    haiku: { provider: "google", model: "gemini-3.6-flash", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.haiku },
+    sonnet: { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.sonnet },
+    haiku: { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.haiku },
   },
 };
+
+const LEGACY_GEMINI_MODEL = "gemini-3.6-flash";
 
 export class ModelConfigStore extends EventEmitter {
   private readonly file: string;
@@ -87,8 +91,9 @@ export class ModelConfigStore extends EventEmitter {
   async init(): Promise<void> {
     try {
       const raw = JSON.parse(await readFile(this.file, "utf8")) as Partial<ModelConfig>;
-      this.state = normalizeForLoad(raw);
-      let repaired = false;
+      const normalized = normalizeForLoad(raw);
+      this.state = normalized.config;
+      let repaired = normalized.changed;
       for (const slot of MODEL_SLOTS) {
         const route = this.state.routes[slot];
         if (!route.credentialId) continue;
@@ -247,12 +252,7 @@ export function slotForClaudeCodeModel(config: ModelConfig, model: string): Mode
 }
 
 function verifiedUpstreamContextWindow(route: ModelRoute): number {
-  const model = String(route.model || "").trim().toLowerCase();
-  if (route.provider === "chatgpt" && model === "gpt-5.6-terra") return 1050000;
-  if (route.provider === "google" && model === "gemini-3.6-flash") return 1048576;
-  if (route.provider === "zen" && model === "deepseek-v4-flash-free") return 200000;
-  // Unknown routes stay conservative until their upstream capacity is verified.
-  return FALLBACK_CONTEXT_WINDOW;
+  return verifiedModelContextWindow(route.provider, route.model) ?? FALLBACK_CONTEXT_WINDOW;
 }
 
 function normalizeStrict(input: Partial<ModelConfig>): ModelConfig {
@@ -272,13 +272,16 @@ function normalizeStrict(input: Partial<ModelConfig>): ModelConfig {
   return { contextWindow, routes };
 }
 
-function normalizeForLoad(input: Partial<ModelConfig>): ModelConfig {
+function normalizeForLoad(input: Partial<ModelConfig>): { config: ModelConfig; changed: boolean } {
   const contextRaw = Number(input.contextWindow ?? DEFAULTS.contextWindow);
   const contextWindow = Number.isFinite(contextRaw) ? Math.max(200000, Math.min(1000000, Math.floor(contextRaw))) : DEFAULTS.contextWindow;
   const routes = {} as Record<ModelSlot, ModelRoute>;
+  let changed = false;
   for (const slot of MODEL_SLOTS) {
     const fallback = DEFAULTS.routes[slot];
-    const candidate = input.routes?.[slot] ?? fallback;
+    const original = input.routes?.[slot];
+    const candidate = migrateLegacyGeminiRoute(slot, original) ?? original ?? fallback;
+    if (original && candidate !== original) changed = true;
     const provider = isProvider(candidate.provider) ? candidate.provider : fallback.provider;
     const model = String(candidate.model ?? fallback.model).trim() || fallback.model;
     const rawMax = Number(candidate.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS[slot]);
@@ -286,7 +289,13 @@ function normalizeForLoad(input: Partial<ModelConfig>): ModelConfig {
     const credentialId = String(candidate.credentialId ?? "").trim() || undefined;
     routes[slot] = { provider, model, credentialId, maxOutputTokens };
   }
-  return { contextWindow, routes };
+  return { config: { contextWindow, routes }, changed };
+}
+
+function migrateLegacyGeminiRoute(slot: ModelSlot, route: ModelRoute | undefined): ModelRoute | undefined {
+  if ((slot !== "sonnet" && slot !== "haiku") || !route) return undefined;
+  if (route.provider !== "google" || String(route.model).trim().toLowerCase() !== LEGACY_GEMINI_MODEL) return undefined;
+  return { ...DEFAULTS.routes[slot] };
 }
 
 function finiteInteger(value: unknown, name: string, min: number, max: number): number {
@@ -298,7 +307,7 @@ function finiteInteger(value: unknown, name: string, min: number, max: number): 
 }
 
 function isProvider(value: unknown): value is ProviderKind {
-  return value === "chatgpt" || value === "zen" || value === "nvidia" || value === "google";
+  return value === "chatgpt" || value === "zen" || value === "nvidia" || value === "google" || value === "cloudflare";
 }
 
 function baseHealth(slot: ModelSlot, route: ModelRoute, ready: PublicCredential[], contextWindow: number, status: RouteHealth["status"], message: string): RouteHealth {
