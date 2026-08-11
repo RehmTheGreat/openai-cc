@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { AccountStore } from "../src/account-store.js";
 import { OpenAICCError } from "../src/errors.js";
-import { ModelConfigStore, claudeCodeModelAlias, contextWindowForRoute } from "../src/model-config.js";
+import { CLOUDFLARE_GEMMA_MODEL, ModelConfigStore, claudeCodeModelAlias, contextWindowForRoute } from "../src/model-config.js";
 
 async function fixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-model-"));
@@ -16,8 +16,19 @@ async function fixture() {
   await accounts.createApiKey({ id: "g1", name: "Google 1", provider: "google", apiKey: "c", model: "m" });
   const models = new ModelConfigStore(root, accounts);
   await models.init();
-  return { accounts, models };
+  return { root, accounts, models };
 }
+
+test("default routing selects Cloudflare Gemma for Sonnet and Haiku with conservative caps", async () => {
+  const { accounts, models } = await fixture();
+  const config = models.snapshot();
+  assert.deepEqual(config.routes.default, { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 });
+  assert.deepEqual(config.routes.fable, { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 });
+  assert.deepEqual(config.routes.opus, { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: 128000 });
+  assert.deepEqual(config.routes.sonnet, { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 16384 });
+  assert.deepEqual(config.routes.haiku, { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 16384 });
+  accounts.close();
+});
 
 test("auto routing uses preferred ready credential then same-provider fallback", async () => {
   const { accounts, models } = await fixture();
@@ -66,7 +77,6 @@ test("route save rejects unsupported provider, empty model, and invalid limits",
   accounts.close();
 });
 
-
 test("verified route contexts drive Claude Code capability aliases without over-advertising", async () => {
   const { accounts, models } = await fixture();
   const config = models.snapshot();
@@ -74,22 +84,44 @@ test("verified route contexts drive Claude Code capability aliases without over-
   assert.equal(contextWindowForRoute(config, "default"), 850000);
   assert.equal(contextWindowForRoute(config, "fable"), 850000);
   assert.equal(contextWindowForRoute(config, "opus"), 200000);
-  assert.equal(contextWindowForRoute(config, "sonnet"), 850000);
-  assert.equal(contextWindowForRoute(config, "haiku"), 850000);
+  assert.equal(contextWindowForRoute(config, "sonnet"), 131072);
+  assert.equal(contextWindowForRoute(config, "haiku"), 131072);
 
   assert.equal(claudeCodeModelAlias(config, "default"), "claude-opus-4-8[1m]");
   assert.equal(claudeCodeModelAlias(config, "fable"), "claude-fable-5[1m]");
   assert.equal(claudeCodeModelAlias(config, "opus"), "claude-opus-5");
-  assert.equal(claudeCodeModelAlias(config, "sonnet"), "claude-sonnet-5");
+  assert.equal(claudeCodeModelAlias(config, "sonnet"), "claude-sonnet-4-6");
+  assert.equal(claudeCodeModelAlias(config, "haiku"), "claude-haiku-4-5");
   assert.equal(models.slotForRequestedModel("claude-opus-4-8"), "default");
   assert.equal(models.slotForRequestedModel("claude-fable-5"), "fable");
-  assert.equal(models.slotForRequestedModel("claude-sonnet-5"), "sonnet");
-  assert.equal(models.slotForRequestedModel("claude-opus-4-7"), "haiku");
+  assert.equal(models.slotForRequestedModel("claude-sonnet-4-6"), "sonnet");
+  assert.equal(models.slotForRequestedModel("claude-haiku-4-5"), "haiku");
 
   const changed = models.snapshot();
   changed.routes.haiku = { provider: "nvidia", model: "unverified-haiku", maxOutputTokens: 32000 };
   const conservative = await models.update(changed);
   assert.equal(contextWindowForRoute(conservative, "haiku"), 200000);
   assert.equal(claudeCodeModelAlias(conservative, "haiku"), "claude-haiku-4-5");
+  accounts.close();
+});
+
+test("load migration replaces only the old default Gemini Sonnet and Haiku routes", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-model-migrate-"));
+  const accounts = new AccountStore(root); await accounts.init();
+  await writeFile(path.join(root, "model-config.json"), JSON.stringify({
+    contextWindow: 850000,
+    routes: {
+      default: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
+      fable: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
+      opus: { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: 128000 },
+      sonnet: { provider: "google", model: "gemini-3.6-flash", credentialId: "old-google", maxOutputTokens: 128000 },
+      haiku: { provider: "google", model: "gemini-3.6-flash", maxOutputTokens: 64000 },
+    },
+  }));
+  const models = new ModelConfigStore(root, accounts); await models.init();
+  assert.equal(models.snapshot().routes.sonnet.provider, "cloudflare");
+  assert.equal(models.snapshot().routes.sonnet.credentialId, undefined);
+  assert.equal(models.snapshot().routes.haiku.model, CLOUDFLARE_GEMMA_MODEL);
+  assert.equal(models.snapshot().routes.haiku.maxOutputTokens, 16384);
   accounts.close();
 });
