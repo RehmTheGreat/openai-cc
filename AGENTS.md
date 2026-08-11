@@ -72,7 +72,7 @@ Credential acquisition uses the pinned official Codex CLI through `chatgpt-auth.
 
 ## Credentials and persistence
 
-`.data` is persistent user state and must survive upgrades. Never delete, rewrite wholesale, or expose it for cleanup convenience.
+`.data` is persistent user state and must survive upgrades. Never delete, rewrite wholesale, bundle, or expose it for cleanup convenience.
 
 Important persisted concepts include:
 
@@ -83,7 +83,7 @@ Important persisted concepts include:
 - custom provider definitions/manual model metadata (`providers.json`);
 - migrations from older stored formats.
 
-Existing user routing must survive upgrades. A fresh-install default migration must not overwrite a user's established route choices.
+Existing user routing must survive upgrades. A fresh-install default migration must not overwrite a user's established route choices. `scripts/configure-clients.ts` must configure clients from the existing `ModelConfigStore.snapshot()`; do not turn client refresh into a route/default rewrite.
 
 Credential rotation is provider-local. Auto routes can move only among eligible credentials for the configured provider. Pinned routes do not fall back. Preserve rate-limit cooldown/reset handling, preference rules, auth-error handling, and exact-secret redaction.
 
@@ -112,16 +112,45 @@ Sonnet/Haiku must remain suitable for Claude Auto Mode classifier traffic, subag
 
 Startup may auto-configure Claude Code/Desktop. Preserve `OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP` opt-out behavior and the route-specific context solution rather than replacing it with a global metadata-only number.
 
-## Installer and build identity
+## Installer, runtime bundle, and build identity
 
-- `install.ps1` is the deterministic Windows install/update bootstrap. It preserves ignored `.data`, synchronizes tracked source to `origin/main`, removes stale `dist`, frees the gateway port, runs setup, and verifies the live SHA/install root.
-- Keep the installer's stale-process match for both old `index-replicated.js` and current `index.js`; that legacy match is upgrade cleanup, not a second architecture.
-- `setup.ps1` installs/configures required clients and tooling and uses locked `npm ci`.
-- `run-gateway.ps1` launches `dist/src/index.js`.
-- `src/build-info.ts` plus `scripts/write-build-info.ts` provide deterministic runtime identity.
-- `scripts/codex-doctor.ts` is an operational diagnostic and must remain.
+Session 6A makes the Windows installed runtime independent of a source checkout.
 
-Do not upgrade dependencies as part of cleanup unless the task explicitly requires it.
+Managed layout:
+
+```text
+%LOCALAPPDATA%\OpenAI-CC\
+  .data\      # persistent user-owned state
+  current\    # replaceable runtime bundle contents
+  install-state.json
+```
+
+- `install.ps1` is the deterministic Windows bundle bootstrap. It consumes a supplied manifest/bundle URL, verifies bundle and per-file integrity, preserves `.data`, stops only the proven managed process tree, atomically swaps `current`, configures clients, starts the gateway, and verifies the live identity.
+- `setup.ps1` is only a compatibility entrypoint into `install.ps1`; it must not revive Git checkout installation.
+- `scripts/build-runtime-bundle.ps1` builds the Windows runtime artifact from an explicit allowlist after development dependencies are pruned.
+- `run-gateway.ps1` launches `current/dist/src/index.js` while binding `DATA_DIR` to the managed root `.data`.
+- `run-claude.ps1` launches Claude against the managed gateway; it never builds source on the target PC.
+- `uninstall.ps1 -KeepData` removes runtime only. `uninstall.ps1 -PurgeData` is the explicit credential/config deletion path.
+- `src/build-info.ts` plus `scripts/write-build-info.ts` provide application version/source SHA/build-time identity. `/healthz` reports both managed `installRoot` and active `runtimeRoot`.
+- `scripts/codex-doctor.ts` is bundled as an operational diagnostic and must remain.
+
+Runtime bundle contents are production-only: compiled gateway code, compiled client configuration, compiled Codex doctor, production `node_modules`, package metadata, launchers, uninstaller, and internal manifest. Never include `.git`, source/tests/dev tooling, `.data`, API keys, OAuth credentials, custom provider definitions, or user `model-config.json`.
+
+The target PC must not need Git, cloning, GitHub authentication, or a PAT. Node.js 20+ is the runtime dependency. Do not reintroduce VS Code CLI extension automation or development tooling as a runtime requirement.
+
+Update verification must prove:
+
+1. expected distribution/source SHA = installed build SHA = running `/healthz` build SHA;
+2. expected managed root and active `current` runtime;
+3. health PID owns port 8082 and the process command line is the expected entrypoint;
+4. Admin and Claude configuration are available;
+5. Claude aliases, `/v1/models`, output caps, and route-specific effective context agree;
+6. existing `.data` is unchanged on update;
+7. fresh installs use Session 4.5 defaults, while existing model routing/custom providers/credentials/preferences/status survive.
+
+If port 8082 belongs to an unrelated process, fail. Never kill it to make installation succeed. If a runtime swap fails after activation, roll back the previous `current` runtime. Legacy Git/source files may be removed only after the new runtime is fully verified, and `.data` remains outside that cleanup.
+
+Do not upgrade dependencies as part of packaging unless the task explicitly requires it.
 
 ## Tests and CI
 
@@ -143,17 +172,18 @@ Behavioral coverage must continue to protect:
 
 Tests should assert behavior/contracts, not obsolete filenames. If a file is renamed, update or remove filename-only assertions rather than preserving fake architecture to satisfy them.
 
-GitHub Actions runs the locked suite on `ubuntu-latest` and `windows-latest`. Windows CI also parses `setup.ps1` and `install.ps1`. A change is not done until both platforms are green.
+GitHub Actions keeps the locked suite on both `ubuntu-latest` and `windows-latest`. `Runtime Bundle CI` is Windows-specific and must cover bundle production plus clean-target fresh install/update/persistence/process/integrity/uninstall behavior. A change is not done until application and packaging workflows are green.
 
 ## Critical invariants
 
 1. Terra uses FCC translation plus raw Evan/openai-oauth transport.
 2. Never insert OpenAI SDK serialization into the ChatGPT transport path.
 3. Dynamic custom providers are canonical and must not be reduced to a fixed provider list.
-4. `.data` contains persistent user/provider configuration and credentials; preserve it across upgrades.
-5. Existing user routing survives upgrades.
+4. `.data` contains persistent user/provider configuration and credentials; preserve it across upgrades and exclude it from bundles.
+5. Existing user routing survives upgrades; client refresh never replaces `model-config.json` with defaults.
 6. Claude-facing names remain clean aliases independent of upstream IDs.
 7. Context/output limits reflect actual upstream capability and the configured target.
 8. Unknown custom models use conservative limits until explicitly configured or verified.
 9. Admin security, secret omission, and redaction must survive refactors.
-10. Start from latest `main` and validate Windows + Ubuntu before merge.
+10. Windows installation is bundle-based, Git-free, fails on unrelated port ownership, and verifies exact build identity.
+11. Start from latest `main` and validate Windows + Ubuntu before merge.
