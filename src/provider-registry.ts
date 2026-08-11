@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { AccountRecord, CustomProviderKind, ProviderKind } from "./account-store.js";
-import { OpenAICCError, conflict, notFound } from "./errors.js";
+import { OpenAICCError, notFound } from "./errors.js";
 
 export type ProviderApiStyle = "responses" | "chat-completions" | "mixed";
 export type CustomProviderApiStyle = Exclude<ProviderApiStyle, "mixed">;
@@ -189,7 +189,7 @@ export class ProviderRegistry extends EventEmitter {
     const definition=this.definition(account.provider);
     const url=definition.discovery==="cloudflare-models" ? cloudflareDiscoveryUrl(account) : `${this.baseUrl(account).replace(/\/+$/,"")}/models`;
     const response=await fetchImpl(url,{headers:{Authorization:`Bearer ${account.apiKey}`,Accept:"application/json"}}); const responseText=await response.text();
-    if(!response.ok) throw Object.assign(new Error(safeDiscoveryError(responseText,response.status)),{status:response.status,statusCode:response.status});
+    if(!response.ok) throw Object.assign(new Error(safeDiscoveryError(responseText,response.status,account.apiKey)),{status:response.status,statusCode:response.status});
     let body:unknown; try{body=JSON.parse(responseText);}catch{throw new OpenAICCError(`${definition.displayName} returned invalid model discovery JSON.`,502,"invalid_model_discovery");}
     const ids=definition.discovery==="cloudflare-models"?cloudflareModelIds(body):openAiModelIds(body);
     return normalizeDiscovered(account.provider,ids,this);
@@ -216,7 +216,7 @@ export async function discoverModelsForCredential(account: AccountRecord, fetchI
   if(!account.apiKey) throw new OpenAICCError(`${providerDisplayName(account.provider)} credential ${account.id} has no API key.`,409,"missing_api_key");
   const definition=requireBuiltIn(account.provider); const url=definition.discovery==="cloudflare-models"?cloudflareDiscoveryUrl(account):`${providerBaseUrl(account).replace(/\/+$/,"")}/models`;
   const response=await fetchImpl(url,{headers:{Authorization:`Bearer ${account.apiKey}`,Accept:"application/json"}}); const responseText=await response.text();
-  if(!response.ok) throw Object.assign(new Error(safeDiscoveryError(responseText,response.status)),{status:response.status,statusCode:response.status});
+  if(!response.ok) throw Object.assign(new Error(safeDiscoveryError(responseText,response.status,account.apiKey)),{status:response.status,statusCode:response.status});
   let body:unknown; try{body=JSON.parse(responseText);}catch{throw new OpenAICCError(`${definition.displayName} returned invalid model discovery JSON.`,502,"invalid_model_discovery");}
   return normalizeDiscovered(account.provider,definition.discovery==="cloudflare-models"?cloudflareModelIds(body):openAiModelIds(body));
 }
@@ -230,8 +230,8 @@ function defaultCapabilities(provider:ProviderKind):ModelCapabilities{if(provide
 function cloudflareDiscoveryUrl(account:AccountRecord):string{if(!account.accountId)throw new OpenAICCError("Cloudflare Workers AI credential is missing its Account ID.",409,"missing_account_id");return `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account.accountId)}/ai/models/search`;}
 function openAiModelIds(body:unknown):string[]{if(!isRecord(body)||!Array.isArray(body.data))throw new OpenAICCError("Provider returned a malformed OpenAI-compatible models response.",502,"invalid_model_discovery");return body.data.flatMap((item)=>isRecord(item)&&typeof item.id==="string"?[item.id]:[]);}
 function cloudflareModelIds(body:unknown):string[]{if(!isRecord(body)||!Array.isArray(body.result))throw new OpenAICCError("Cloudflare returned a malformed Workers AI model catalog.",502,"invalid_model_discovery");return body.result.flatMap((item)=>{if(typeof item==="string")return[item];if(!isRecord(item))return[];for(const key of["name","id","model","model_id"])if(typeof item[key]==="string"&&item[key].trim())return[item[key]];return[];});}
-function safeDiscoveryError(value:string,status:number):string{try{const parsed=JSON.parse(value)as unknown;if(isRecord(parsed)){if(typeof parsed.message==="string")return redact(parsed.message);if(isRecord(parsed.error)&&typeof parsed.error.message==="string")return redact(parsed.error.message);if(Array.isArray(parsed.errors)){const first=parsed.errors.find((item)=>isRecord(item)&&typeof item.message==="string")as Record<string,unknown>|undefined;if(first&&typeof first.message==="string")return redact(first.message);}}}catch{}return`Provider model discovery failed with HTTP ${status}.`;}
-function redact(value:string):string{return value.replace(/\bBearer\s+[^\s,;]+/gi,"Bearer [redacted]").replace(/\bsk-[A-Za-z0-9_-]{8,}/g,"[redacted]").replace(/\bAIza[A-Za-z0-9_-]{20,}/g,"[redacted]").slice(0,800);}
+function safeDiscoveryError(value:string,status:number,exactSecret?:string):string{try{const parsed=JSON.parse(value)as unknown;if(isRecord(parsed)){if(typeof parsed.message==="string")return redact(parsed.message,exactSecret);if(isRecord(parsed.error)&&typeof parsed.error.message==="string")return redact(parsed.error.message,exactSecret);if(Array.isArray(parsed.errors)){const first=parsed.errors.find((item)=>isRecord(item)&&typeof item.message==="string")as Record<string,unknown>|undefined;if(first&&typeof first.message==="string")return redact(first.message,exactSecret);}}}catch{}return`Provider model discovery failed with HTTP ${status}.`;}
+function redact(value:string,exactSecret?:string):string{let safe=String(value);if(exactSecret)safe=safe.split(exactSecret).join("[redacted]");return safe.replace(/\bBearer\s+[^\s,;]+/gi,"Bearer [redacted]").replace(/\bsk-[A-Za-z0-9_-]{8,}/g,"[redacted]").replace(/\bAIza[A-Za-z0-9_-]{20,}/g,"[redacted]").slice(0,800);}
 function cleanDisplayName(value:unknown):string{const name=String(value??"").trim();if(!name)throw new OpenAICCError("Provider display name is required.",400,"provider_name_required");if(name.length>120)throw new OpenAICCError("Provider display name is too long.",400,"provider_name_too_long");return name;}
 function cleanBaseUrl(value:unknown):string{const raw=String(value??"").trim();let url:URL;try{url=new URL(raw);}catch{throw new OpenAICCError("Provider base URL must be a valid HTTP(S) URL.",400,"invalid_provider_base_url");}if(!["http:","https:"].includes(url.protocol)||url.username||url.password||url.search||url.hash)throw new OpenAICCError("Provider base URL must be HTTP(S) without credentials, query parameters, or fragments.",400,"invalid_provider_base_url");return url.toString().replace(/\/+$/,"");}
 function cleanApiStyle(value:unknown):CustomProviderApiStyle{if(value!=="chat-completions"&&value!=="responses")throw new OpenAICCError("API style must be chat-completions or responses.",400,"invalid_api_style");return value;}

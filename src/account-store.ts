@@ -422,7 +422,7 @@ export class AccountStore extends EventEmitter {
     }
     account.status = "exhausted";
     account.exhaustedAt = now.toISOString();
-    account.lastError = sanitizeError(message);
+    account.lastError = sanitizeError(message, account.apiKey ? [account.apiKey] : []);
     account.updatedAt = now.toISOString();
     await this.persist();
     this.scheduleReset(account);
@@ -438,7 +438,7 @@ export class AccountStore extends EventEmitter {
     delete account.firstRequestAt;
     delete account.limitResetsAt;
     delete account.exhaustedAt;
-    account.lastError = sanitizeError(message || "Authentication failed.");
+    account.lastError = sanitizeError(message || "Authentication failed.", account.apiKey ? [account.apiKey] : []);
     account.updatedAt = new Date().toISOString();
     try {
       await this.persist();
@@ -494,8 +494,8 @@ export class AccountStore extends EventEmitter {
   }
 
   private repairPreferences(): void {
-    for (const provider of PROVIDERS) {
-      const id = this.state.preferredCredentialByProvider[provider];
+    for (const [rawProvider, id] of Object.entries(this.state.preferredCredentialByProvider)) {
+      const provider = rawProvider as ProviderKind;
       if (id && !this.state.accounts.some((account) => account.id === id && account.provider === provider)) {
         delete this.state.preferredCredentialByProvider[provider];
       }
@@ -671,8 +671,12 @@ function defaultCredentialName(provider: ProviderKind): string {
   return "Custom provider credential";
 }
 
-function sanitizeError(value: string): string {
-  return String(value ?? "")
+function sanitizeError(value: string, exactSecrets: string[] = []): string {
+  let safe = String(value ?? "");
+  for (const secret of exactSecrets) {
+    if (secret) safe = safe.split(secret).join("[redacted]");
+  }
+  return safe
     .replace(/https?:\/\/\S+/gi, "[redacted-url]")
     .replace(/\b(?:access_token|refresh_token|id_token|code|code_verifier|state|api_key|authorization)\b\s*[:=]\s*[^\s,]+/gi, "$1=[redacted]")
     .replace(/\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted-jwt]")
@@ -735,4 +739,3 @@ function isApiProvider(provider: string): provider is ApiProviderKind {
   return provider === "zen" || provider === "nvidia" || provider === "google" || provider === "cloudflare" || /^custom-[a-f0-9]{12}$/.test(provider);
 }
 
-const PROVIDERS: ProviderKind[] = ["chatgpt", "zen", "nvidia", "google", "cloudflare"];
