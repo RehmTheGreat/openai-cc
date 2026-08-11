@@ -70,12 +70,15 @@ try {
   $token = $null
   $headers = @{}
 
-  $args = @("-ManifestUrl", $manifestPath)
-  if ($InstallRoot) { $args += @("-InstallRoot", $InstallRoot) }
-  if ($SkipDesktopConfig) { $args += "-SkipDesktopConfig" }
-  if ($NoStartupShortcut) { $args += "-NoStartupShortcut" }
+  $installerArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $installer, "-ManifestUrl", $manifestPath)
+  if ($InstallRoot) { $installerArgs += @("-InstallRoot", $InstallRoot) }
+  if ($SkipDesktopConfig) { $installerArgs += "-SkipDesktopConfig" }
+  if ($NoStartupShortcut) { $installerArgs += "-NoStartupShortcut" }
 
-  & $installer @args
+  & powershell.exe @installerArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw "Session 6A installer failed with exit code $LASTEXITCODE."
+  }
 } catch {
   # Never print headers or token values. The exception message is enough to
   # diagnose transport/integrity/install failures without exposing credentials.
