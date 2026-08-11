@@ -11,11 +11,48 @@ Claude Code / Claude Desktop
   -> upstream
 ```
 
-## Install or update
+## Install or update on Windows
 
-On Windows, run `install.ps1` for the deterministic install/update flow. It synchronizes the canonical checkout to `origin/main`, preserves ignored `.data`, rebuilds from a clean `dist`, starts the gateway, and verifies the running build SHA/root. `setup.ps1` is the interactive first-time setup and can also be run from a checkout.
+Session 6A installs from a versioned runtime bundle, not from a Git checkout. A distribution consists of:
 
-Manual development install:
+- `install.ps1` — small bootstrap;
+- `openai-cc-runtime-manifest.json` — application/source/build identity plus bundle integrity metadata;
+- `openai-cc-runtime-<version>-<sha>-win-x64.zip` — compiled runtime and production dependencies only.
+
+Given a manifest URL supplied by the distributor:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -ManifestUrl "https://distribution.example/openai-cc-runtime-manifest.json"
+```
+
+Rerun the same command with a newer manifest URL to update. Git, cloning the source repository, GitHub authentication, and a GitHub PAT are not required on the target PC.
+
+The managed layout is:
+
+```text
+%LOCALAPPDATA%\OpenAI-CC\
+  .data\      # user-owned persistent credentials/providers/routes/config
+  current\    # replaceable verified runtime
+  install-state.json
+```
+
+The installer downloads, verifies, fingerprints existing `.data`, stops only the managed OpenAI-CC process tree, swaps `current` atomically, refreshes Claude client configuration, starts the gateway, and verifies expected source SHA = installed build SHA = `/healthz` build SHA. It refuses to kill an unrelated process on port 8082 and rolls back the runtime swap on failure. Existing `model-config.json`, custom providers, provider credentials, route pins/selections, preferred credentials, and credential status are preserved on updates.
+
+If Claude Code is absent, installation still succeeds. If Claude Desktop is already installed, its supported gateway integration is refreshed unless `-SkipDesktopConfig` is supplied. The runtime itself requires Node.js 20+; the installer can use WinGet for a missing/outdated Node.js installation. It does not automate the unreliable VS Code CLI extension path.
+
+Uninstall is explicit:
+
+```powershell
+# Remove runtime, keep credentials/configuration
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\OpenAI-CC\current\uninstall.ps1" -KeepData
+
+# Permanently remove runtime and .data credentials/configuration
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\OpenAI-CC\current\uninstall.ps1" -PurgeData
+```
+
+Full credential deletion therefore requires the explicit `-PurgeData` action.
+
+Manual development checkout remains available for contributors:
 
 ```bash
 git clone https://github.com/RehmTheGreat/openai-cc.git
@@ -63,12 +100,26 @@ The global target is 850,000 tokens, but each route is capped by its configured 
 
 Auto routes try the preferred ready credential for that provider, then other ready credentials from the same provider. `401` and pre-output `429` handling can rotate provider-locally. Pinned routes never silently fall back to another credential.
 
+## Runtime bundle production
+
+On a Windows build target after the normal build, prune development dependencies and produce the runtime artifact:
+
+```powershell
+$env:OPENAI_CC_SOURCE_SHA = (git rev-parse HEAD).Trim()
+$env:OPENAI_CC_BUILD_TIME = (git show -s --format=%cI HEAD).Trim()
+npm run build
+npm prune --omit=dev --no-audit --no-fund
+.\scripts\build-runtime-bundle.ps1 -OutputDirectory .\artifacts
+```
+
+The bundle allowlist contains compiled gateway code, compiled client configuration and `codex:doctor`, production `node_modules`, package metadata, launchers, and the uninstaller. It excludes Git history, source/tests/dev tooling, `.data`, API keys, OAuth credentials, custom providers, and user model configuration. Session 6B is responsible for gated/private distribution hosting; Session 6A is URL-agnostic.
+
 ## Troubleshooting
 
 - **Admin unavailable:** the Admin surface is loopback-only by default. Keep `HOST=127.0.0.1` unless you intentionally provide separate network protection.
-- **Old build still running:** rerun `install.ps1`; it removes stale `dist`, frees port 8082, and verifies the live build SHA and install root.
-- **Terra/Codex issue:** after adding a ChatGPT credential in Admin, run `npm run codex:doctor`.
-- **Wrong Claude context:** rerun client configuration with `node dist/scripts/configure-clients.js`, then `node scripts/verify-claude-code-context.mjs` after a build.
+- **Port 8082 occupied:** the installer stops only a process it can prove belongs to the managed OpenAI-CC root. It fails instead of killing an unrelated service.
+- **Terra/Codex issue:** if usable ChatGPT OAuth already exists, installation runs bundled `codex:doctor`. Without credentials, installation succeeds and directs configuration to Admin.
+- **Wrong Claude context:** inspect `/v1/models` and `/admin/state`; install verification checks Claude aliases against route-specific effective context instead of assuming every route is 850K.
 - **Model not discoverable:** add the upstream model ID manually in Admin and configure conservative/verified limits.
 
 ## Development
@@ -77,10 +128,9 @@ Auto routes try the preferred ready credential for that provider, then other rea
 npm ci
 npm test
 npm run build
-npm start
 npm run codex:doctor
 ```
 
-CI runs the locked test suite on Windows and Ubuntu, verifies Claude Code context configuration, and parses both PowerShell installers on Windows.
+CI keeps the locked application suite on Windows and Ubuntu. Windows runtime-bundle CI also builds the production artifact and performs clean-target fresh install, idempotent update, persistent-state update, managed/unrelated process handling, corruption/download rejection, and both uninstall modes.
 
 For the canonical architecture, persistent-data contracts, tests, and invariants for coding agents, read [`AGENTS.md`](AGENTS.md).
