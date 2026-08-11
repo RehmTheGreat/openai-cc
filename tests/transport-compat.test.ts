@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -59,4 +59,17 @@ test("pinned transport consumes the current official Codex auth.json shape", asy
   assert.equal(response.status, 200);
   assert.equal(capturedAuthorization, `Bearer ${accessToken}`);
   assert.equal(capturedAccountId, accountId);
+});
+
+test("dispatcher identifies ChatGPT traffic as the pinned official Codex client", async () => {
+  const source = await readFile(path.resolve("src/dispatcher.ts"), "utf8");
+  const packageJson = JSON.parse(await readFile(path.resolve("package.json"), "utf8"));
+  const pinnedCodexVersion = packageJson.dependencies["@openai/codex"];
+
+  assert.equal(pinnedCodexVersion, "0.146.0");
+  assert.match(source, /const CODEX_CLIENT_VERSION = "0\.146\.0"/);
+  assert.match(source, /codexVersion: CODEX_CLIENT_VERSION/);
+  assert.match(source, /originator: "codex_cli_rs"/);
+  assert.match(source, /version: CODEX_CLIENT_VERSION/);
+  assert.match(source, /"User-Agent": `codex_cli_rs\/\$\{CODEX_CLIENT_VERSION\}`/);
 });
