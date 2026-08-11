@@ -1,6 +1,6 @@
 import http, { IncomingMessage, ServerResponse } from "node:http";
 import OpenAI from "openai";
-import { AccountRecord, AccountStore, ApiProviderKind, ProviderKind } from "./account-store.js";
+import { AccountRecord, AccountStore } from "./account-store.js";
 import {
   ChatGptOAuthBoundary,
   ChatGptUpstreamError,
@@ -12,6 +12,7 @@ import { AnthropicChatSseTranslator, anthropicToChatCompletions, chatCompletionT
 import { Dispatcher, DispatcherOptions } from "./dispatcher.js";
 import { anthropicToFccResponses, ResponsesConversionError } from "./fcc-responses.js";
 import { ModelConfigStore } from "./model-config.js";
+import { providerBaseUrl } from "./provider-registry.js";
 import {
   AnthropicRequest,
   AnthropicSseTranslator,
@@ -20,7 +21,6 @@ import {
 } from "./translator.js";
 import { upstreamApiFor } from "./upstream-api.js";
 
-type ApiProvider = Exclude<ProviderKind, "chatgpt">;
 const MESSAGE_BODY_LIMIT = 32 * 1024 * 1024;
 
 type UpstreamClient = OpenAI | ChatGptOAuthBoundary;
@@ -85,6 +85,8 @@ export class ReplicatedDispatcher {
 
       try {
         if (account.provider === "chatgpt") {
+          // Preserve the proven Terra path exactly: FCC translation -> raw
+          // Evan/openai-oauth-compatible Codex transport -> /responses.
           const boundary = this.clientFor(account) as ChatGptOAuthBoundary;
           const requestBody = {
             ...anthropicToFccResponses(routedBody, toolNames),
@@ -199,7 +201,7 @@ export class ReplicatedDispatcher {
       client = createChatGptOAuthBoundary(account.authFile);
     } else {
       if (!account.apiKey) throw new Error(`${account.provider} credential ${account.id} has no API key.`);
-      client = new OpenAI({ apiKey: account.apiKey, baseURL: providerBaseUrl(account.provider) });
+      client = new OpenAI({ apiKey: account.apiKey, baseURL: providerBaseUrl(account) });
     }
     this.clients.set(account.id, client);
     return client;
@@ -232,12 +234,6 @@ export function createReplicatedServer(
   const server = http.createServer((req, res) => { void dispatcher.handler(req, res); });
   server.on("close", () => { void dispatcher.close(); });
   return server;
-}
-
-function providerBaseUrl(provider: ApiProvider): string {
-  if (provider === "zen") return "https://opencode.ai/zen/v1";
-  if (provider === "nvidia") return "https://integrate.api.nvidia.com/v1";
-  return "https://generativelanguage.googleapis.com/v1beta/openai/";
 }
 
 function isAuthenticationError(error: any): boolean {
