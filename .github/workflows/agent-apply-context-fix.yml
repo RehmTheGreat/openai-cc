@@ -6,12 +6,15 @@ on:
     paths:
       - scripts/apply-agent-context-fix.mjs
       - .github/workflows/agent-apply-context-fix.yml
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
   apply:
+    if: github.event_name == 'push' || github.head_ref == 'agent/claude-850k-context'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
