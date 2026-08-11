@@ -672,15 +672,14 @@ function defaultCredentialName(provider: ProviderKind): string {
 }
 
 function sanitizeError(value: string, exactSecrets: string[] = []): string {
-  let safe = String(value ?? "");
+  let safe = String(value ?? "")
+    .replace(/https?:\/\/\S+/gi, "[redacted-url]")
+    .replace(/\b(?:access_token|refresh_token|id_token|code|code_verifier|state|api_key|authorization)\b\s*[:=]\s*[^\s,]+/gi, "$1=[redacted]")
+    .replace(/\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted-jwt]");
   for (const secret of exactSecrets) {
     if (secret) safe = safe.split(secret).join("[redacted]");
   }
-  return safe
-    .replace(/https?:\/\/\S+/gi, "[redacted-url]")
-    .replace(/\b(?:access_token|refresh_token|id_token|code|code_verifier|state|api_key|authorization)\b\s*[:=]\s*[^\s,]+/gi, "$1=[redacted]")
-    .replace(/\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted-jwt]")
-    .slice(0, 1000);
+  return safe.slice(0, 1000);
 }
 
 function findEmail(value: unknown, depth = 0): string | undefined {
