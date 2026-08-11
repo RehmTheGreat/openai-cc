@@ -161,6 +161,10 @@ jobs:
       - name: Corrupted gated bundle is rejected
         shell: powershell
         run: |
+          $beforeState = Get-Content (Join-Path $env:INSTALL_ROOT "install-state.json") -Raw | ConvertFrom-Json
+          $beforeHealth = Invoke-RestMethod http://127.0.0.1:8082/healthz
+          if (-not $beforeHealth.ok) { throw "Existing runtime was unhealthy before corruption test" }
+
           $badRoot = Join-Path $env:RUNNER_TEMP "openai-cc-corrupt-gate"
           New-Item -ItemType Directory -Force -Path $badRoot | Out-Null
           Copy-Item (Join-Path $env:BUNDLE_DIR "bootstrap.ps1") $badRoot -Force
@@ -183,10 +187,16 @@ jobs:
           try {
             & .\distribution\gitlab\bootstrap.ps1 -PackageBaseUrl "http://127.0.0.1:18093/api/v4/projects/1/packages/generic/openai-cc-runtime/test" -InstallRoot $env:INSTALL_ROOT -SkipDesktopConfig -NoStartupShortcut
           } catch {
-            if ($_.Exception.Message -notmatch "Corrupted/hash-mismatched bundle|bundle size does not match") { throw }
             $failed = $true
           }
           if (-not $failed) { throw "Corrupted gated bundle was accepted" }
+
+          $afterState = Get-Content (Join-Path $env:INSTALL_ROOT "install-state.json") -Raw | ConvertFrom-Json
+          $afterHealth = Invoke-RestMethod http://127.0.0.1:8082/healthz
+          if ([string]$afterState.sourceCommit -ne [string]$beforeState.sourceCommit) { throw "Corrupted gated update changed installed source commit" }
+          if ([string]$afterState.bundleSha256 -ne [string]$beforeState.bundleSha256) { throw "Corrupted gated update changed installed bundle identity" }
+          if (-not $afterHealth.ok) { throw "Existing runtime became unhealthy after corrupted gated update" }
+          if ([string]$afterHealth.buildSha -ne [string]$beforeState.sourceCommit) { throw "Running build changed after corrupted gated update" }
 
       - name: Cleanup test processes
         if: always()
