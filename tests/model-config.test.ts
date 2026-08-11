@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -63,7 +63,7 @@ test("route save rejects nonexistent and provider-mismatched pins", async () => 
   accounts.close();
 });
 
-test("route save rejects unsupported provider, empty model, and invalid limits", async () => {
+test("route save rejects unsupported provider, empty model, invalid limits, and verified output-cap violations", async () => {
   const { accounts, models } = await fixture();
   const bad: any = models.snapshot();
   bad.routes.default.provider = "bogus";
@@ -74,6 +74,12 @@ test("route save rejects unsupported provider, empty model, and invalid limits",
   const badOutput: any = models.snapshot();
   badOutput.routes.default.maxOutputTokens = 0;
   await assert.rejects(() => models.update(badOutput), (error: unknown) => error instanceof OpenAICCError && error.code === "invalid_number");
+  const aboveVerified: any = models.snapshot();
+  aboveVerified.routes.sonnet.maxOutputTokens = 16385;
+  await assert.rejects(
+    () => models.update(aboveVerified),
+    (error: unknown) => error instanceof OpenAICCError && error.code === "max_output_exceeds_verified_cap",
+  );
   accounts.close();
 });
 
@@ -84,8 +90,8 @@ test("verified route contexts drive Claude Code capability aliases without over-
   assert.equal(contextWindowForRoute(config, "default"), 850000);
   assert.equal(contextWindowForRoute(config, "fable"), 850000);
   assert.equal(contextWindowForRoute(config, "opus"), 200000);
-  assert.equal(contextWindowForRoute(config, "sonnet"), 131072);
-  assert.equal(contextWindowForRoute(config, "haiku"), 131072);
+  assert.equal(contextWindowForRoute(config, "sonnet"), 200000);
+  assert.equal(contextWindowForRoute(config, "haiku"), 200000);
 
   assert.equal(claudeCodeModelAlias(config, "default"), "claude-opus-4-8[1m]");
   assert.equal(claudeCodeModelAlias(config, "fable"), "claude-fable-5[1m]");
@@ -102,6 +108,28 @@ test("verified route contexts drive Claude Code capability aliases without over-
   const conservative = await models.update(changed);
   assert.equal(contextWindowForRoute(conservative, "haiku"), 200000);
   assert.equal(claudeCodeModelAlias(conservative, "haiku"), "claude-haiku-4-5");
+  accounts.close();
+});
+
+test("load repair clamps stored output limits to verified known-model safety caps", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-model-output-repair-"));
+  const accounts = new AccountStore(root); await accounts.init();
+  await writeFile(path.join(root, "model-config.json"), JSON.stringify({
+    contextWindow: 850000,
+    routes: {
+      default: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
+      fable: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
+      opus: { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: 128000 },
+      sonnet: { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 999999 },
+      haiku: { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 50000 },
+    },
+  }));
+  const models = new ModelConfigStore(root, accounts); await models.init();
+  assert.equal(models.snapshot().routes.sonnet.maxOutputTokens, 16384);
+  assert.equal(models.snapshot().routes.haiku.maxOutputTokens, 16384);
+  const persisted = JSON.parse(await readFile(path.join(root, "model-config.json"), "utf8"));
+  assert.equal(persisted.routes.sonnet.maxOutputTokens, 16384);
+  assert.equal(persisted.routes.haiku.maxOutputTokens, 16384);
   accounts.close();
 });
 

@@ -40,6 +40,8 @@ const probes = [
   ["default", configured.ANTHROPIC_MODEL, 850000, Infinity],
   ["fable", configured.ANTHROPIC_DEFAULT_FABLE_MODEL, 850000, Infinity],
   ["opus/deepseek-free", configured.ANTHROPIC_DEFAULT_OPUS_MODEL, 0, 250000],
+  ["sonnet/cloudflare", configured.ANTHROPIC_DEFAULT_SONNET_MODEL, 0, 250000],
+  ["haiku/cloudflare", configured.ANTHROPIC_DEFAULT_HAIKU_MODEL, 0, 250000],
 ];
 
 console.log("Claude Code version:", version.split("\n")[0]);

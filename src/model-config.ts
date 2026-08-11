@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { AccountRecord, AccountStore, ProviderKind, PublicCredential } from "./account-store.js";
 import { OpenAICCError, unprocessable } from "./errors.js";
-import { verifiedModelContextWindow } from "./provider-registry.js";
+import { verifiedModelContextWindow, verifiedModelMaxOutputTokens } from "./provider-registry.js";
 
 export type ModelSlot = "default" | "fable" | "opus" | "sonnet" | "haiku";
 
@@ -266,6 +266,15 @@ function normalizeStrict(input: Partial<ModelConfig>): ModelConfig {
     if (!model) throw new OpenAICCError(`Model id is required for ${slot}.`, 400, "model_required", { slot });
     if (model.length > 256) throw new OpenAICCError(`Model id is too long for ${slot}.`, 400, "model_too_long", { slot });
     const maxOutputTokens = finiteInteger(candidate.maxOutputTokens, `${slot}.maxOutputTokens`, 1, 1000000);
+    const verifiedOutputCap = verifiedModelMaxOutputTokens(candidate.provider, model);
+    if (verifiedOutputCap !== undefined && maxOutputTokens > verifiedOutputCap) {
+      throw new OpenAICCError(
+        `${slot}.maxOutputTokens cannot exceed the verified ${verifiedOutputCap}-token safety cap for ${model}.`,
+        400,
+        "max_output_exceeds_verified_cap",
+        { slot, provider: candidate.provider, model, verifiedOutputCap },
+      );
+    }
     const credentialId = String(candidate.credentialId ?? "").trim() || undefined;
     routes[slot] = { provider: candidate.provider, model, credentialId, maxOutputTokens };
   }
@@ -285,7 +294,12 @@ function normalizeForLoad(input: Partial<ModelConfig>): { config: ModelConfig; c
     const provider = isProvider(candidate.provider) ? candidate.provider : fallback.provider;
     const model = String(candidate.model ?? fallback.model).trim() || fallback.model;
     const rawMax = Number(candidate.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS[slot]);
-    const maxOutputTokens = Number.isFinite(rawMax) ? Math.max(1, Math.min(1000000, Math.floor(rawMax))) : DEFAULT_MAX_OUTPUT_TOKENS[slot];
+    let maxOutputTokens = Number.isFinite(rawMax) ? Math.max(1, Math.min(1000000, Math.floor(rawMax))) : DEFAULT_MAX_OUTPUT_TOKENS[slot];
+    const verifiedOutputCap = verifiedModelMaxOutputTokens(provider, model);
+    if (verifiedOutputCap !== undefined && maxOutputTokens > verifiedOutputCap) {
+      maxOutputTokens = verifiedOutputCap;
+      changed = true;
+    }
     const credentialId = String(candidate.credentialId ?? "").trim() || undefined;
     routes[slot] = { provider, model, credentialId, maxOutputTokens };
   }

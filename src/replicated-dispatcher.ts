@@ -33,6 +33,7 @@ type UpstreamClient = OpenAI | ChatGptOAuthBoundary;
 export class ReplicatedDispatcher {
   private readonly controlPlane: Dispatcher;
   private readonly clients = new Map<string, UpstreamClient>();
+  private readonly clientFactory?: (account: AccountRecord) => any;
 
   constructor(
     private readonly store: AccountStore,
@@ -40,6 +41,7 @@ export class ReplicatedDispatcher {
     options: DispatcherOptions = {},
   ) {
     this.controlPlane = new Dispatcher(store, models, options);
+    this.clientFactory = options.clientFactory;
     store.on("event", () => this.clients.clear());
   }
 
@@ -197,8 +199,12 @@ export class ReplicatedDispatcher {
 
     let client: UpstreamClient;
     if (account.provider === "chatgpt") {
+      // Never allow test/injection hooks to replace the raw ChatGPT OAuth
+      // boundary: this is the production Terra transport invariant.
       if (!account.authFile) throw new Error(`ChatGPT credential ${account.id} has no auth file.`);
       client = createChatGptOAuthBoundary(account.authFile);
+    } else if (this.clientFactory) {
+      client = this.clientFactory(account) as OpenAI;
     } else {
       if (!account.apiKey) throw new Error(`${account.provider} credential ${account.id} has no API key.`);
       client = new OpenAI({ apiKey: account.apiKey, baseURL: providerBaseUrl(account) });
