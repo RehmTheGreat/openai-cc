@@ -31,6 +31,14 @@ const versionPart = String(manifest.appVersion).replace(/[^0-9A-Za-z._+-]/g, "-"
 const releasePrefix = `releases/${versionPart}-${String(manifest.sourceCommit).toLowerCase()}/`;
 
 const auth = await authorize(keyId, key);
+const actualCapabilities = [...(auth.storage.allowed?.capabilities || [])];
+if (actualCapabilities.includes("writeFiles") && (actualCapabilities.length !== 1 || actualCapabilities[0] !== "writeFiles")) {
+  fail(
+    "B2_PUBLISH_KEY_* is overbroad (a Master Application Key produces this exact symptom). " +
+    "Do not store a master/issuer key in GitHub. Run distribution/b2/provision-keys.ps1 locally with the master key, " +
+    "then set GitHub B2_PUBLISH_KEY_ID/B2_PUBLISH_KEY from the generated publisher.* values only."
+  );
+}
 requireExactCapabilities(auth.storage.allowed, ["writeFiles"]);
 requireBucketScope(auth.storage.allowed, bucketId, "releases/");
 
