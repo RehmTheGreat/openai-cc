@@ -1,0 +1,38 @@
+name: B2 Provision Helper CI
+
+on:
+  push:
+    paths:
+      - "distribution/b2/provision-keys.ps1"
+      - "distribution/b2/publish-release.mjs"
+      - ".github/workflows/b2-provision-helper-ci.yml"
+  pull_request:
+    paths:
+      - "distribution/b2/provision-keys.ps1"
+      - "distribution/b2/publish-release.mjs"
+      - ".github/workflows/b2-provision-helper-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-helper:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Parse provisioning helper
+        shell: powershell
+        run: |
+          [void][scriptblock]::Create((Get-Content .\distribution\b2\provision-keys.ps1 -Raw))
+          Write-Host "Parsed distribution/b2/provision-keys.ps1"
+
+      - name: Parse publisher
+        shell: powershell
+        run: |
+          node --check .\distribution\b2\publish-release.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Publisher syntax check failed" }
