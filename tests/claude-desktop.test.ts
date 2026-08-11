@@ -158,7 +158,7 @@ test("PowerShell installer configures the shared token-efficiency stack and pers
 
 test("shared Claude settings use gateway-aware aliases, 850k auto-compaction, and onboarding repair", async () => {
   const source = await readFile(path.join(process.cwd(), "src", "claude-config.ts"), "utf8");
-  assert.match(source, /claudeCodeModelAlias\(config, "fable"\)/);
+  assert.match(source, /claudeCodeModelAlias\(config, "fable", providers\)/);
   assert.match(source, /CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY/);
   assert.match(source, /CLAUDE_CODE_USE_GATEWAY/);
   assert.match(source, /CLAUDE_CODE_AUTO_COMPACT_WINDOW/);

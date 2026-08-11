@@ -53,6 +53,7 @@ export interface PublicProviderDefinition {
   requiresAccountId: boolean;
   supportsModelDiscovery: boolean;
   models: ManualModelDefinition[];
+  baseUrl?: string;
 }
 export interface ProviderDefinition {
   id: ProviderKind;
@@ -119,7 +120,7 @@ export class ProviderRegistry extends EventEmitter {
     }));
     const custom = this.customProviders.map((record) => ({
       id: record.id, displayName: record.displayName, apiStyle: record.apiStyle, credentialType: "api-key" as const,
-      custom: true, requiresAccountId: false, supportsModelDiscovery: true, models: record.models.map((model) => ({ ...model })),
+      custom: true, requiresAccountId: false, supportsModelDiscovery: true, models: record.models.map((model) => ({ ...model })), baseUrl: record.baseUrl,
     }));
     return [...built, ...custom];
   }
@@ -193,7 +194,7 @@ export class ProviderRegistry extends EventEmitter {
     const ids=definition.discovery==="cloudflare-models"?cloudflareModelIds(body):openAiModelIds(body);
     return normalizeDiscovered(account.provider,ids,this);
   }
-  private publicFor(record: CustomProviderRecord): PublicProviderDefinition { return { id:record.id,displayName:record.displayName,apiStyle:record.apiStyle,credentialType:"api-key",custom:true,requiresAccountId:false,supportsModelDiscovery:true,models:record.models.map((m)=>({...m})) }; }
+  private publicFor(record: CustomProviderRecord): PublicProviderDefinition { return {  id:record.id,displayName:record.displayName,apiStyle:record.apiStyle,credentialType:"api-key",custom:true,requiresAccountId:false,supportsModelDiscovery:true,models:record.models.map((m)=>({...m})),baseUrl:record.baseUrl }; }
   private requireCustom(id:string): CustomProviderRecord { const record=this.customProviders.find((item)=>item.id===id); if(!record) throw notFound(`Unknown custom provider: ${id}`,"provider_not_found"); return record; }
   private generateId(): CustomProviderKind { for(let i=0;i<20;i++){const id=`custom-${randomUUID().replace(/-/g,"").slice(0,12)}` as CustomProviderKind;if(!this.has(id))return id;} throw new OpenAICCError("Could not allocate custom provider id.",500,"provider_id_generation_failed"); }
   private async persist(): Promise<void> { if(!this.file)return; await mkdir(path.dirname(this.file),{recursive:true,mode:0o700}); const tmp=`${this.file}.${process.pid}.tmp`; await writeFile(tmp,`${JSON.stringify({version:1,providers:this.customProviders},null,2)}\n`,{mode:0o600}); await rename(tmp,this.file); }

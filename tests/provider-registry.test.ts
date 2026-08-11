@@ -165,6 +165,9 @@ test("production dispatcher exposes clean Cloudflare metadata and sends exact mo
   const store = new AccountStore(root); await store.init();
   await store.createApiKey({ id: "cf1", provider: "cloudflare", apiKey: "token", accountId: "acct" });
   const models = new ModelConfigStore(root, store); await models.init();
+  const routeConfig = models.snapshot();
+  routeConfig.routes.sonnet = { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 16384 };
+  await models.update(routeConfig);
   let captured: any;
   const server = createReplicatedServer(store, models, {
     bindHost: "127.0.0.1",
@@ -228,6 +231,9 @@ test("production Cloudflare route streams through the real replicated dispatcher
   const store = new AccountStore(root); await store.init();
   await store.createApiKey({ id: "cf1", provider: "cloudflare", apiKey: "token", accountId: "acct" });
   const models = new ModelConfigStore(root, store); await models.init();
+  const routeConfig = models.snapshot();
+  routeConfig.routes.sonnet = { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 16384 };
+  await models.update(routeConfig);
   const server = createReplicatedServer(store, models, {
     bindHost: "127.0.0.1",
     clientFactory: () => ({

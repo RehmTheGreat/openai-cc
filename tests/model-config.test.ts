@@ -75,7 +75,7 @@ test("route save rejects unsupported provider, empty model, invalid limits, and 
   badOutput.routes.default.maxOutputTokens = 0;
   await assert.rejects(() => models.update(badOutput), (error: unknown) => error instanceof OpenAICCError && error.code === "invalid_number");
   const aboveVerified: any = models.snapshot();
-  aboveVerified.routes.sonnet.maxOutputTokens = 16385;
+  aboveVerified.routes.sonnet.maxOutputTokens = 65537;
   await assert.rejects(
     () => models.update(aboveVerified),
     (error: unknown) => error instanceof OpenAICCError && error.code === "max_output_exceeds_verified_cap",

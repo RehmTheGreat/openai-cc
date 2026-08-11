@@ -128,7 +128,7 @@ export class ModelConfigStore extends EventEmitter {
 
   slotForRequestedModel(model: string): ModelSlot {
     const id = String(model || "").trim().toLowerCase();
-    const explicit = slotForClaudeCodeModel(this.state, id);
+    const explicit = slotForClaudeCodeModel(this.state, id, this.providers);
     if (explicit) return explicit;
     if (id === "fable" || id.includes("fable")) return "fable";
     if (id === "opus" || id.includes("opus")) return "opus";
