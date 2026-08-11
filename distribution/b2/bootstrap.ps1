@@ -140,8 +140,15 @@ try {
   if ($SkipDesktopConfig) { $installerArgs += "-SkipDesktopConfig" }
   if ($NoStartupShortcut) { $installerArgs += "-NoStartupShortcut" }
 
-  & powershell.exe @installerArgs
-  if ($LASTEXITCODE -ne 0) { throw "Session 6A installer failed with exit code $LASTEXITCODE." }
+  $installerOutput = @(& powershell.exe @installerArgs 2>&1)
+  $installerExitCode = $LASTEXITCODE
+  $installerOutput | Out-Host
+  if ($installerExitCode -ne 0) {
+    $detail = (@($installerOutput | ForEach-Object { [string]$_ }) -join "`n").Trim()
+    if ($detail.Length -gt 2000) { $detail = $detail.Substring($detail.Length - 2000) }
+    if ($detail) { throw "Session 6A installer failed with exit code $installerExitCode.`n$detail" }
+    throw "Session 6A installer failed with exit code $installerExitCode."
+  }
 } finally {
   foreach ($name in @("OPENAI_CC_DIST_KEY_ID", "OPENAI_CC_DIST_KEY", "OPENAI_CC_DIST_BOOTSTRAP_SHA256", "OPENAI_CC_B2_AUTHORIZE_URL")) {
     Remove-Item "Env:$name" -ErrorAction SilentlyContinue
