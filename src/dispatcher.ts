@@ -6,11 +6,20 @@ import { openaiCredentials } from "@openai-oauth/local";
 import { AccountRecord, AccountStore, ApiProviderKind, ProviderKind, publicCredential, validateId } from "./account-store.js";
 import { ChatGptAuthRunner, OfficialCodexAuthRunner } from "./chatgpt-auth.js";
 import { claudeDesktopModel, claudeDesktopModelList } from "./claude-desktop.js";
-import { AnthropicRequest, AnthropicSseTranslator, anthropicToResponses, estimateAnthropicTokens, responsesToAnthropic } from "./translator.js";
+import {
+  AnthropicRequest,
+  AnthropicSseTranslator,
+  OpenAIToolNameCodec,
+  anthropicToResponses,
+  estimateAnthropicTokens,
+  prepareChatGptCodexRequest,
+  responsesToAnthropic,
+} from "./translator.js";
 import { AnthropicChatSseTranslator, anthropicToChatCompletions, chatCompletionToAnthropic } from "./chat-translator.js";
 import { MODEL_SLOTS, ModelConfigStore } from "./model-config.js";
 import { OpenAICCError, conflict } from "./errors.js";
 import { adminPage } from "./admin/page.js";
+import { upstreamApiFor } from "./upstream-api.js";
 
 type ApiProvider = Exclude<ProviderKind, "chatgpt">;
 const MESSAGE_BODY_LIMIT = 32 * 1024 * 1024;
@@ -187,6 +196,7 @@ export class Dispatcher {
       ...body,
       max_tokens: Math.max(1, Math.min(Math.floor(requestedMaxTokens), route.maxOutputTokens)),
     };
+    const toolNames = OpenAIToolNameCodec.fromRequest(routedBody);
     const attempted = new Set<string>();
     let account = this.models.credentialForRequestedModel(body.model, attempted);
     if (!account) {
@@ -201,11 +211,12 @@ export class Dispatcher {
       const client = this.clientFor(account);
       const model = route.model || account.model || body.model;
       try {
-        if (usesResponsesApi(account)) {
-          const upstream = { ...anthropicToResponses(routedBody), model } as any;
+        if (upstreamApiFor(account.provider, model) === "responses") {
+          const converted = { ...anthropicToResponses(routedBody, toolNames), model };
+          const upstream = account.provider === "chatgpt" ? prepareChatGptCodexRequest(converted) : converted;
           if (body.stream) {
             const stream = await client.responses.create({ ...upstream, stream: true });
-            const translator = new AnthropicSseTranslator(body.model);
+            const translator = new AnthropicSseTranslator(body.model, toolNames);
             let wrote = false;
             for await (const event of stream as any) {
               for (const chunk of translator.accept(event)) {
@@ -218,7 +229,7 @@ export class Dispatcher {
             return;
           }
           const response = await client.responses.create({ ...upstream, stream: false } as any);
-          return void json(res, 200, responsesToAnthropic(response, body.model));
+          return void json(res, 200, responsesToAnthropic(response, body.model, toolNames));
         }
 
         const upstream = anthropicToChatCompletions(routedBody, model) as any;
@@ -302,7 +313,7 @@ export class Dispatcher {
     if (provider === "chatgpt") {
       if (!account.authFile) throw new OpenAICCError(`ChatGPT credential ${account.id} has no auth file.`, 409, "missing_auth_file");
       const credentials = openaiCredentials({ authFilePath: account.authFile });
-      const transport = createOpenAIOAuthTransport({ auth: () => credentials.getSession() });
+      const transport = createOpenAIOAuthTransport({ auth: () => credentials.getSession(), responsesState: false });
       client = new OpenAI({ apiKey: "openai-oauth", baseURL: transport.baseURL, fetch: transport.fetch });
     } else {
       if (!account.apiKey) throw new OpenAICCError(`${provider} credential ${account.id} has no API key.`, 409, "missing_api_key");
@@ -369,6 +380,11 @@ export class Dispatcher {
       json(res, error.status, { error: { code: error.code, message: error.message, ...(error.details === undefined ? {} : { details: error.details }) } });
       return;
     }
+    const upstreamStatus = upstreamHttpStatus(error);
+    if (upstreamStatus !== undefined) {
+      json(res, upstreamStatus, { error: { code: "upstream_error", message: sanitizeUpstreamMessage(error) } });
+      return;
+    }
     json(res, 500, { error: { code: "internal_error", message: "Internal server error." } });
   }
 }
@@ -385,7 +401,6 @@ function providerBaseUrl(provider: ApiProvider): string {
   if (provider === "nvidia") return "https://integrate.api.nvidia.com/v1";
   return "https://generativelanguage.googleapis.com/v1beta/openai/";
 }
-function usesResponsesApi(account: AccountRecord): boolean { return account.provider === "chatgpt" || account.provider === "zen"; }
 function isApiProvider(value: string): value is ApiProviderKind { return value === "zen" || value === "nvidia" || value === "google"; }
 function isAuthenticationError(error: any): boolean { return error?.status === 401 || error?.statusCode === 401; }
 function isRateLimit(error: any): boolean { return error?.status === 429 || error?.statusCode === 429 || /\b429\b|rate.?limit|usage.?limit|quota/i.test(error?.message ?? ""); }
@@ -400,6 +415,21 @@ function rateLimitCooldownMs(error: any, account: AccountRecord): number | undef
   const secondsMatch = text.match(/(?:retry|try again)[^\d]{0,20}(\d+(?:\.\d+)?)\s*s(?:ec(?:ond)?s?)?/i);
   if (secondsMatch) return Math.ceil(Number(secondsMatch[1]) * 1000);
   return undefined;
+}
+function upstreamHttpStatus(error: unknown): number | undefined {
+  const value = error as any;
+  const status = Number(value?.status ?? value?.statusCode);
+  if (!Number.isInteger(status) || status < 400 || status > 599) return undefined;
+  return status;
+}
+function sanitizeUpstreamMessage(error: unknown): string {
+  const value = error as any;
+  const raw = value?.error?.message ?? value?.message ?? "The upstream provider rejected the request.";
+  return String(raw)
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [redacted]")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, "[redacted]")
+    .replace(/\bAIza[A-Za-z0-9_-]{20,}/g, "[redacted]")
+    .slice(0, 1200);
 }
 function headerValue(headers: any, name: string): string | undefined {
   if (!headers) return undefined; if (typeof headers.get === "function") return headers.get(name) ?? undefined;
