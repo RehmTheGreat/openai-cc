@@ -85,9 +85,9 @@ try {
     throw "Session 6A installer failed with exit code $installerExitCode."
   }
 } catch {
-  # Never print headers or token values. The exception message is enough to
-  # diagnose transport/integrity/install failures without exposing credentials.
-  Write-Error ("Gated distribution bootstrap failed: " + $_.Exception.Message)
+  # Never print headers or token values. Keep the original exception intact so
+  # callers can distinguish authorization, integrity, and installer failures.
+  Write-Host ("Gated distribution bootstrap failed: " + $_.Exception.Message) -ForegroundColor Red
   throw
 } finally {
   Remove-Item Env:OPENAI_CC_DIST_TOKEN -ErrorAction SilentlyContinue
