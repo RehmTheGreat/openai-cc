@@ -1,0 +1,204 @@
+name: Gated Distribution CI
+
+on:
+  push:
+    paths:
+      - "distribution/**"
+      - "install.ps1"
+      - "scripts/build-runtime-bundle.ps1"
+      - "scripts/runtime-update-fixture.mjs"
+      - ".github/workflows/distribution-ci.yml"
+  pull_request:
+    paths:
+      - "distribution/**"
+      - "install.ps1"
+      - "scripts/build-runtime-bundle.ps1"
+      - "scripts/runtime-update-fixture.mjs"
+      - ".github/workflows/distribution-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  gated-windows-bootstrap:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build with deterministic source identity
+        shell: pwsh
+        run: |
+          $env:OPENAI_CC_SOURCE_SHA = (git rev-parse HEAD).Trim()
+          $env:OPENAI_CC_BUILD_TIME = (git show -s --format=%cI HEAD).Trim()
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
+
+      - name: Parse distribution PowerShell
+        shell: powershell
+        run: |
+          foreach ($file in @("distribution/gitlab/bootstrap.ps1", "distribution/gitlab/publish-release.ps1", "install.ps1", "scripts/build-runtime-bundle.ps1")) {
+            [void][scriptblock]::Create((Get-Content $file -Raw))
+            Write-Host "Parsed $file"
+          }
+          node --check distribution/gitlab/mock-server.mjs
+          if ($LASTEXITCODE -ne 0) { throw "mock-server.mjs syntax check failed" }
+
+      - name: Prune development dependencies
+        run: npm prune --omit=dev --no-audit --no-fund
+
+      - name: Build production runtime bundle
+        shell: powershell
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "openai-cc-gated-bundle"
+          .\scripts\build-runtime-bundle.ps1 -OutputDirectory $out
+          $manifest = Get-Content (Join-Path $out "openai-cc-runtime-manifest.json") -Raw | ConvertFrom-Json
+          $bundle = Join-Path $out ([string]$manifest.bundleUrl)
+          if (-not (Test-Path $bundle)) { throw "Bundle referenced by manifest is missing" }
+          Copy-Item .\distribution\gitlab\bootstrap.ps1 (Join-Path $out "bootstrap.ps1") -Force
+          "BUNDLE_DIR=$out" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BUNDLE_NAME=$([string]$manifest.bundleUrl)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Assert distributable artifact boundary
+        shell: powershell
+        run: |
+          $manifest = Get-Content (Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json") -Raw | ConvertFrom-Json
+          foreach ($file in @("bootstrap.ps1", "install.ps1", "openai-cc-runtime-manifest.json", [string]$manifest.bundleUrl)) {
+            if (-not (Test-Path (Join-Path $env:BUNDLE_DIR $file) -PathType Leaf)) { throw "Missing distributable file: $file" }
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $env:BUNDLE_DIR ([string]$manifest.bundleUrl)))
+          try {
+            $forbidden = @(".data/", "accounts.json", "providers.json", "model-config.json", "auth.json", ".env", ".git/")
+            foreach ($entry in $zip.Entries) {
+              $name = $entry.FullName.Replace('\\','/').ToLowerInvariant()
+              foreach ($needle in $forbidden) {
+                if ($name -eq $needle -or $name.StartsWith($needle) -or $name.EndsWith("/$needle")) {
+                  throw "Forbidden user/provider state leaked into runtime ZIP: $($entry.FullName)"
+                }
+              }
+            }
+          } finally { $zip.Dispose() }
+          $bootstrap = Get-Content .\distribution\gitlab\bootstrap.ps1 -Raw
+          if ($bootstrap -match 'github\.com|raw\.githubusercontent\.com|git clone') { throw "Target bootstrap depends on GitHub source access" }
+
+      - name: Start gated package fixture
+        shell: powershell
+        run: |
+          $env:DIST_ROOT = $env:BUNDLE_DIR
+          $env:DIST_TOKEN = "dist-valid-ci-token-6b"
+          $env:DIST_PORT = "18092"
+          $env:DIST_EXTRA_FILES = $env:BUNDLE_NAME
+          $server = Start-Process -FilePath node.exe -ArgumentList @("distribution/gitlab/mock-server.mjs") -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 1
+          if ($server.HasExited) { throw "Gated package fixture exited during startup" }
+          "DIST_SERVER_PID=$($server.Id)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "DIST_BASE=http://127.0.0.1:18092/api/v4/projects/1/packages/generic/openai-cc-runtime/test" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Invalid authorization is rejected
+        shell: powershell
+        run: |
+          $env:OPENAI_CC_DIST_TOKEN = "wrong-token"
+          $root = Join-Path $env:RUNNER_TEMP "OpenAI-CC-invalid-auth"
+          $failed = $false
+          try {
+            & .\distribution\gitlab\bootstrap.ps1 -PackageBaseUrl $env:DIST_BASE -InstallRoot $root -SkipDesktopConfig -NoStartupShortcut
+          } catch {
+            $failed = $true
+          }
+          if (-not $failed) { throw "Invalid distribution token was accepted" }
+          if (Test-Path (Join-Path $root "current")) { throw "Invalid authorization reached runtime installation" }
+
+      - name: Valid authorization performs clean install
+        shell: powershell
+        run: |
+          $env:OPENAI_CC_DIST_TOKEN = "dist-valid-ci-token-6b"
+          $root = Join-Path $env:RUNNER_TEMP "OpenAI-CC-gated-target"
+          & .\distribution\gitlab\bootstrap.ps1 -PackageBaseUrl $env:DIST_BASE -InstallRoot $root -SkipDesktopConfig -NoStartupShortcut
+          if (-not (Test-Path (Join-Path $root "current\runtime-manifest.json"))) { throw "Gated clean install did not activate runtime" }
+          if (-not (Test-Path (Join-Path $root ".data\model-config.json"))) { throw "Gated clean install did not initialize .data" }
+          if ($env:OPENAI_CC_DIST_TOKEN) { throw "Bootstrap did not clear the distribution token before application startup" }
+          "INSTALL_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Existing data and custom provider survive gated update
+        shell: powershell
+        run: |
+          $health = Invoke-RestMethod http://127.0.0.1:8082/healthz
+          taskkill.exe /PID ([int]$health.pid) /T /F | Out-Null
+          node .\scripts\runtime-update-fixture.mjs seed $env:INSTALL_ROOT
+          if ($LASTEXITCODE -ne 0) { throw "Could not seed update fixture" }
+          $env:OPENAI_CC_DIST_TOKEN = "dist-valid-ci-token-6b"
+          & .\distribution\gitlab\bootstrap.ps1 -PackageBaseUrl $env:DIST_BASE -InstallRoot $env:INSTALL_ROOT -SkipDesktopConfig -NoStartupShortcut
+          node .\scripts\runtime-update-fixture.mjs verify $env:INSTALL_ROOT
+          if ($LASTEXITCODE -ne 0) { throw "Persistent custom-provider/credential/routing state did not survive gated update" }
+          if ($env:OPENAI_CC_DIST_TOKEN) { throw "Distribution token survived gated update bootstrap" }
+
+      - name: Distribution token is not persisted
+        shell: powershell
+        run: |
+          $needle = "dist-valid-ci-token-6b"
+          foreach ($path in @((Join-Path $env:INSTALL_ROOT "install-state.json"), (Join-Path $env:INSTALL_ROOT ".data"))) {
+            if (-not (Test-Path $path)) { continue }
+            $files = if (Test-Path $path -PathType Container) { Get-ChildItem $path -File -Recurse -Force } else { @(Get-Item $path) }
+            foreach ($file in $files) {
+              try {
+                $text = Get-Content $file.FullName -Raw -ErrorAction Stop
+                if ($text.Contains($needle)) { throw "Distribution token was persisted in $($file.FullName)" }
+              } catch [System.Management.Automation.ItemNotFoundException] { throw }
+              catch { }
+            }
+          }
+
+      - name: Corrupted gated bundle is rejected
+        shell: powershell
+        run: |
+          $badRoot = Join-Path $env:RUNNER_TEMP "openai-cc-corrupt-gate"
+          New-Item -ItemType Directory -Force -Path $badRoot | Out-Null
+          Copy-Item (Join-Path $env:BUNDLE_DIR "bootstrap.ps1") $badRoot -Force
+          Copy-Item (Join-Path $env:BUNDLE_DIR "install.ps1") $badRoot -Force
+          Copy-Item (Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json") $badRoot -Force
+          Copy-Item (Join-Path $env:BUNDLE_DIR $env:BUNDLE_NAME) $badRoot -Force
+          [IO.File]::AppendAllText((Join-Path $badRoot $env:BUNDLE_NAME), "corruption")
+
+          $env:DIST_ROOT = $badRoot
+          $env:DIST_TOKEN = "dist-valid-ci-token-6b"
+          $env:DIST_PORT = "18093"
+          $env:DIST_EXTRA_FILES = $env:BUNDLE_NAME
+          $server = Start-Process -FilePath node.exe -ArgumentList @("distribution/gitlab/mock-server.mjs") -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 1
+          if ($server.HasExited) { throw "Corrupt package fixture exited during startup" }
+          "BAD_DIST_SERVER_PID=$($server.Id)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          $env:OPENAI_CC_DIST_TOKEN = "dist-valid-ci-token-6b"
+          $failed = $false
+          try {
+            & .\distribution\gitlab\bootstrap.ps1 -PackageBaseUrl "http://127.0.0.1:18093/api/v4/projects/1/packages/generic/openai-cc-runtime/test" -InstallRoot $env:INSTALL_ROOT -SkipDesktopConfig -NoStartupShortcut
+          } catch {
+            if ($_.Exception.Message -notmatch "Corrupted/hash-mismatched bundle|bundle size does not match") { throw }
+            $failed = $true
+          }
+          if (-not $failed) { throw "Corrupted gated bundle was accepted" }
+
+      - name: Cleanup test processes
+        if: always()
+        shell: powershell
+        run: |
+          foreach ($name in @("DIST_SERVER_PID", "BAD_DIST_SERVER_PID")) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($value) { Stop-Process -Id ([int]$value) -Force -ErrorAction SilentlyContinue }
+          }
+          try {
+            $health = Invoke-RestMethod http://127.0.0.1:8082/healthz -TimeoutSec 2
+            if ($health.pid) { taskkill.exe /PID ([int]$health.pid) /T /F | Out-Null }
+          } catch { }
