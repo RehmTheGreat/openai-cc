@@ -47,10 +47,21 @@ try {
       input: "Reply with exactly: openai-cc-direct-ok",
     };
     const response = await requireSuccessfulChatGptResponse(await boundary.responses(request), request);
-    const payload = await response.json();
+    const payload = await response.json() as any;
+    if (payload?.status !== "completed") {
+      throw new Error(`Codex returned HTTP 200 but response status was ${JSON.stringify(payload?.status ?? "<missing>")}.`);
+    }
+    const inputTokens = Number(payload?.usage?.input_tokens ?? 0);
+    const outputTokens = Number(payload?.usage?.output_tokens ?? 0);
+    if (!(inputTokens > 0) || !(outputTokens > 0)) {
+      throw new Error(`Codex returned HTTP 200/completed but invalid usage: input=${inputTokens}, output=${outputTokens}.`);
+    }
+    const outputTypes = Array.isArray(payload?.output)
+      ? payload.output.map((item: any) => String(item?.type ?? "unknown"))
+      : [];
     const text = outputText(payload);
-    if (!text) throw new Error("Codex returned HTTP 200 but no output_text for the direct request.");
-    console.log(`  HTTP 200: ${JSON.stringify(text.slice(0, 120))}`);
+    const textNote = text ? ` text=${JSON.stringify(text.slice(0, 120))}` : "";
+    console.log(`  HTTP 200 completed; usage ${inputTokens}/${outputTokens}; output types ${outputTypes.join(", ") || "<none>"}.${textNote}`);
   });
 
   await stage("3/4 FCC-translated Claude request", async () => {
