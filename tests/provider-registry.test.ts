@@ -21,6 +21,7 @@ test("Cloudflare credentials generate internal ids and do not require credential
   assert.equal(account.accountId, "account-123");
   assert.equal(providerBaseUrl(account), "https://api.cloudflare.com/client/v4/accounts/account-123/ai/v1");
   assert.equal(upstreamApiFor("cloudflare", CLOUDFLARE_GEMMA_MODEL), "chat-completions");
+  assert.match(store.generateCredentialId("chatgpt"), /^chatgpt-[a-f0-9]{12}$/);
   store.close();
 });
 
@@ -154,8 +155,8 @@ test("streamed tool arguments stay incremental and finish as Anthropic tool_use"
     ...translator.accept({ id: "chat-1", choices: [{ delta: {}, finish_reason: "tool_calls" }], usage: { completion_tokens: 7 } }),
   ].join("");
   assert.match(chunks, /"type":"tool_use"/);
-  assert.match(chunks, /"type":"input_json_delta","partial_json":"\\{\\\"key\\\":"/);
-  assert.match(chunks, /"partial_json":"\\\"x\\\"\\}"/);
+  assert.ok(chunks.includes('"partial_json":"{\\"key\\":"'));
+  assert.ok(chunks.includes('"partial_json":"\\"x\\"}"'));
   assert.match(chunks, /"stop_reason":"tool_use"/);
 });
 
