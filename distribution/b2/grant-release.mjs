@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { authorize, apiJson, sha256File } from "./b2-client.mjs";
 
 function fail(message) { throw new Error(message); }
@@ -18,13 +19,15 @@ const ttlSeconds = Number(ttlRaw);
 if (!Number.isInteger(ttlSeconds) || ttlSeconds < 60 || ttlSeconds > 3600) fail("Grant TTL must be an integer from 60 to 3600 seconds.");
 
 const issuerId = process.env.B2_ISSUER_KEY_ID;
-const issuerKey = process.env.B2_ISSUER_KEY;
+const issuerKey = process.env:B2_ISSUER_KEY;
 const bucketId = process.env.B2_BUCKET_ID;
 if (!issuerId || !issuerKey || !bucketId) fail("B2_ISSUER_KEY_ID, B2_ISSUER_KEY, and B2_BUCKET_ID are required on the trusted admin machine.");
 
 const manifest = JSON.parse(await readFile(resolve(manifestPath), "utf8"));
 if (!/^[0-9a-f]{40}$/i.test(String(manifest.sourceCommit || ""))) fail("Manifest sourceCommit must be a 40-character Git SHA.");
 if (!String(manifest.appVersion || "")) fail("Manifest appVersion is missing.");
+const currentSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim().toLowerCase();
+if (currentSha !== String(manifest.sourceCommit).toLowerCase()) fail("Grant manifest does not match the checked-out source. Checkout the exact published release commit before creating a grant.");
 const versionPart = String(manifest.appVersion).replace(/[^0-9A-Za-z._+-]/g, "-");
 const releasePrefix = `releases/${versionPart}-${String(manifest.sourceCommit).toLowerCase()}/`;
 
