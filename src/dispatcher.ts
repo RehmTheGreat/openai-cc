@@ -3,7 +3,7 @@ import http, { IncomingMessage, ServerResponse } from "node:http";
 import OpenAI from "openai";
 import { createOpenAIOAuthTransport } from "@openai-oauth/core";
 import { openaiCredentials } from "@openai-oauth/local";
-import { AccountRecord, AccountStore, ApiProviderKind, ProviderKind, publicCredential, validateId } from "./account-store.js";
+import { AccountRecord, AccountStore, ApiProviderKind, publicCredential, validateId } from "./account-store.js";
 import { ChatGptAuthRunner, OfficialCodexAuthRunner } from "./chatgpt-auth.js";
 import { claudeDesktopModel, claudeDesktopModelList } from "./claude-desktop.js";
 import {
@@ -15,12 +15,12 @@ import {
   responsesToAnthropic,
 } from "./translator.js";
 import { AnthropicChatSseTranslator, anthropicToChatCompletions, chatCompletionToAnthropic } from "./chat-translator.js";
-import { MODEL_SLOTS, ModelConfigStore } from "./model-config.js";
+import { ModelConfigStore } from "./model-config.js";
 import { OpenAICCError, conflict } from "./errors.js";
 import { adminPage } from "./admin/page.js";
 import { upstreamApiFor } from "./upstream-api.js";
+import { DiscoveredModel, discoverModelsForCredential, providerBaseUrl } from "./provider-registry.js";
 
-type ApiProvider = Exclude<ProviderKind, "chatgpt">;
 const MESSAGE_BODY_LIMIT = 32 * 1024 * 1024;
 const ADMIN_BODY_LIMIT = 64 * 1024;
 
@@ -29,6 +29,7 @@ export interface DispatcherOptions {
   bindHost?: string;
   allowRemoteAdmin?: boolean;
   clientFactory?: (account: AccountRecord) => any;
+  modelDiscoverer?: (account: AccountRecord) => Promise<DiscoveredModel[]>;
 }
 
 export class Dispatcher {
@@ -40,6 +41,7 @@ export class Dispatcher {
   private readonly bindHost: string;
   private readonly allowRemoteAdmin: boolean;
   private readonly clientFactory?: (account: AccountRecord) => any;
+  private readonly modelDiscoverer: (account: AccountRecord) => Promise<DiscoveredModel[]>;
 
   constructor(
     private readonly store: AccountStore,
@@ -49,6 +51,7 @@ export class Dispatcher {
     this.bindHost = options.bindHost ?? "127.0.0.1";
     this.allowRemoteAdmin = options.allowRemoteAdmin ?? process.env.OPENAI_CC_UNSAFE_REMOTE_ADMIN === "1";
     this.clientFactory = options.clientFactory;
+    this.modelDiscoverer = options.modelDiscoverer ?? ((account) => discoverModelsForCredential(account));
     this.authRunner = options.authRunner ?? new OfficialCodexAuthRunner(store);
     store.on("event", (event) => this.broadcast(event.type, event));
     models.on("event", (event) => this.broadcast(event.type, event));
@@ -96,6 +99,13 @@ export class Dispatcher {
       if (req.method === "GET" && url.pathname === "/admin") return void html(res, adminPage(this.csrfToken, this.cspNonce));
       if (req.method === "GET" && url.pathname === "/admin/state") return void json(res, 200, this.adminState());
       if (req.method === "GET" && url.pathname === "/admin/events") return void this.handleEventStream(req, res);
+      if (req.method === "GET" && /^\/admin\/credentials\/[^/]+\/models$/.test(url.pathname)) {
+        const id = credentialIdFromPath(url.pathname);
+        const account = this.store.get(id);
+        if (!account) throw new OpenAICCError(`Unknown credential: ${id}`, 404, "credential_not_found");
+        const models = await this.modelDiscoverer(account);
+        return void json(res, 200, { credentialId: id, provider: account.provider, models });
+      }
       if (req.method === "POST" && url.pathname === "/admin/model-config") {
         const body = await readJson<any>(req, ADMIN_BODY_LIMIT, true);
         const modelConfig = await this.models.update(body);
@@ -103,9 +113,12 @@ export class Dispatcher {
       }
       if (req.method === "POST" && url.pathname === "/admin/chatgpt/auth") {
         const body = await readJson<{ id?: string; name?: string; loginMode?: string }>(req, ADMIN_BODY_LIMIT, true);
+        const credentialId = String(body.id ?? "").trim() || this.store.generateCredentialId("chatgpt");
         const job = await this.authRunner.start({
-          credentialId: String(body.id ?? "").trim(),
-          displayName: String(body.name ?? "").trim(),
+          credentialId,
+          // The OAuth artifact supplies the account email after login. This
+          // placeholder is only job UI state; callers do not need to name it.
+          displayName: String(body.name ?? "").trim() || "ChatGPT account",
           mode: "create",
           loginMode: body.loginMode === "device" ? "device" : "browser",
         });
@@ -122,7 +135,7 @@ export class Dispatcher {
         return void json(res, 200, this.authRunner.status(jobId));
       }
       if (req.method === "POST" && url.pathname === "/admin/credentials") {
-        const body = await readJson<{ id?: string; name?: string; provider?: string; apiKey?: string; model?: string }>(req, ADMIN_BODY_LIMIT, true);
+        const body = await readJson<{ id?: string; name?: string; provider?: string; apiKey?: string; model?: string; accountId?: string }>(req, ADMIN_BODY_LIMIT, true);
         const record = await this.addApiKey(body);
         return void json(res, 201, publicCredential(record));
       }
@@ -157,7 +170,7 @@ export class Dispatcher {
         if (!existing) throw new OpenAICCError(`Unknown credential: ${id}`, 404, "credential_not_found");
         const job = await this.authRunner.start({
           credentialId: id,
-          displayName: String(body.name ?? existing.name),
+          displayName: String(body.name ?? existing.email ?? existing.name),
           mode: "reauth",
           loginMode: body.loginMode === "device" ? "device" : "browser",
         });
@@ -165,8 +178,13 @@ export class Dispatcher {
       }
       if (req.method === "POST" && /^\/admin\/credentials\/[^/]+\/replace-key$/.test(url.pathname)) {
         const id = credentialIdFromPath(url.pathname);
-        const body = await readJson<{ apiKey?: string; model?: string; name?: string }>(req, ADMIN_BODY_LIMIT, true);
-        const record = await this.store.replaceApiKey(id, { apiKey: String(body.apiKey ?? ""), model: body.model, name: body.name });
+        const body = await readJson<{ apiKey?: string; model?: string; name?: string; accountId?: string }>(req, ADMIN_BODY_LIMIT, true);
+        const record = await this.store.replaceApiKey(id, {
+          apiKey: String(body.apiKey ?? ""),
+          model: body.model,
+          name: body.name,
+          accountId: body.accountId,
+        });
         this.clients.delete(id);
         return void json(res, 200, publicCredential(record));
       }
@@ -284,17 +302,18 @@ export class Dispatcher {
     }
   }
 
-  private async addApiKey(input: { id?: string; name?: string; provider?: string; apiKey?: string; model?: string }): Promise<AccountRecord> {
-    const id = String(input.id ?? "").trim();
-    const name = String(input.name ?? id).trim();
+  private async addApiKey(input: { id?: string; name?: string; provider?: string; apiKey?: string; model?: string; accountId?: string }): Promise<AccountRecord> {
     const provider = String(input.provider ?? "").trim().toLowerCase();
-    const apiKey = String(input.apiKey ?? "").trim();
-    const model = String(input.model ?? "").trim();
-    if (!id) throw new OpenAICCError("Credential id is required.", 400, "credential_id_required");
-    validateId(id);
-    if (!isApiProvider(provider)) throw new OpenAICCError("Provider must be zen, nvidia, or google.", 400, "invalid_provider");
-    const record = await this.store.createApiKey({ id, name, provider, apiKey, model });
-    this.clients.delete(id);
+    if (!isApiProvider(provider)) throw new OpenAICCError("Provider must be zen, nvidia, google, or cloudflare.", 400, "invalid_provider");
+    const record = await this.store.createApiKey({
+      id: String(input.id ?? "").trim() || undefined,
+      name: String(input.name ?? "").trim() || undefined,
+      provider,
+      apiKey: String(input.apiKey ?? ""),
+      model: input.model,
+      accountId: input.accountId,
+    });
+    this.clients.delete(record.id);
     return record;
   }
 
@@ -318,7 +337,7 @@ export class Dispatcher {
       client = new OpenAI({ apiKey: "openai-oauth", baseURL: transport.baseURL, fetch: transport.fetch });
     } else {
       if (!account.apiKey) throw new OpenAICCError(`${provider} credential ${account.id} has no API key.`, 409, "missing_api_key");
-      client = new OpenAI({ apiKey: account.apiKey, baseURL: providerBaseUrl(provider) });
+      client = new OpenAI({ apiKey: account.apiKey, baseURL: providerBaseUrl(account) });
     }
     this.clients.set(account.id, client);
     return client;
@@ -397,12 +416,9 @@ export function createServer(store: AccountStore, models: ModelConfigStore, opti
   return server;
 }
 
-function providerBaseUrl(provider: ApiProvider): string {
-  if (provider === "zen") return "https://opencode.ai/zen/v1";
-  if (provider === "nvidia") return "https://integrate.api.nvidia.com/v1";
-  return "https://generativelanguage.googleapis.com/v1beta/openai/";
+function isApiProvider(value: string): value is ApiProviderKind {
+  return value === "zen" || value === "nvidia" || value === "google" || value === "cloudflare";
 }
-function isApiProvider(value: string): value is ApiProviderKind { return value === "zen" || value === "nvidia" || value === "google"; }
 function isAuthenticationError(error: any): boolean { return error?.status === 401 || error?.statusCode === 401; }
 function isRateLimit(error: any): boolean { return error?.status === 429 || error?.statusCode === 429 || /\b429\b|rate.?limit|usage.?limit|quota/i.test(error?.message ?? ""); }
 function rateLimitCooldownMs(error: any, account: AccountRecord): number | undefined {

@@ -1,10 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { conflict, notFound, OpenAICCError } from "./errors.js";
 
 export type AccountStatus = "ready" | "exhausted" | "auth_error" | "disabled";
-export type ProviderKind = "chatgpt" | "zen" | "nvidia" | "google";
+export type ProviderKind = "chatgpt" | "zen" | "nvidia" | "google" | "cloudflare";
 export type ApiProviderKind = Exclude<ProviderKind, "chatgpt">;
 
 export const LIMIT_WINDOW_MS = 5 * 60 * 60 * 1000;
@@ -18,6 +19,10 @@ export interface AccountRecord {
   email?: string;
   authFile?: string;
   apiKey?: string;
+  accountId?: string;
+  // Legacy compatibility: older API-key credentials stored a model on the
+  // credential itself. Routing now owns model selection, but this field remains
+  // readable so existing .data stores do not need destructive migration.
   model?: string;
   status: AccountStatus;
   createdAt: string;
@@ -34,6 +39,7 @@ export interface PublicCredential {
   name: string;
   provider: ProviderKind;
   email?: string;
+  accountId?: string;
   model?: string;
   status: AccountStatus;
   createdAt: string;
@@ -156,6 +162,14 @@ export class AccountStore extends EventEmitter {
       .map(({ account }) => ({ ...account }));
   }
 
+  generateCredentialId(provider: ProviderKind): string {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const id = `${provider}-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+      if (!this.has(id)) return id;
+    }
+    throw new OpenAICCError("Could not allocate a unique credential id.", 500, "credential_id_generation_failed");
+  }
+
   codexHomeFor(id: string): string {
     validateId(id);
     return path.join(this.codexHomesDir, id);
@@ -170,16 +184,17 @@ export class AccountStore extends EventEmitter {
     return path.join(this.authJobsDir, jobId);
   }
 
-  async createChatGpt(input: { id: string; name: string; authFile?: string; email?: string }): Promise<AccountRecord> {
-    validateId(input.id);
-    this.assertUnique(input.id);
+  async createChatGpt(input: { id?: string; name?: string; authFile?: string; email?: string }): Promise<AccountRecord> {
+    const id = String(input.id ?? "").trim() || this.generateCredentialId("chatgpt");
+    validateId(id);
+    this.assertUnique(id);
     const now = new Date().toISOString();
-    const authFile = path.resolve(input.authFile ?? this.authFileFor(input.id));
+    const authFile = path.resolve(input.authFile ?? this.authFileFor(id));
     assertManagedAuthPath(this, authFile);
     const email = input.email ?? await readAuthEmail(authFile);
     const record: AccountRecord = {
-      id: input.id,
-      name: cleanName(input.name),
+      id,
+      name: cleanOptionalName(input.name) ?? email ?? defaultCredentialName("chatgpt"),
       provider: "chatgpt",
       email,
       authFile,
@@ -208,7 +223,9 @@ export class AccountStore extends EventEmitter {
     const previousState = structuredClone(this.state);
     account.authFile = authFile;
     account.email = input.email ?? await readAuthEmail(authFile) ?? account.email;
-    if (input.name !== undefined) account.name = cleanName(input.name);
+    const requestedName = cleanOptionalName(input.name);
+    if (requestedName !== undefined) account.name = requestedName;
+    else if (account.email) account.name = account.email;
     account.status = "ready";
     delete account.firstRequestAt;
     delete account.limitResetsAt;
@@ -227,21 +244,33 @@ export class AccountStore extends EventEmitter {
     return { ...account };
   }
 
-  async createApiKey(input: { id: string; name: string; provider: ApiProviderKind; apiKey: string; model: string }): Promise<AccountRecord> {
-    validateId(input.id);
-    this.assertUnique(input.id);
+  async createApiKey(input: {
+    id?: string;
+    name?: string;
+    provider: ApiProviderKind;
+    apiKey: string;
+    model?: string;
+    accountId?: string;
+  }): Promise<AccountRecord> {
     if (!isApiProvider(input.provider)) throw new OpenAICCError(`Unsupported API provider: ${String(input.provider)}`, 400, "invalid_provider");
+    const id = String(input.id ?? "").trim() || this.generateCredentialId(input.provider);
+    validateId(id);
+    this.assertUnique(id);
     const apiKey = String(input.apiKey ?? "").trim();
-    const model = String(input.model ?? "").trim();
     if (!apiKey) throw new OpenAICCError("API key is required.", 400, "api_key_required");
-    if (!model) throw new OpenAICCError("Provider model id is required.", 400, "model_required");
+    const model = cleanOptionalModel(input.model);
+    const accountId = cleanOptionalAccountId(input.accountId);
+    if (input.provider === "cloudflare" && !accountId) {
+      throw new OpenAICCError("Cloudflare Account ID is required.", 400, "account_id_required");
+    }
     const now = new Date().toISOString();
     const record: AccountRecord = {
-      id: input.id,
-      name: cleanName(input.name),
+      id,
+      name: cleanOptionalName(input.name) ?? defaultCredentialName(input.provider),
       provider: input.provider,
       apiKey,
-      model,
+      ...(accountId ? { accountId } : {}),
+      ...(model ? { model } : {}),
       status: "ready",
       createdAt: now,
       updatedAt: now,
@@ -259,7 +288,7 @@ export class AccountStore extends EventEmitter {
     return { ...record };
   }
 
-  async replaceApiKey(id: string, input: { apiKey: string; model?: string; name?: string }): Promise<AccountRecord> {
+  async replaceApiKey(id: string, input: { apiKey: string; model?: string; name?: string; accountId?: string }): Promise<AccountRecord> {
     const account = this.requireAccount(id);
     if (!isApiProvider(account.provider)) throw conflict(`Credential ${id} is ChatGPT OAuth, not an API-key credential.`, "provider_conflict");
     const apiKey = String(input.apiKey ?? "").trim();
@@ -267,11 +296,20 @@ export class AccountStore extends EventEmitter {
     const previousState = structuredClone(this.state);
     account.apiKey = apiKey;
     if (input.model !== undefined) {
-      const model = String(input.model).trim();
-      if (!model) throw new OpenAICCError("Provider model id is required.", 400, "model_required");
-      account.model = model;
+      const model = cleanOptionalModel(input.model);
+      if (model) account.model = model;
+      else delete account.model;
     }
-    if (input.name !== undefined) account.name = cleanName(input.name);
+    if (input.accountId !== undefined) {
+      const accountId = cleanOptionalAccountId(input.accountId);
+      if (accountId) account.accountId = accountId;
+      else delete account.accountId;
+    }
+    if (account.provider === "cloudflare" && !account.accountId) {
+      this.state = previousState;
+      throw new OpenAICCError("Cloudflare Account ID is required.", 400, "account_id_required");
+    }
+    if (input.name !== undefined) account.name = cleanOptionalName(input.name) ?? defaultCredentialName(account.provider);
     account.status = "ready";
     delete account.firstRequestAt;
     delete account.limitResetsAt;
@@ -601,6 +639,35 @@ function cleanName(value: string): string {
   return name;
 }
 
+function cleanOptionalName(value: string | undefined): string | undefined {
+  if (value === undefined || String(value).trim() === "") return undefined;
+  return cleanName(value);
+}
+
+function cleanOptionalModel(value: string | undefined): string | undefined {
+  if (value === undefined || String(value).trim() === "") return undefined;
+  const model = String(value).trim();
+  if (model.length > 256) throw new OpenAICCError("Provider model id is too long.", 400, "model_too_long");
+  return model;
+}
+
+function cleanOptionalAccountId(value: string | undefined): string | undefined {
+  if (value === undefined || String(value).trim() === "") return undefined;
+  const accountId = String(value).trim();
+  if (accountId.length > 128 || /[\s/\\?#]/.test(accountId)) {
+    throw new OpenAICCError("Cloudflare Account ID has an invalid format.", 400, "invalid_account_id");
+  }
+  return accountId;
+}
+
+function defaultCredentialName(provider: ProviderKind): string {
+  if (provider === "chatgpt") return "ChatGPT account";
+  if (provider === "zen") return "OpenCode Zen";
+  if (provider === "nvidia") return "NVIDIA NIM";
+  if (provider === "google") return "Google AI Studio";
+  return "Cloudflare Workers AI";
+}
+
 function sanitizeError(value: string): string {
   return String(value ?? "")
     .replace(/https?:\/\/\S+/gi, "[redacted-url]")
@@ -662,7 +729,7 @@ function looksLikeEmail(value: string): boolean {
 }
 
 function isApiProvider(provider: string): provider is ApiProviderKind {
-  return provider === "zen" || provider === "nvidia" || provider === "google";
+  return provider === "zen" || provider === "nvidia" || provider === "google" || provider === "cloudflare";
 }
 
-const PROVIDERS: ProviderKind[] = ["chatgpt", "zen", "nvidia", "google"];
+const PROVIDERS: ProviderKind[] = ["chatgpt", "zen", "nvidia", "google", "cloudflare"];

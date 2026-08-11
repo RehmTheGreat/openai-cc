@@ -10,6 +10,7 @@ import {
   contextWindowForRoute,
   slotForClaudeCodeModel,
 } from "./model-config.js";
+import { modelCapabilities } from "./provider-registry.js";
 
 export type ClaudeDesktopSlot = ModelSlot;
 
@@ -149,7 +150,9 @@ function modelInfo(slot: ClaudeDesktopSlot, config: ModelConfig): ClaudeModelInf
   return {
     id: claudeCodeModelAlias(config, slot),
     type: "model",
-    display_name: `OpenAI-CC ${title(slot)} (${route.model})`,
+    // Technical provider/model details stay in Admin discovery. Claude's model
+    // picker only gets the user-facing routing alias.
+    display_name: title(slot),
     created_at: UNKNOWN_CREATED_AT,
     max_input_tokens: contextWindowForRoute(config, slot),
     max_tokens: route.maxOutputTokens,
@@ -166,8 +169,7 @@ function desktopSlotForModel(model: string): ClaudeDesktopSlot | undefined {
 }
 
 function routeCapabilities(route: ModelRoute): Record<string, unknown> {
-  const supportsImages = route.provider === "chatgpt" || route.provider === "google";
-  const supportsThinking = route.provider === "chatgpt" || route.provider === "zen";
+  const capabilities = modelCapabilities(route.provider, route.model);
   const unsupported = { supported: false };
   return {
     batch: unsupported,
@@ -187,14 +189,14 @@ function routeCapabilities(route: ModelRoute): Record<string, unknown> {
       xhigh: unsupported,
       max: unsupported,
     },
-    image_input: { supported: supportsImages },
+    image_input: { supported: capabilities.image },
     pdf_input: unsupported,
     structured_outputs: unsupported,
     thinking: {
-      supported: supportsThinking,
+      supported: capabilities.reasoning,
       types: {
         adaptive: unsupported,
-        enabled: { supported: supportsThinking },
+        enabled: { supported: capabilities.reasoning },
       },
     },
   };
