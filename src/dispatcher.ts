@@ -19,7 +19,7 @@ import { ModelConfigStore } from "./model-config.js";
 import { OpenAICCError, conflict } from "./errors.js";
 import { adminPage } from "./admin/page.js";
 import { upstreamApiFor } from "./upstream-api.js";
-import { DiscoveredModel, discoverModelsForCredential, providerBaseUrl } from "./provider-registry.js";
+import { DiscoveredModel, ProviderRegistry, discoverModelsForCredential, providerBaseUrl } from "./provider-registry.js";
 
 const MESSAGE_BODY_LIMIT = 32 * 1024 * 1024;
 const ADMIN_BODY_LIMIT = 64 * 1024;
@@ -30,6 +30,7 @@ export interface DispatcherOptions {
   allowRemoteAdmin?: boolean;
   clientFactory?: (account: AccountRecord) => any;
   modelDiscoverer?: (account: AccountRecord) => Promise<DiscoveredModel[]>;
+  providerRegistry?: ProviderRegistry;
 }
 
 export class Dispatcher {
@@ -42,6 +43,7 @@ export class Dispatcher {
   private readonly allowRemoteAdmin: boolean;
   private readonly clientFactory?: (account: AccountRecord) => any;
   private readonly modelDiscoverer: (account: AccountRecord) => Promise<DiscoveredModel[]>;
+  private readonly providers: ProviderRegistry;
 
   constructor(
     private readonly store: AccountStore,
@@ -51,10 +53,12 @@ export class Dispatcher {
     this.bindHost = options.bindHost ?? "127.0.0.1";
     this.allowRemoteAdmin = options.allowRemoteAdmin ?? process.env.OPENAI_CC_UNSAFE_REMOTE_ADMIN === "1";
     this.clientFactory = options.clientFactory;
-    this.modelDiscoverer = options.modelDiscoverer ?? ((account) => discoverModelsForCredential(account));
+    this.providers = options.providerRegistry ?? new ProviderRegistry();
+    this.modelDiscoverer = options.modelDiscoverer ?? ((account) => discoverModelsForCredential(account, fetch, this.providers));
     this.authRunner = options.authRunner ?? new OfficialCodexAuthRunner(store);
     store.on("event", (event) => this.broadcast(event.type, event));
     models.on("event", (event) => this.broadcast(event.type, event));
+    this.providers.on("event", (event) => { this.clients.clear(); this.broadcast(event.type, event); });
     this.authRunner.on("job", (job) => {
       if (job.status === "complete") this.clients.delete(job.credentialId);
       this.broadcast("auth_job_changed", job);
@@ -83,11 +87,11 @@ export class Dispatcher {
           afterId: url.searchParams.get("after_id") ?? undefined,
           beforeId: url.searchParams.get("before_id") ?? undefined,
           limit,
-        }));
+        }, this.providers));
       }
       if (req.method === "GET" && /^\/v1\/models\/[^/]+$/.test(url.pathname)) {
         const modelId = decodeURIComponent(url.pathname.slice("/v1/models/".length));
-        const model = claudeDesktopModel(this.models.snapshot(), modelId);
+        const model = claudeDesktopModel(this.models.snapshot(), modelId, this.providers);
         return void json(res, model ? 200 : 404, model ?? { error: { type: "not_found_error", message: `Model not found: ${modelId}` } });
       }
       if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
@@ -99,6 +103,36 @@ export class Dispatcher {
       if (req.method === "GET" && url.pathname === "/admin") return void html(res, adminPage(this.csrfToken, this.cspNonce));
       if (req.method === "GET" && url.pathname === "/admin/state") return void json(res, 200, this.adminState());
       if (req.method === "GET" && url.pathname === "/admin/events") return void this.handleEventStream(req, res);
+      if (req.method === "POST" && url.pathname === "/admin/providers") {
+        const body = await readJson<any>(req, ADMIN_BODY_LIMIT, true);
+        return void json(res, 201, await this.providers.createCustom(body));
+      }
+      if (req.method === "PATCH" && /^\/admin\/providers\/[^/]+$/.test(url.pathname)) {
+        const id = providerIdFromPath(url.pathname);
+        const body = await readJson<any>(req, ADMIN_BODY_LIMIT, true);
+        return void json(res, 200, await this.providers.updateCustom(id, body));
+      }
+      if (req.method === "DELETE" && /^\/admin\/providers\/[^/]+$/.test(url.pathname)) {
+        await readJson(req, ADMIN_BODY_LIMIT, true);
+        const id = providerIdFromPath(url.pathname);
+        const credential = this.store.list().find((item) => item.provider === id);
+        if (credential) throw conflict(`Provider ${id} still has credentials. Remove them first.`, "provider_has_credentials");
+        const slots = this.models.slotsForProvider(id);
+        if (slots.length) throw conflict(`Provider ${id} is routed by: ${slots.join(", ")}. Change those routes first.`, "provider_in_use", { slots });
+        await this.providers.deleteCustom(id);
+        return void json(res, 200, { ok: true });
+      }
+      if (req.method === "POST" && /^\/admin\/providers\/[^/]+\/models$/.test(url.pathname)) {
+        const id = providerIdFromPath(url.pathname);
+        const body = await readJson<any>(req, ADMIN_BODY_LIMIT, true);
+        return void json(res, 200, await this.providers.upsertManualModel(id, body));
+      }
+      if (req.method === "DELETE" && /^\/admin\/providers\/[^/]+\/models$/.test(url.pathname)) {
+        const id = providerIdFromPath(url.pathname);
+        const body = await readJson<any>(req, ADMIN_BODY_LIMIT, true);
+        await this.providers.deleteManualModel(id, String(body.id ?? ""));
+        return void json(res, 200, { ok: true });
+      }
       if (req.method === "GET" && /^\/admin\/credentials\/[^/]+\/models$/.test(url.pathname)) {
         const id = credentialIdFromPath(url.pathname);
         const account = this.store.get(id);
@@ -202,7 +236,7 @@ export class Dispatcher {
   }
 
   private adminState() {
-    return { ...this.store.snapshot(), modelConfig: this.models.snapshot(), routeHealth: this.models.health() };
+    return { ...this.store.snapshot(), providers: this.providers.listPublic(), modelConfig: this.models.snapshot(), routeHealth: this.models.health() };
   }
 
   private async handleMessages(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -213,6 +247,7 @@ export class Dispatcher {
       ...body,
       max_tokens: Math.max(1, Math.min(Math.floor(requestedMaxTokens), route.maxOutputTokens)),
     };
+    enforceContextLimit(this.models.contextWindowForRequestedModel(body.model), body);
     const toolNames = OpenAIToolNameCodec.fromRequest(routedBody);
     const attempted = new Set<string>();
     let account = this.models.credentialForRequestedModel(body.model, attempted);
@@ -228,7 +263,7 @@ export class Dispatcher {
       const client = this.clientFor(account);
       const model = route.model || account.model || body.model;
       try {
-        if (upstreamApiFor(account.provider, model) === "responses") {
+        if (upstreamApiFor(account.provider, model, this.providers) === "responses") {
           const upstream = { ...anthropicToResponses(routedBody, toolNames), model };
           if (body.stream) {
             const stream = await client.responses.create({ ...upstream, stream: true });
@@ -304,15 +339,8 @@ export class Dispatcher {
 
   private async addApiKey(input: { id?: string; name?: string; provider?: string; apiKey?: string; model?: string; accountId?: string }): Promise<AccountRecord> {
     const provider = String(input.provider ?? "").trim().toLowerCase();
-    if (!isApiProvider(provider)) throw new OpenAICCError("Provider must be zen, nvidia, google, or cloudflare.", 400, "invalid_provider");
-    const record = await this.store.createApiKey({
-      id: String(input.id ?? "").trim() || undefined,
-      name: String(input.name ?? "").trim() || undefined,
-      provider,
-      apiKey: String(input.apiKey ?? ""),
-      model: input.model,
-      accountId: input.accountId,
-    });
+    if (!this.providers.isApiKeyProvider(provider)) throw new OpenAICCError("Choose a configured API-key provider.", 400, "invalid_provider");
+    const record = await this.store.createApiKey({ id: String(input.id ?? "").trim() || undefined, name: String(input.name ?? "").trim() || undefined, provider: provider as ApiProviderKind, apiKey: String(input.apiKey ?? ""), model: input.model, accountId: input.accountId });
     this.clients.delete(record.id);
     return record;
   }
@@ -337,7 +365,7 @@ export class Dispatcher {
       client = new OpenAI({ apiKey: "openai-oauth", baseURL: transport.baseURL, fetch: transport.fetch });
     } else {
       if (!account.apiKey) throw new OpenAICCError(`${provider} credential ${account.id} has no API key.`, 409, "missing_api_key");
-      client = new OpenAI({ apiKey: account.apiKey, baseURL: providerBaseUrl(account) });
+      client = new OpenAI({ apiKey: account.apiKey, baseURL: providerBaseUrl(account, this.providers) });
     }
     this.clients.set(account.id, client);
     return client;
@@ -416,9 +444,6 @@ export function createServer(store: AccountStore, models: ModelConfigStore, opti
   return server;
 }
 
-function isApiProvider(value: string): value is ApiProviderKind {
-  return value === "zen" || value === "nvidia" || value === "google" || value === "cloudflare";
-}
 function isAuthenticationError(error: any): boolean { return error?.status === 401 || error?.statusCode === 401; }
 function isRateLimit(error: any): boolean { return error?.status === 429 || error?.statusCode === 429 || /\b429\b|rate.?limit|usage.?limit|quota/i.test(error?.message ?? ""); }
 function rateLimitCooldownMs(error: any, account: AccountRecord): number | undefined {
@@ -494,6 +519,15 @@ function credentialIdFromPath(pathname: string): string {
   const id = decodeURIComponent(pathname.split("/")[3]);
   validateId(id);
   return id;
+}
+function providerIdFromPath(pathname: string): string {
+  const id = decodeURIComponent(pathname.split("/")[3]);
+  if (!/^custom-[a-f0-9]{12}$/.test(id)) throw new OpenAICCError("Invalid custom provider id.", 400, "invalid_provider");
+  return id;
+}
+function enforceContextLimit(limit: number, body: AnthropicRequest): void {
+  const estimated = estimateAnthropicTokens(body);
+  if (estimated > limit) throw new OpenAICCError(`Estimated input (${estimated} tokens) exceeds this route's ${limit}-token context limit.`, 400, "context_window_exceeded", { estimatedInputTokens: estimated, contextWindow: limit });
 }
 function isMutation(method: string | undefined): boolean { return method === "POST" || method === "PATCH" || method === "PUT" || method === "DELETE"; }
 function hostName(value: string | undefined): string | undefined {

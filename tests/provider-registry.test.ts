@@ -106,9 +106,9 @@ test("Claude-facing model discovery keeps aliases clean while retaining route-sp
   assert.doesNotMatch(visible, /OpenAI-CC|gpt-5\.6-terra|deepseek-v4-flash-free|gemma-4-26b|cloudflare/i);
   const sonnet = list.data.find((model) => model.display_name === "Sonnet")!;
   const haiku = list.data.find((model) => model.display_name === "Haiku")!;
-  assert.equal(sonnet.max_input_tokens, 200000);
-  assert.equal(haiku.max_input_tokens, 200000);
-  assert.equal(sonnet.max_tokens, 16384);
+  assert.equal(sonnet.max_input_tokens, 850000);
+  assert.equal(haiku.max_input_tokens, 850000);
+  assert.equal(sonnet.max_tokens, 65536);
   assert.equal((sonnet.capabilities.image_input as any).supported, true);
   store.close();
 });
@@ -165,6 +165,9 @@ test("production dispatcher exposes clean Cloudflare metadata and sends exact mo
   const store = new AccountStore(root); await store.init();
   await store.createApiKey({ id: "cf1", provider: "cloudflare", apiKey: "token", accountId: "acct" });
   const models = new ModelConfigStore(root, store); await models.init();
+  const routeConfig = models.snapshot();
+  routeConfig.routes.sonnet = { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 16384 };
+  await models.update(routeConfig);
   let captured: any;
   const server = createReplicatedServer(store, models, {
     bindHost: "127.0.0.1",
@@ -228,6 +231,9 @@ test("production Cloudflare route streams through the real replicated dispatcher
   const store = new AccountStore(root); await store.init();
   await store.createApiKey({ id: "cf1", provider: "cloudflare", apiKey: "token", accountId: "acct" });
   const models = new ModelConfigStore(root, store); await models.init();
+  const routeConfig = models.snapshot();
+  routeConfig.routes.sonnet = { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 16384 };
+  await models.update(routeConfig);
   const server = createReplicatedServer(store, models, {
     bindHost: "127.0.0.1",
     clientFactory: () => ({

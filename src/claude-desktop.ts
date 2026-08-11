@@ -10,7 +10,7 @@ import {
   contextWindowForRoute,
   slotForClaudeCodeModel,
 } from "./model-config.js";
-import { modelCapabilities } from "./provider-registry.js";
+import { ProviderRegistry, modelCapabilities } from "./provider-registry.js";
 
 export type ClaudeDesktopSlot = ModelSlot;
 
@@ -44,24 +44,25 @@ export interface ClaudeModelInfo {
   capabilities: Record<string, unknown>;
 }
 
-export function claudeDesktopModels(config: ModelConfig): ClaudeModelInfo[] {
-  return DESKTOP_SLOTS.map((slot) => modelInfo(slot, config));
+export function claudeDesktopModels(config: ModelConfig, providers?: ProviderRegistry): ClaudeModelInfo[] {
+  return DESKTOP_SLOTS.map((slot) => modelInfo(slot, config, providers));
 }
 
-export function claudeDesktopModel(config: ModelConfig, modelId: string): ClaudeModelInfo | undefined {
+export function claudeDesktopModel(config: ModelConfig, modelId: string, providers?: ProviderRegistry): ClaudeModelInfo | undefined {
   const normalized = decodeURIComponent(String(modelId || "")).trim().toLowerCase();
-  const exact = claudeDesktopModels(config).find((model) => model.id.toLowerCase() === normalized);
+  const exact = claudeDesktopModels(config, providers).find((model) => model.id.toLowerCase() === normalized);
   if (exact) return exact;
 
-  const slot = slotForClaudeCodeModel(config, normalized) ?? desktopSlotForModel(normalized);
-  return slot ? modelInfo(slot, config) : undefined;
+  const slot = slotForClaudeCodeModel(config, normalized, providers) ?? desktopSlotForModel(normalized);
+  return slot ? modelInfo(slot, config, providers) : undefined;
 }
 
 export function claudeDesktopModelList(
   config: ModelConfig,
   query: { afterId?: string; beforeId?: string; limit?: number } = {},
+  providers?: ProviderRegistry,
 ): { data: ClaudeModelInfo[]; first_id: string | null; last_id: string | null; has_more: boolean } {
-  const all = claudeDesktopModels(config);
+  const all = claudeDesktopModels(config, providers);
   let start = 0;
   let end = all.length;
 
@@ -85,9 +86,9 @@ export function claudeDesktopModelList(
   };
 }
 
-export function claudeDesktopProfile(baseUrl: string, config: ModelConfig): Record<string, unknown> {
+export function claudeDesktopProfile(baseUrl: string, config: ModelConfig, providers?: ProviderRegistry): Record<string, unknown> {
   const inferenceModels = DESKTOP_SLOTS.map((slot) => {
-    const info = modelInfo(slot, config);
+    const info = modelInfo(slot, config, providers);
     return {
       name: info.id,
       labelOverride: info.display_name,
@@ -105,14 +106,14 @@ export function claudeDesktopProfile(baseUrl: string, config: ModelConfig): Reco
   };
 }
 
-export async function configureClaudeDesktop(baseUrl: string, config: ModelConfig): Promise<ClaudeDesktopConfigureResult> {
+export async function configureClaudeDesktop(baseUrl: string, config: ModelConfig, providers?: ProviderRegistry): Promise<ClaudeDesktopConfigureResult> {
   const paths = await currentPlatformPaths();
   if (!paths) return { supported: false, configured: false };
-  await configureClaudeDesktopAtPaths(paths, baseUrl, config);
+  await configureClaudeDesktopAtPaths(paths, baseUrl, config, providers);
   return { supported: true, configured: true, profileFile: paths.profileFile, metaFile: paths.metaFile };
 }
 
-export async function configureClaudeDesktopAtPaths(paths: ClaudeDesktopPaths, baseUrl: string, config: ModelConfig): Promise<void> {
+export async function configureClaudeDesktopAtPaths(paths: ClaudeDesktopPaths, baseUrl: string, config: ModelConfig, providers?: ProviderRegistry): Promise<void> {
   const normal = await readJson(paths.normalConfigFile);
   normal.deploymentMode = "3p";
   await writeJson(paths.normalConfigFile, normal);
@@ -121,7 +122,7 @@ export async function configureClaudeDesktopAtPaths(paths: ClaudeDesktopPaths, b
   threep.deploymentMode = "3p";
   await writeJson(paths.threepConfigFile, threep);
 
-  await writeJson(paths.profileFile, claudeDesktopProfile(baseUrl, config));
+  await writeJson(paths.profileFile, claudeDesktopProfile(baseUrl, config, providers));
 
   const meta = await readJson(paths.metaFile);
   const entries = Array.isArray(meta.entries) ? meta.entries.filter((entry: any) => entry?.id !== CLAUDE_DESKTOP_PROFILE_ID) : [];
@@ -145,18 +146,18 @@ export async function currentPlatformPaths(): Promise<ClaudeDesktopPaths | undef
   return undefined;
 }
 
-function modelInfo(slot: ClaudeDesktopSlot, config: ModelConfig): ClaudeModelInfo {
+function modelInfo(slot: ClaudeDesktopSlot, config: ModelConfig, providers?: ProviderRegistry): ClaudeModelInfo {
   const route = config.routes[slot];
   return {
-    id: claudeCodeModelAlias(config, slot),
+    id: claudeCodeModelAlias(config, slot, providers),
     type: "model",
     // Technical provider/model details stay in Admin discovery. Claude's model
     // picker only gets the user-facing routing alias.
     display_name: title(slot),
     created_at: UNKNOWN_CREATED_AT,
-    max_input_tokens: contextWindowForRoute(config, slot),
+    max_input_tokens: contextWindowForRoute(config, slot, providers),
     max_tokens: route.maxOutputTokens,
-    capabilities: routeCapabilities(route),
+    capabilities: routeCapabilities(route, providers),
   };
 }
 
@@ -168,8 +169,8 @@ function desktopSlotForModel(model: string): ClaudeDesktopSlot | undefined {
   return undefined;
 }
 
-function routeCapabilities(route: ModelRoute): Record<string, unknown> {
-  const capabilities = modelCapabilities(route.provider, route.model);
+function routeCapabilities(route: ModelRoute, providers?: ProviderRegistry): Record<string, unknown> {
+  const capabilities = modelCapabilities(route.provider, route.model, providers);
   const unsupported = { supported: false };
   return {
     batch: unsupported,

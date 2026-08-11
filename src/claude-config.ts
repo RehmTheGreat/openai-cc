@@ -2,13 +2,14 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ModelConfig, claudeCodeModelAlias } from "./model-config.js";
+import { ProviderRegistry } from "./provider-registry.js";
 
 export interface ClaudeConfigureResult {
   settingsFile: string;
   stateFile: string;
 }
 
-export async function configureClaudeCode(baseUrl: string, config: ModelConfig): Promise<ClaudeConfigureResult> {
+export async function configureClaudeCode(baseUrl: string, config: ModelConfig, providers?: ProviderRegistry): Promise<ClaudeConfigureResult> {
   const claudeDir = path.join(os.homedir(), ".claude");
   const settingsFile = path.join(claudeDir, "settings.json");
   const stateFile = path.join(os.homedir(), ".claude.json");
@@ -27,11 +28,11 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig):
     ...env,
     ANTHROPIC_BASE_URL: normalizeBaseUrl(baseUrl),
     ANTHROPIC_AUTH_TOKEN: "local-not-used",
-    ANTHROPIC_MODEL: claudeCodeModelAlias(config, "default"),
-    ANTHROPIC_DEFAULT_FABLE_MODEL: claudeCodeModelAlias(config, "fable"),
-    ANTHROPIC_DEFAULT_OPUS_MODEL: claudeCodeModelAlias(config, "opus"),
-    ANTHROPIC_DEFAULT_SONNET_MODEL: claudeCodeModelAlias(config, "sonnet"),
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeCodeModelAlias(config, "haiku"),
+    ANTHROPIC_MODEL: claudeCodeModelAlias(config, "default", providers),
+    ANTHROPIC_DEFAULT_FABLE_MODEL: claudeCodeModelAlias(config, "fable", providers),
+    ANTHROPIC_DEFAULT_OPUS_MODEL: claudeCodeModelAlias(config, "opus", providers),
+    ANTHROPIC_DEFAULT_SONNET_MODEL: claudeCodeModelAlias(config, "sonnet", providers),
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeCodeModelAlias(config, "haiku", providers),
     CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
     // Claude Code 2.1.x otherwise resolves a plain ANTHROPIC_BASE_URL as
     // first-party-with-a-custom-host and hard-falls back to a 200K budget.

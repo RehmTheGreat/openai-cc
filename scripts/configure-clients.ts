@@ -2,6 +2,7 @@ import { AccountStore } from "../src/account-store.js";
 import { configureClaudeCode } from "../src/claude-config.js";
 import { configureClaudeDesktop } from "../src/claude-desktop.js";
 import { ModelConfigStore } from "../src/model-config.js";
+import { ProviderRegistry } from "../src/provider-registry.js";
 
 const dataDir = process.env.DATA_DIR || ".data";
 const baseUrl = String(process.env.ANTHROPIC_BASE_URL || "http://127.0.0.1:8082").replace(/\/+$/, "");
@@ -12,14 +13,16 @@ if (!Number.isFinite(requestedContext) || requestedContext < 200000 || requested
 
 const store = new AccountStore(dataDir);
 await store.init();
-const models = new ModelConfigStore(dataDir, store);
+const providers = new ProviderRegistry(dataDir);
+await providers.init();
+const models = new ModelConfigStore(dataDir, store, providers);
 await models.init();
 const config = await models.update({ contextWindow: Math.floor(requestedContext) });
 
-const code = await configureClaudeCode(baseUrl, config);
+const code = await configureClaudeCode(baseUrl, config, providers);
 console.log(`Claude Code configured: ${code.settingsFile}`);
 
 if (process.env.OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP !== "0") {
-  const desktop = await configureClaudeDesktop(baseUrl, config);
+  const desktop = await configureClaudeDesktop(baseUrl, config, providers);
   if (desktop.supported) console.log(`Claude Desktop configured: ${desktop.profileFile}`);
 }

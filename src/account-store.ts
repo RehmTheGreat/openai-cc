@@ -5,8 +5,10 @@ import path from "node:path";
 import { conflict, notFound, OpenAICCError } from "./errors.js";
 
 export type AccountStatus = "ready" | "exhausted" | "auth_error" | "disabled";
-export type ProviderKind = "chatgpt" | "zen" | "nvidia" | "google" | "cloudflare";
-export type ApiProviderKind = Exclude<ProviderKind, "chatgpt">;
+export type BuiltInProviderKind = "chatgpt" | "zen" | "nvidia" | "google" | "cloudflare";
+export type CustomProviderKind = `custom-${string}`;
+export type ProviderKind = BuiltInProviderKind | CustomProviderKind;
+export type ApiProviderKind = Exclude<BuiltInProviderKind, "chatgpt"> | CustomProviderKind;
 
 export const LIMIT_WINDOW_MS = 5 * 60 * 60 * 1000;
 export const DEFAULT_API_KEY_COOLDOWN_MS = 15 * 60 * 1000;
@@ -420,7 +422,7 @@ export class AccountStore extends EventEmitter {
     }
     account.status = "exhausted";
     account.exhaustedAt = now.toISOString();
-    account.lastError = sanitizeError(message);
+    account.lastError = sanitizeError(message, account.apiKey ? [account.apiKey] : []);
     account.updatedAt = now.toISOString();
     await this.persist();
     this.scheduleReset(account);
@@ -436,7 +438,7 @@ export class AccountStore extends EventEmitter {
     delete account.firstRequestAt;
     delete account.limitResetsAt;
     delete account.exhaustedAt;
-    account.lastError = sanitizeError(message || "Authentication failed.");
+    account.lastError = sanitizeError(message || "Authentication failed.", account.apiKey ? [account.apiKey] : []);
     account.updatedAt = new Date().toISOString();
     try {
       await this.persist();
@@ -492,8 +494,8 @@ export class AccountStore extends EventEmitter {
   }
 
   private repairPreferences(): void {
-    for (const provider of PROVIDERS) {
-      const id = this.state.preferredCredentialByProvider[provider];
+    for (const [rawProvider, id] of Object.entries(this.state.preferredCredentialByProvider)) {
+      const provider = rawProvider as ProviderKind;
       if (id && !this.state.accounts.some((account) => account.id === id && account.provider === provider)) {
         delete this.state.preferredCredentialByProvider[provider];
       }
@@ -665,15 +667,19 @@ function defaultCredentialName(provider: ProviderKind): string {
   if (provider === "zen") return "OpenCode Zen";
   if (provider === "nvidia") return "NVIDIA NIM";
   if (provider === "google") return "Google AI Studio";
-  return "Cloudflare Workers AI";
+  if (provider === "cloudflare") return "Cloudflare Workers AI";
+  return "Custom provider credential";
 }
 
-function sanitizeError(value: string): string {
-  return String(value ?? "")
+function sanitizeError(value: string, exactSecrets: string[] = []): string {
+  let safe = String(value ?? "")
     .replace(/https?:\/\/\S+/gi, "[redacted-url]")
     .replace(/\b(?:access_token|refresh_token|id_token|code|code_verifier|state|api_key|authorization)\b\s*[:=]\s*[^\s,]+/gi, "$1=[redacted]")
-    .replace(/\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted-jwt]")
-    .slice(0, 1000);
+    .replace(/\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted-jwt]");
+  for (const secret of exactSecrets) {
+    if (secret) safe = safe.split(secret).join("[redacted]");
+  }
+  return safe.slice(0, 1000);
 }
 
 function findEmail(value: unknown, depth = 0): string | undefined {
@@ -729,7 +735,6 @@ function looksLikeEmail(value: string): boolean {
 }
 
 function isApiProvider(provider: string): provider is ApiProviderKind {
-  return provider === "zen" || provider === "nvidia" || provider === "google" || provider === "cloudflare";
+  return provider === "zen" || provider === "nvidia" || provider === "google" || provider === "cloudflare" || /^custom-[a-f0-9]{12}$/.test(provider);
 }
 
-const PROVIDERS: ProviderKind[] = ["chatgpt", "zen", "nvidia", "google", "cloudflare"];
