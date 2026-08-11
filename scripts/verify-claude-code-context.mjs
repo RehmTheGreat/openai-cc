@@ -12,14 +12,12 @@ const env = {
   ...Object.fromEntries(Object.entries(configured).map(([key, value]) => [key, String(value)])),
   NO_COLOR: "1",
 };
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 
 function runClaude(args) {
-  const result = spawnSync(
-    npm,
-    ["exec", "--yes", "--package=@anthropic-ai/claude-code@" + CLAUDE_VERSION, "--", "claude", ...args],
-    { env, encoding: "utf8", timeout: 120000 },
-  );
+  const npmArgs = ["exec", "--yes", "--package=@anthropic-ai/claude-code@" + CLAUDE_VERSION, "--", "claude", ...args];
+  const command = process.platform === "win32" ? (process.env.ComSpec || "cmd.exe") : "npm";
+  const commandArgs = process.platform === "win32" ? ["/d", "/s", "/c", "npm", ...npmArgs] : npmArgs;
+  const result = spawnSync(command, commandArgs, { env, encoding: "utf8", timeout: 120000 });
   const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error("Claude Code failed (" + result.status + "):\n" + output);
