@@ -31,9 +31,11 @@ const releasePrefix = `releases/${versionPart}-${String(manifest.sourceCommit).t
 const issuer = await authorize(issuerId, issuerKey);
 const capabilities = new Set(issuer.storage.allowed?.capabilities || []);
 if (!capabilities.has("writeKeys")) fail("Issuer key requires writeKeys capability.");
+if (!issuer.accountId) fail("B2 authorization response is missing accountId.");
 
 const keyName = `openai-cc-${String(manifest.sourceCommit).slice(0, 12)}-${randomBytes(4).toString("hex")}`;
 const created = await apiJson(issuer, "b2_create_key", {
+  accountId: issuer.accountId,
   capabilities: ["readFiles"],
   keyName,
   validDurationInSeconds: ttlSeconds,
