@@ -16,7 +16,6 @@ await store.init();
 
 try {
   const credentialId = args.credential
-    ?? store.preferredId("chatgpt")
     ?? store.orderedReady("chatgpt")[0]?.id;
   if (!credentialId) throw new Error(`No ChatGPT credential found in ${dataDir}. Add or re-authenticate one first.`);
   const account = store.get(credentialId);
@@ -113,10 +112,15 @@ try {
 
   console.log("\nPASS: ChatGPT OAuth, Terra, FCC translation, and Claude-style tools all reached Codex successfully.");
 } catch (error: any) {
-  console.error(`\nFAIL: ${error?.message ?? String(error)}`);
-  process.exitCode = 1;
+  const message = error?.message ?? String(error);
+  console.error(`\nFAIL: ${message}`);
+  process.exitCode = isUsageLimited(message) ? 2 : 1;
 } finally {
   store.close();
+}
+
+function isUsageLimited(message: string): boolean {
+  return /\bHTTP 429\b|usage limit|rate[- ]limit/i.test(message);
 }
 
 async function stage(name: string, fn: () => Promise<void>): Promise<void> {
