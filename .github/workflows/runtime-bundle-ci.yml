@@ -120,10 +120,39 @@ jobs:
       - name: Update preserves all persistent state
         shell: powershell
         run: |
+          $oauthDir = Join-Path $env:INSTALL_ROOT ".data\codex-homes\rotation-ci"
+          $oauthFile = Join-Path $oauthDir "auth.json"
+          New-Item -ItemType Directory -Force -Path $oauthDir | Out-Null
+          [IO.File]::WriteAllText($oauthFile, '{"auth_mode":"chatgpt","tokens":{"access_token":"before-activation"}}', [Text.UTF8Encoding]::new($false))
+          $mutator = Start-Job -ScriptBlock {
+            param($PathValue)
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            $sawDowntime = $false
+            do {
+              try {
+                $health = Invoke-RestMethod http://127.0.0.1:8082/healthz -TimeoutSec 1
+                if ($sawDowntime -and $health.ok) { break }
+              } catch { $sawDowntime = $true }
+              Start-Sleep -Milliseconds 50
+            } while ([DateTime]::UtcNow -lt $deadline)
+            if (-not $sawDowntime -or -not $health.ok) { throw "Gateway did not restart before OAuth rotation fixture deadline" }
+            for ($i = 0; $i -lt 50; $i++) {
+              [IO.File]::WriteAllText($PathValue, '{"auth_mode":"chatgpt","tokens":{"access_token":"after-activation"}}', [Text.UTF8Encoding]::new($false))
+              Start-Sleep -Milliseconds 20
+            }
+          } -ArgumentList $oauthFile
           $bootstrap = Join-Path $env:BUNDLE_DIR "install.ps1"
           $manifest = Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json"
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $bootstrap -ManifestUrl $manifest -InstallRoot $env:INSTALL_ROOT -SkipDesktopConfig -NoStartupShortcut
-          if ($LASTEXITCODE -ne 0) { throw "Update install failed" }
+          try {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $bootstrap -ManifestUrl $manifest -InstallRoot $env:INSTALL_ROOT -SkipDesktopConfig -NoStartupShortcut
+            $installExitCode = $LASTEXITCODE
+          } finally {
+            Wait-Job $mutator -Timeout 35 | Out-Null
+            Receive-Job $mutator -ErrorAction Stop
+            Remove-Job $mutator -Force
+          }
+          if ($installExitCode -ne 0) { throw "Update install failed" }
+          if ((Get-Content $oauthFile -Raw) -notmatch "after-activation") { throw "OAuth rotation fixture did not mutate the managed session during activation" }
           node .\scripts\runtime-update-fixture.mjs verify $env:INSTALL_ROOT
           if ($LASTEXITCODE -ne 0) { throw "Persistent state verification failed" }
 

@@ -85,9 +85,17 @@ try {
   if ($env:OPENAI_CC_CLIENT_SKIP_DESKTOP_CONFIG -eq "1") { $bootstrapArgs += "-SkipDesktopConfig" }
   if ($env:OPENAI_CC_CLIENT_NO_STARTUP_SHORTCUT -eq "1") { $bootstrapArgs += "-NoStartupShortcut" }
 
-  $installerOutput = @(& powershell.exe @bootstrapArgs 2>&1)
-  $installerExitCode = $LASTEXITCODE
-  $installerOutput | Out-Host
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    # Windows PowerShell turns a native child's stderr into error records. Keep
+    # those records non-terminating so progress and the real failure detail are
+    # streamed instead of aborting at the first generic "powershell.exe :".
+    $ErrorActionPreference = "Continue"
+    & powershell.exe @bootstrapArgs 2>&1 | ForEach-Object { $_ | Out-Host }
+    $installerExitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
   if ($installerExitCode -ne 0) { throw "OpenAI-CC installation failed with exit code $installerExitCode." }
 
   Write-Host "[OK] OpenAI-CC installed successfully." -ForegroundColor Green

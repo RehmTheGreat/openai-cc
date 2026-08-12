@@ -140,13 +140,15 @@ try {
   if ($SkipDesktopConfig) { $installerArgs += "-SkipDesktopConfig" }
   if ($NoStartupShortcut) { $installerArgs += "-NoStartupShortcut" }
 
-  $installerOutput = @(& powershell.exe @installerArgs 2>&1)
-  $installerExitCode = $LASTEXITCODE
-  $installerOutput | Out-Host
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    & powershell.exe @installerArgs 2>&1 | ForEach-Object { $_ | Out-Host }
+    $installerExitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
   if ($installerExitCode -ne 0) {
-    $detail = (@($installerOutput | ForEach-Object { [string]$_ }) -join "`n").Trim()
-    if ($detail.Length -gt 2000) { $detail = $detail.Substring($detail.Length - 2000) }
-    if ($detail) { throw "Session 6A installer failed with exit code $installerExitCode.`n$detail" }
     throw "Session 6A installer failed with exit code $installerExitCode."
   }
 } finally {

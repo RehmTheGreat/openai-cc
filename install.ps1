@@ -158,7 +158,16 @@ function Get-DataFingerprint {
     Get-ChildItem -Path $script:DataDir -File -Recurse -Force |
       ForEach-Object {
         $relative = $_.FullName.Substring($script:DataDir.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Replace([IO.Path]::DirectorySeparatorChar, '/')
-        [pscustomobject]@{ path = $relative; sha256 = Get-Sha256 $_.FullName; size = [int64]$_.Length }
+        # The raw OAuth session is runtime-mutable: the transport may rotate
+        # access/refresh tokens as soon as a waiting Claude request reconnects.
+        # Keep its managed path in the inventory, but fingerprint every other
+        # persistent byte so routes, providers, account records, API keys, and
+        # unrelated state remain strictly protected during activation.
+        if ($relative -match '(?i)^(?:codex-homes|accounts)/[^/]+/auth\.json$') {
+          [pscustomobject]@{ path = $relative; sha256 = "managed-oauth-session"; size = [int64]0 }
+        } else {
+          [pscustomobject]@{ path = $relative; sha256 = Get-Sha256 $_.FullName; size = [int64]$_.Length }
+        }
       } |
       Sort-Object path
   )
@@ -403,9 +412,9 @@ function Verify-Installation([object]$Distribution, [object]$InternalManifest, [
   if ($PreDataFingerprint) {
     $postDataFingerprint = Get-DataFingerprint
     if (-not $postDataFingerprint -or $postDataFingerprint.count -ne $PreDataFingerprint.count -or $postDataFingerprint.digest -ne $PreDataFingerprint.digest) {
-      throw "Verification failed: existing .data changed during update. Runtime was not allowed to rewrite credentials, providers, routes, pins, status, or configuration."
+      throw "Verification failed: protected .data changed during update. Runtime was not allowed to rewrite account records, API keys, providers, routes, pins, status, or configuration."
     }
-    Write-Host "[OK] Existing .data, model routing, custom providers, credentials, pins, and status preserved" -ForegroundColor Green
+    Write-Host "[OK] Existing .data, model routing, custom providers, credentials, pins, and status preserved; managed OAuth sessions may refresh in place" -ForegroundColor Green
   }
 
   Write-Host "[OK] expected source SHA = installed build SHA = running /healthz SHA: $expectedSha" -ForegroundColor Green
