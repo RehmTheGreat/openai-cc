@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
   [string]$CredentialFile,
-  [string]$BucketId
+  [string]$BucketId,
+  [switch]$FromEnvironment
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,6 +27,10 @@ try {
     $keyId = [string]$json.publisher.applicationKeyId
     $key = [string]$json.publisher.applicationKey
     if (-not $BucketId) { $BucketId = [string]$json.bucketId }
+  } elseif ($FromEnvironment) {
+    $keyId = [string]$env:B2_PUBLISH_KEY_ID
+    $key = [string]$env:B2_PUBLISH_KEY
+    if (-not $BucketId) { $BucketId = [string]$env:B2_BUCKET_ID }
   } else {
     $keyId = Read-Host "Publisher Application Key ID"
     $secure = Read-Host "Publisher Application Key SECRET" -AsSecureString
@@ -44,7 +49,7 @@ try {
   } catch {
     $detail = $_.ErrorDetails.Message
     if ($detail -match 'bad_auth_token') {
-      throw "Backblaze rejected this publisher credential pair (bad_auth_token). The ID and secret are mismatched, copied with extra characters/quotes, expired, or the key was deleted. Do not put this pair into GitHub."
+      throw "Backblaze rejected this publisher credential pair (bad_auth_token). The ID and secret are mismatched, copied with extra characters/quotes, expired, or the key was deleted. Do not publish until the pair validates locally."
     }
     throw
   }
