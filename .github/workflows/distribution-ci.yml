@@ -110,6 +110,7 @@ jobs:
           $env:DIST_PORT = "18096"
           $env:DIST_BUCKET_ID = "bucket-ci"
           $env:DIST_BUCKET_NAME = "openai-cc-ci"
+          $env:DIST_INTERRUPT_RANGED_ONCE = "1"
           $server = Start-Process -FilePath node.exe -ArgumentList @("distribution/b2/mock-server.mjs") -PassThru -WindowStyle Hidden
           try {
             Start-Sleep -Seconds 1
@@ -203,7 +204,7 @@ jobs:
             } catch { }
           } finally {
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
-            Remove-Item Env:OPENAI_CC_B2_AUTHORIZE_URL,Env:B2_BUCKET_ID,Env:B2_PUBLISH_KEY_ID,Env:B2_PUBLISH_KEY,Env:B2_ISSUER_KEY_ID,Env:B2_ISSUER_KEY,Env:OPENAI_CC_CLIENT_INSTALL_ROOT,Env:OPENAI_CC_CLIENT_SKIP_DESKTOP_CONFIG,Env:OPENAI_CC_CLIENT_NO_STARTUP_SHORTCUT,Env:OPENAI_CC_CLIENT_NO_OPEN_ADMIN,Env:OPENAI_CC_CLIENT_NONINTERACTIVE,Env:OPENAI_CC_CLIENT_KEEP_INSTALLER -ErrorAction SilentlyContinue
+            Remove-Item Env:OPENAI_CC_B2_AUTHORIZE_URL,Env:B2_BUCKET_ID,Env:B2_PUBLISH_KEY_ID,Env:B2_PUBLISH_KEY,Env:B2_ISSUER_KEY_ID,Env:B2_ISSUER_KEY,Env:OPENAI_CC_CLIENT_INSTALL_ROOT,Env:OPENAI_CC_CLIENT_SKIP_DESKTOP_CONFIG,Env:OPENAI_CC_CLIENT_NO_STARTUP_SHORTCUT,Env:OPENAI_CC_CLIENT_NO_OPEN_ADMIN,Env:OPENAI_CC_CLIENT_NONINTERACTIVE,Env:OPENAI_CC_CLIENT_KEEP_INSTALLER,Env:DIST_INTERRUPT_RANGED_ONCE -ErrorAction SilentlyContinue
           }
 
       - name: Start local private B2 fixture

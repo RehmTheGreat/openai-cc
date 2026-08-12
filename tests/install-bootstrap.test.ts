@@ -58,6 +58,11 @@ test("B2 installer layers stream child output without collapsing stderr", async 
     assert.match(script, /\$ErrorActionPreference = "Continue"/);
     assert.match(script, /2>&1 \| ForEach-Object \{ \$_ \| Out-Host \}/);
   }
+
+  const bootstrap = await readFile(path.join(process.cwd(), "distribution/b2/bootstrap.ps1"), "utf8");
+  assert.match(bootstrap, /AddRange\(\$start, \$requestedEnd\)/);
+  assert.match(bootstrap, /B2 download failed after \$maxAttempts attempts/);
+  assert.match(bootstrap, /B2 transport SHA-1 verification failed/);
 });
 
 test("fresh-install verification enforces Session 4.5 defaults and route-specific context", async () => {

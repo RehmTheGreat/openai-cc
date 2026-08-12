@@ -22,6 +22,7 @@ const generatedByCredential = new Map();
 const generatedById = new Map();
 const issuedDownloadTokens = new Map();
 let generatedCounter = 0;
+let interruptedRangedDownload = false;
 
 function json(res, status, body) {
   const data = Buffer.from(JSON.stringify(body));
@@ -222,14 +223,42 @@ const server = createServer(async (req, res) => {
       if (!leaf || leaf.includes("/") || leaf.includes("\\") || leaf === "." || leaf === "..") return json(res, 404, { code: "not_found" });
       const path = normalize(join(root, leaf));
       if (!existsSync(path) || !statSync(path).isFile()) return json(res, 404, { code: "not_found" });
+      const size = statSync(path).size;
       const sha1 = createHash("sha1").update(readFileSync(path)).digest("hex");
-      res.writeHead(200, {
+      const range = String(req.headers.range || "").match(/^bytes=(\d+)-(\d+)$/);
+      if (!range) {
+        res.writeHead(200, {
+          "content-type": "application/octet-stream",
+          "content-length": String(size),
+          "x-bz-content-sha1": sha1,
+          "cache-control": "no-store",
+        });
+        createReadStream(path).pipe(res);
+        return;
+      }
+      const start = Number(range[1]);
+      const end = Math.min(Number(range[2]), size - 1);
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start > end || start >= size) {
+        res.writeHead(416, { "content-range": `bytes */${size}` });
+        res.end();
+        return;
+      }
+      res.writeHead(206, {
         "content-type": "application/octet-stream",
-        "content-length": String(statSync(path).size),
+        "content-length": String(end - start + 1),
+        "content-range": `bytes ${start}-${end}/${size}`,
+        "accept-ranges": "bytes",
         "x-bz-content-sha1": sha1,
         "cache-control": "no-store",
       });
-      createReadStream(path).pipe(res);
+      if (process.env.DIST_INTERRUPT_RANGED_ONCE === "1" && !interruptedRangedDownload && start > 0) {
+        interruptedRangedDownload = true;
+        const partial = readFileSync(path).subarray(start, Math.min(end + 1, start + 65_536));
+        res.write(partial);
+        res.destroy();
+        return;
+      }
+      createReadStream(path, { start, end }).pipe(res);
       return;
     }
 
