@@ -40,6 +40,8 @@ test("installer preserves .data and atomically swaps only the managed current ru
   assert.match(install, /Move-Item \$stage \$script:CurrentRuntime/);
   assert.match(install, /Restore-PreviousRuntime/);
   assert.match(install, /Remove obsolete source-checkout runtime/);
+  assert.match(install, /HadLegacyRuntime =\s*[\s\S]*ManagedRoot "\.git"[\s\S]*ManagedRoot "src"[\s\S]*ManagedRoot "package-lock\.json"/);
+  assert.match(install, /"dist", "distribution", "node_modules"/);
   assert.doesNotMatch(install, /Remove-Item\s+\$script:DataDir/);
 
   assert.match(install, /Port 8082 is occupied by unrelated PID/);
