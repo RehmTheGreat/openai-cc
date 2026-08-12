@@ -61,8 +61,13 @@ test("B2 installer layers stream child output without collapsing stderr", async 
 
   const bootstrap = await readFile(path.join(process.cwd(), "distribution/b2/bootstrap.ps1"), "utf8");
   assert.match(bootstrap, /AddRange\(\$start, \$requestedEnd\)/);
+  assert.match(bootstrap, /\$statusCode -eq 200/);
+  assert.match(bootstrap, /B2 returned an unsafe full-object response to a byte-range request/);
   assert.match(bootstrap, /B2 download failed after \$maxAttempts attempts/);
   assert.match(bootstrap, /B2 transport SHA-1 verification failed/);
+
+  const fixture = await readFile(path.join(process.cwd(), "distribution/b2/mock-server.mjs"), "utf8");
+  assert.match(fixture, /start === 0 && requestedEnd >= size - 1/);
 });
 
 test("fresh-install verification enforces Session 4.5 defaults and route-specific context", async () => {

@@ -237,10 +237,24 @@ const server = createServer(async (req, res) => {
         return;
       }
       const start = Number(range[1]);
-      const end = Math.min(Number(range[2]), size - 1);
-      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start > end || start >= size) {
+      const requestedEnd = Number(range[2]);
+      const end = Math.min(requestedEnd, size - 1);
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd) || !Number.isSafeInteger(end) || start < 0 || start > end || start >= size) {
         res.writeHead(416, { "content-range": `bytes */${size}` });
         res.end();
+        return;
+      }
+      // Production B2 returns the complete object with 200 when a range from
+      // byte zero covers a small file, while larger partial ranges return 206.
+      if (start === 0 && requestedEnd >= size - 1) {
+        res.writeHead(200, {
+          "content-type": "application/octet-stream",
+          "content-length": String(size),
+          "accept-ranges": "bytes",
+          "x-bz-content-sha1": sha1,
+          "cache-control": "no-store",
+        });
+        createReadStream(path).pipe(res);
         return;
       }
       res.writeHead(206, {
