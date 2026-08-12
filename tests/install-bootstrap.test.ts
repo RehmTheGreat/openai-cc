@@ -87,6 +87,13 @@ test("fresh-install verification enforces Session 4.5 defaults and route-specifi
   assert.match(install, /Admin endpoint did not return HTTP 200/);
   assert.match(install, /codex-doctor\.js/);
   assert.match(install, /No usable ChatGPT OAuth credential is present/);
+  assert.match(install, /account\.status -eq "ready"/);
+  assert.match(install, /doctorExitCode -eq 2/);
+
+  const doctor = await readFile(path.join(process.cwd(), "scripts/codex-doctor.ts"), "utf8");
+  assert.match(doctor, /store\.orderedReady\("chatgpt"\)/);
+  assert.doesNotMatch(doctor, /store\.preferredId\("chatgpt"\)/);
+  assert.match(doctor, /process\.exitCode = isUsageLimited\(message\) \? 2 : 1/);
 });
 
 test("runtime bundle builder is production-only, manifest-driven, and independent of .data", async () => {

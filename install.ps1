@@ -429,7 +429,7 @@ function Has-UsableChatGptCredential {
   try {
     $accounts = Get-Content $accountsFile -Raw | ConvertFrom-Json
     foreach ($account in @($accounts.accounts)) {
-      if ([string]$account.provider -eq "chatgpt" -and [string]$account.status -ne "disabled" -and [string]$account.authFile) { return $true }
+      if ([string]$account.provider -eq "chatgpt" -and [string]$account.status -eq "ready" -and [string]$account.authFile) { return $true }
     }
   } catch { }
   return $false
@@ -446,7 +446,13 @@ function Run-CodexDoctorIfAvailable {
   $env:DATA_DIR = $script:DataDir
   Push-Location $script:ManagedRoot
   try {
-    Invoke-Native $script:NodeCommand @((Join-Path $script:CurrentRuntime "dist\scripts\codex-doctor.js"), "--model", "gpt-5.6-terra") "codex:doctor failed"
+    & $script:NodeCommand @((Join-Path $script:CurrentRuntime "dist\scripts\codex-doctor.js"), "--model", "gpt-5.6-terra") | Out-Host
+    $doctorExitCode = $LASTEXITCODE
+    if ($doctorExitCode -eq 2) {
+      Write-Host "ChatGPT usage is currently exhausted or rate-limited. Local installation verification succeeded; rerun codex:doctor after quota resets." -ForegroundColor Yellow
+      return
+    }
+    if ($doctorExitCode -ne 0) { throw "codex:doctor failed (exit code $doctorExitCode)." }
   } finally { Pop-Location }
 }
 
