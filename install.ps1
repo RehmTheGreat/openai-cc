@@ -165,6 +165,15 @@ function Get-DataFingerprint {
   return [pscustomobject]@{ count = $files.Count; digest = Get-ContentDigest $files }
 }
 
+function Migrate-PersistentData([string]$Stage) {
+  if (-not (Test-Path $script:DataDir)) { return }
+  $migration = Join-Path $Stage "dist\scripts\migrate-data.js"
+  if (-not (Test-Path $migration -PathType Leaf)) { throw "Runtime bundle is missing the persistent-data migration helper." }
+  Write-Step "Prepare persistent data"
+  Invoke-Native $script:NodeCommand @($migration, $script:DataDir) "Persistent .data migration failed"
+  Write-Host "[OK] Compatible .data migrations completed; credentials and configuration remain target-local" -ForegroundColor Green
+}
+
 function Verify-ExtractedRuntime([string]$Stage, [object]$Distribution) {
   $internalFile = Join-Path $Stage "runtime-manifest.json"
   if (-not (Test-Path $internalFile)) { throw "Bundle is missing runtime-manifest.json." }
@@ -481,6 +490,21 @@ function Restore-PreviousRuntime {
   } catch { Write-Warning "Previous runtime rollback encountered an error: $($_.Exception.Message)" }
 }
 
+function Start-PreviousRuntime {
+  $launcher = $null
+  $arguments = @("-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass")
+  if ($script:HadCurrentRuntime) {
+    $launcher = Join-Path $script:CurrentRuntime "run-gateway.ps1"
+    $arguments += @("-File", $launcher, "-InstallRoot", $script:ManagedRoot)
+  } elseif ($script:HadLegacyRuntime) {
+    $launcher = Join-Path $script:ManagedRoot "run-gateway.ps1"
+    $arguments += @("-File", $launcher)
+  }
+  if ($launcher -and (Test-Path $launcher)) {
+    Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WindowStyle Hidden | Out-Null
+  }
+}
+
 Write-Host "OpenAI-CC Session 6A deterministic bundle installer" -ForegroundColor Cyan
 Write-Host "Managed root: $script:ManagedRoot" -ForegroundColor DarkGray
 Write-Host "Git, repository cloning, GitHub authentication, and PATs are not used." -ForegroundColor DarkGray
@@ -490,7 +514,7 @@ $tempDownloadRoot = Join-Path ([IO.Path]::GetTempPath()) ("openai-cc-install-" +
 $stage = Join-Path $script:ManagedRoot ("._staging-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $tempDownloadRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $script:ManagedRoot | Out-Null
-$preDataFingerprint = Get-DataFingerprint
+$preDataFingerprint = $null
 
 try {
   Write-Step "Download and verify distribution"
@@ -509,11 +533,18 @@ try {
   $internalManifest = Verify-ExtractedRuntime $stage $distribution
   Write-Host "[OK] Internal file manifest and content digest verified" -ForegroundColor Green
 
-  if ($preDataFingerprint) { Write-Host "[OK] Preserved pre-update .data fingerprint captured without printing secrets" -ForegroundColor Green }
-  else { Write-Host "Fresh install: .data will be initialized by the runtime defaults." -ForegroundColor DarkGray }
-
   Ensure-Node
   Stop-ManagedRuntime
+
+  try {
+    Migrate-PersistentData $stage
+    $preDataFingerprint = Get-DataFingerprint
+    if ($preDataFingerprint) { Write-Host "[OK] Preserved pre-update .data fingerprint captured without printing secrets" -ForegroundColor Green }
+    else { Write-Host "Fresh install: .data will be initialized by the runtime defaults." -ForegroundColor DarkGray }
+  } catch {
+    Start-PreviousRuntime
+    throw
+  }
 
   Write-Step "Atomic runtime install"
   if (Test-Path $script:CurrentRuntime) {
