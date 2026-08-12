@@ -97,7 +97,8 @@ jobs:
               updatedAt = $now
             })
           }
-          $legacy | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $env:INSTALL_ROOT ".data\accounts.json") -Encoding utf8
+          $legacyJson = $legacy | ConvertTo-Json -Depth 8
+          [IO.File]::WriteAllText((Join-Path $env:INSTALL_ROOT ".data\accounts.json"), $legacyJson, [Text.UTF8Encoding]::new($false))
           $bootstrap = Join-Path $env:BUNDLE_DIR "install.ps1"
           $manifest = Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json"
           & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $bootstrap -ManifestUrl $manifest -InstallRoot $env:INSTALL_ROOT -SkipDesktopConfig -NoStartupShortcut
