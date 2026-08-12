@@ -24,7 +24,10 @@ $script:ManagedRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
 $script:CurrentRuntime = Join-Path $script:ManagedRoot "current"
 $script:DataDir = Join-Path $script:ManagedRoot ".data"
 $script:HadCurrentRuntime = Test-Path $script:CurrentRuntime
-$script:HadLegacyRuntime = (-not $script:HadCurrentRuntime) -and (Test-Path (Join-Path $script:ManagedRoot "dist\src\index.js"))
+$script:HadLegacyRuntime =
+  (Test-Path (Join-Path $script:ManagedRoot ".git")) -or
+  (Test-Path (Join-Path $script:ManagedRoot "src")) -or
+  (Test-Path (Join-Path $script:ManagedRoot "package-lock.json"))
 $script:FreshModelConfig = -not (Test-Path (Join-Path $script:DataDir "model-config.json"))
 $script:RollbackRuntime = $null
 $script:SwappedRuntime = $false
@@ -460,7 +463,7 @@ function Remove-LegacyManagedFiles {
   if (-not $script:HadLegacyRuntime) { return }
   Write-Step "Remove obsolete source-checkout runtime"
   foreach ($relative in @(
-    ".git", ".github", "src", "tests", "scripts", "dist", "node_modules",
+    ".git", ".github", "src", "tests", "scripts", "dist", "distribution", "node_modules",
     ".env.example", ".gitignore", "AGENTS.md", "LICENSE", "README.md", "package.json", "package-lock.json",
     "setup.ps1", "install.ps1", "run-gateway.ps1", "run-claude.ps1", "tsconfig.json"
   )) {
