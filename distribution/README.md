@@ -1,5 +1,21 @@
 # Session 6B gated runtime distribution
 
+## Normal client installation
+
+The everyday client flow is intentionally two steps:
+
+1. On the trusted administrator PC, from the exact published `main` checkout, run:
+
+   ```powershell
+   .\distribution\b2\new-client-installer.ps1
+   ```
+
+2. Send the generated `OpenAI-CC-Client-Installer-*.cmd` file privately to the client. The client double-clicks it before the displayed one-hour expiry.
+
+The client needs Windows PowerShell and internet access, but does not need Git, GitHub, a PAT, a source checkout, Node.js setup, or any permanent distribution credential. The generated file contains only a one-release `readFiles` grant, verifies the private B2 bootstrap and the complete Session 6A runtime integrity chain, opens Admin after success, clears transport credentials, and deletes itself after a successful installation.
+
+The administrator helper automatically uses the newest private provisioning JSON in `%TEMP%`. Use `-CredentialFile <path>` only when selecting a different saved provisioning result intentionally. Run the helper again whenever another client needs an installer or the previous installer has expired.
+
 OpenAI-CC uses **Backblaze B2 Cloud Storage** as a private, card-free distribution host. Backblaze currently allows B2 account creation without a credit card and includes the first 10 GB of storage free. This design deliberately does not add a billing method and does not use Cloudflare R2, S3, Azure Blob, GitLab Packages, or another host that would require a payment card for this deployment.
 
 ```text
