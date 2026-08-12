@@ -52,6 +52,10 @@ jobs:
             [void][scriptblock]::Create((Get-Content $file -Raw))
             Write-Host "Parsed $file"
           }
+          foreach ($file in @("distribution/b2/bootstrap.ps1", "distribution/b2/client-installer-template.ps1")) {
+            $text = Get-Content $file -Raw
+            if ($text -match '\$installerOutput\s*=\s*@\(') { throw "$file buffers child installer output instead of streaming it" }
+          }
           foreach ($file in @("distribution/b2/b2-client.mjs", "distribution/b2/publish-release.mjs", "distribution/b2/grant-release.mjs", "distribution/b2/revoke-grant.mjs", "distribution/b2/mock-server.mjs")) {
             node --check $file
             if ($LASTEXITCODE -ne 0) { throw "JavaScript syntax check failed: $file" }
@@ -164,8 +168,27 @@ jobs:
             $env:OPENAI_CC_CLIENT_NO_OPEN_ADMIN = "1"
             $env:OPENAI_CC_CLIENT_NONINTERACTIVE = "1"
             $env:OPENAI_CC_CLIENT_KEEP_INSTALLER = "1"
-            & $clientInstaller
-            if ($LASTEXITCODE -ne 0) { throw "One-click client installer failed against local private B2" }
+            $clientStdout = Join-Path $env:RUNNER_TEMP "one-click.stdout.txt"
+            $clientStderr = Join-Path $env:RUNNER_TEMP "one-click.stderr.txt"
+            $clientProcess = Start-Process -FilePath $env:ComSpec -ArgumentList @(
+              "/d", "/c", ('"' + $clientInstaller + '"')
+            ) -PassThru -RedirectStandardOutput $clientStdout -RedirectStandardError $clientStderr
+            $streamedBeforeExit = $false
+            $streamDeadline = [DateTime]::UtcNow.AddMinutes(2)
+            do {
+              $clientProcess.Refresh()
+              $visible = if (Test-Path $clientStdout) { Get-Content $clientStdout -Raw } else { "" }
+              if ($visible -match "OpenAI-CC Session 6A deterministic bundle installer") {
+                $streamedBeforeExit = -not $clientProcess.HasExited
+                break
+              }
+              Start-Sleep -Milliseconds 100
+            } while (-not $clientProcess.HasExited -and [DateTime]::UtcNow -lt $streamDeadline)
+            $clientProcess.WaitForExit()
+            if (Test-Path $clientStdout) { Get-Content $clientStdout | Out-Host }
+            if (Test-Path $clientStderr) { Get-Content $clientStderr | Out-Host }
+            if ([int]$clientProcess.ExitCode -ne 0) { throw "One-click client installer failed against local private B2" }
+            if (-not $streamedBeforeExit) { throw "One-click client installer did not stream child progress before exit" }
             if (-not (Test-Path (Join-Path $clientRoot "current\runtime-manifest.json"))) { throw "One-click client installer did not activate the runtime" }
             foreach ($needle in @("ci-issuer-key", "ci-publish-key", "ci-generated-secret")) {
               foreach ($file in (Get-ChildItem $clientRoot -File -Recurse -Force)) {

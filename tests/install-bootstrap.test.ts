@@ -28,12 +28,14 @@ test("installer preserves .data and atomically swaps only the managed current ru
   assert.match(install, /Refusing to modify path outside managed root/);
   assert.match(install, /Installer refuses to delete or replace \.data/);
   assert.match(install, /Get-DataFingerprint/);
+  assert.match(install, /codex-homes\|accounts/);
+  assert.match(install, /managed-oauth-session/);
   assert.match(install, /Migrate-PersistentData \$stage/);
   assert.match(install, /Persistent \.data migration failed/);
   const migration = install.indexOf("Migrate-PersistentData $stage");
   const fingerprint = install.indexOf("$preDataFingerprint = Get-DataFingerprint", migration);
   assert.ok(migration >= 0 && fingerprint > migration);
-  assert.match(install, /Existing \.data, model routing, custom providers, credentials, pins, and status preserved/);
+  assert.match(install, /Existing \.data, model routing, custom providers, credentials, pins, and status preserved; managed OAuth sessions may refresh in place/);
   assert.match(install, /Move-Item \$script:CurrentRuntime \$script:RollbackRuntime/);
   assert.match(install, /Move-Item \$stage \$script:CurrentRuntime/);
   assert.match(install, /Restore-PreviousRuntime/);
@@ -44,6 +46,18 @@ test("installer preserves .data and atomically swaps only the managed current ru
   assert.match(install, /Refusing to terminate it/);
   assert.match(install, /taskkill\.exe \/PID \$pidValue \/T \/F/);
   assert.match(install, /health\.pid -ne \[int\]\$listener\.OwningProcess/);
+});
+
+test("B2 installer layers stream child output without collapsing stderr", async () => {
+  for (const relative of [
+    "distribution/b2/client-installer-template.ps1",
+    "distribution/b2/bootstrap.ps1",
+  ]) {
+    const script = await readFile(path.join(process.cwd(), relative), "utf8");
+    assert.doesNotMatch(script, /\$installerOutput\s*=\s*@\(/);
+    assert.match(script, /\$ErrorActionPreference = "Continue"/);
+    assert.match(script, /2>&1 \| ForEach-Object \{ \$_ \| Out-Host \}/);
+  }
 });
 
 test("fresh-install verification enforces Session 4.5 defaults and route-specific context", async () => {
