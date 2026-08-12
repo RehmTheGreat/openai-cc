@@ -28,6 +28,11 @@ test("installer preserves .data and atomically swaps only the managed current ru
   assert.match(install, /Refusing to modify path outside managed root/);
   assert.match(install, /Installer refuses to delete or replace \.data/);
   assert.match(install, /Get-DataFingerprint/);
+  assert.match(install, /Migrate-PersistentData \$stage/);
+  assert.match(install, /Persistent \.data migration failed/);
+  const migration = install.indexOf("Migrate-PersistentData $stage");
+  const fingerprint = install.indexOf("$preDataFingerprint = Get-DataFingerprint", migration);
+  assert.ok(migration >= 0 && fingerprint > migration);
   assert.match(install, /Existing \.data, model routing, custom providers, credentials, pins, and status preserved/);
   assert.match(install, /Move-Item \$script:CurrentRuntime \$script:RollbackRuntime/);
   assert.match(install, /Move-Item \$stage \$script:CurrentRuntime/);
@@ -64,6 +69,7 @@ test("runtime bundle builder is production-only, manifest-driven, and independen
   assert.match(builder, /Copy-RuntimeItem "dist\\src"/);
   assert.match(builder, /Copy-RuntimeItem "dist\\scripts\\configure-clients\.js"/);
   assert.match(builder, /Copy-RuntimeItem "dist\\scripts\\codex-doctor\.js"/);
+  assert.match(builder, /Copy-RuntimeItem "dist\\scripts\\migrate-data\.js"/);
   assert.match(builder, /Copy-RuntimeItem "node_modules"/);
   assert.match(builder, /Copy-RuntimeItem "package\.json"/);
   assert.match(builder, /Copy-RuntimeItem "uninstall\.ps1"/);

@@ -76,6 +76,7 @@ try {
   Copy-RuntimeItem "dist\build-info.json"
   Copy-RuntimeItem "dist\scripts\configure-clients.js"
   Copy-RuntimeItem "dist\scripts\codex-doctor.js"
+  Copy-RuntimeItem "dist\scripts\migrate-data.js"
   Copy-RuntimeItem "node_modules"
   # package.json is required at runtime because the compiled .js tree relies on
   # its `type: module`; package-lock.json is intentionally not bundled.
