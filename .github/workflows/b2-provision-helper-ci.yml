@@ -4,13 +4,17 @@ on:
   push:
     paths:
       - "distribution/b2/provision-keys.ps1"
+      - "distribution/b2/verify-publisher.ps1"
       - "distribution/b2/publish-release.mjs"
       - ".github/workflows/b2-provision-helper-ci.yml"
+      - ".github/workflows/publish-distribution.yml"
   pull_request:
     paths:
       - "distribution/b2/provision-keys.ps1"
+      - "distribution/b2/verify-publisher.ps1"
       - "distribution/b2/publish-release.mjs"
       - ".github/workflows/b2-provision-helper-ci.yml"
+      - ".github/workflows/publish-distribution.yml"
 
 permissions:
   contents: read
@@ -30,6 +34,12 @@ jobs:
         run: |
           [void][scriptblock]::Create((Get-Content .\distribution\b2\provision-keys.ps1 -Raw))
           Write-Host "Parsed distribution/b2/provision-keys.ps1"
+
+      - name: Parse live publisher verifier
+        shell: powershell
+        run: |
+          [void][scriptblock]::Create((Get-Content .\distribution\b2\verify-publisher.ps1 -Raw))
+          Write-Host "Parsed distribution/b2/verify-publisher.ps1"
 
       - name: Parse publisher
         shell: powershell
