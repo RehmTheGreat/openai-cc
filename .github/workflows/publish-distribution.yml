@@ -25,6 +25,10 @@ jobs:
       - name: Checkout exact selected source commit
         uses: actions/checkout@v4
 
+      - name: Verify publisher credential against live Backblaze
+        shell: powershell
+        run: .\distribution\b2\verify-publisher.ps1 -FromEnvironment
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
