@@ -70,12 +70,24 @@ function Download-B2File([string]$DownloadBase, [string]$BucketName, [string]$Fi
           $request.Timeout = 120000
           $request.ReadWriteTimeout = 120000
           $response = [Net.HttpWebResponse]$request.GetResponse()
-          if ([int]$response.StatusCode -ne 206) { throw "B2 did not honor a byte-range download request." }
+          $statusCode = [int]$response.StatusCode
           $contentRange = [string]$response.Headers["Content-Range"]
-          if ($contentRange -notmatch '^bytes ([0-9]+)-([0-9]+)/([0-9]+)$') { throw "B2 returned an invalid Content-Range header." }
-          $responseStart = [int64]$Matches[1]
-          $responseEnd = [int64]$Matches[2]
-          $responseTotal = [int64]$Matches[3]
+          if ($statusCode -eq 206) {
+            if ($contentRange -notmatch '^bytes ([0-9]+)-([0-9]+)/([0-9]+)$') { throw "B2 returned an invalid Content-Range header." }
+            $responseStart = [int64]$Matches[1]
+            $responseEnd = [int64]$Matches[2]
+            $responseTotal = [int64]$Matches[3]
+          } elseif ($statusCode -eq 200) {
+            $responseLength = [int64]$response.ContentLength
+            if ($start -ne 0 -or $contentRange -or $responseLength -le 0 -or $responseLength -gt ($requestedEnd + 1)) {
+              throw "B2 returned an unsafe full-object response to a byte-range request."
+            }
+            $responseStart = [int64]0
+            $responseEnd = $responseLength - 1
+            $responseTotal = $responseLength
+          } else {
+            throw "B2 did not honor a byte-range download request."
+          }
           if ($responseStart -ne $start -or $responseEnd -lt $responseStart -or $responseEnd -gt $requestedEnd -or $responseTotal -le $responseEnd) {
             throw "B2 returned an inconsistent byte range."
           }
