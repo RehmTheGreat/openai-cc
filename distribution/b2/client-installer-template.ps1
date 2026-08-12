@@ -7,7 +7,7 @@ $Key = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("@@KEY_B64@@"
 $BucketId = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("@@BUCKET_ID_B64@@"))
 $ReleasePrefix = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("@@RELEASE_PREFIX_B64@@"))
 $BootstrapSha256 = "@@BOOTSTRAP_SHA256@@"
-$ExpirationTimestamp = [int64]@@EXPIRATION_TIMESTAMP@@
+$ExpirationTimestamp = [int64]"@@EXPIRATION_TIMESTAMP@@"
 $ExitCode = 1
 $BootstrapPath = Join-Path ([IO.Path]::GetTempPath()) ("openai-cc-bootstrap-" + [Guid]::NewGuid().ToString("N") + ".ps1")
 
