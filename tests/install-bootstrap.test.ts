@@ -63,6 +63,9 @@ test("B2 installer layers stream child output without collapsing stderr", async 
   assert.match(bootstrap, /AddRange\(\$start, \$requestedEnd\)/);
   assert.match(bootstrap, /\$statusCode -eq 200/);
   assert.match(bootstrap, /B2 returned an unsafe full-object response to a byte-range request/);
+  assert.match(bootstrap, /BeginRead\(\$readBuffer, 0, \$readSize/);
+  assert.match(bootstrap, /WaitOne\(\$bodyReadTimeoutMs\)/);
+  assert.match(bootstrap, /B2 response body stalled/);
   assert.match(bootstrap, /B2 download failed after \$maxAttempts attempts/);
   assert.match(bootstrap, /B2 transport SHA-1 verification failed/);
 

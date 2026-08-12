@@ -49,6 +49,8 @@ function Download-B2File([string]$DownloadBase, [string]$BucketName, [string]$Fi
   $url = "$($DownloadBase.TrimEnd('/'))/file/$bucket/$file"
   $chunkSize = 16MB
   $maxAttempts = 4
+  $bodyReadTimeoutMs = 30000
+  $readBuffer = New-Object byte[] 64KB
   $start = [int64]0
   $total = [int64]-1
   $declaredSha1 = $null
@@ -99,9 +101,26 @@ function Download-B2File([string]$DownloadBase, [string]$BucketName, [string]$Fi
           }
           if (-not $declaredSha1 -and $chunkSha1 -and $chunkSha1 -ne "none") { $declaredSha1 = $chunkSha1 }
           $source = $response.GetResponseStream()
-          $source.CopyTo($target, 1MB)
           $expectedPosition = $responseEnd + 1
-          if ($target.Position -ne $expectedPosition) { throw "B2 returned an incomplete byte range." }
+          $expectedLength = $expectedPosition - $start
+          if ([int64]$response.ContentLength -ne $expectedLength) { throw "B2 returned an inconsistent response length." }
+          while ($target.Position -lt $expectedPosition) {
+            $remaining = $expectedPosition - $target.Position
+            $readSize = [int][Math]::Min($readBuffer.Length, $remaining)
+            $pendingRead = $null
+            $waitHandle = $null
+            try {
+              $pendingRead = $source.BeginRead($readBuffer, 0, $readSize, $null, $null)
+              $waitHandle = $pendingRead.AsyncWaitHandle
+              if (-not $waitHandle.WaitOne($bodyReadTimeoutMs)) { throw "B2 response body stalled." }
+              $read = $source.EndRead($pendingRead)
+            } finally {
+              if ($waitHandle) { $waitHandle.Close() }
+            }
+            if ($read -le 0) { throw "B2 returned an incomplete byte range." }
+            $target.Write($readBuffer, 0, $read)
+          }
+          $target.Flush()
           $start = $expectedPosition
           $complete = $true
         } catch {
