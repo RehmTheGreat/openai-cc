@@ -47,8 +47,65 @@ function Download-B2File([string]$DownloadBase, [string]$BucketName, [string]$Fi
   $bucket = [Uri]::EscapeDataString($BucketName)
   $file = Escape-Path $FileName
   $url = "$($DownloadBase.TrimEnd('/'))/file/$bucket/$file"
-  $response = Invoke-WebRequest -Uri $url -Headers @{ Authorization = $AuthorizationToken } -OutFile $Destination -UseBasicParsing -TimeoutSec 180 -PassThru
-  $declaredSha1 = [string]$response.Headers["X-Bz-Content-Sha1"]
+  $chunkSize = 16MB
+  $maxAttempts = 4
+  $start = [int64]0
+  $total = [int64]-1
+  $declaredSha1 = $null
+  $target = [IO.File]::Open($Destination, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  try {
+    while ($total -lt 0 -or $start -lt $total) {
+      $requestedEnd = $start + $chunkSize - 1
+      $complete = $false
+      for ($attempt = 1; $attempt -le $maxAttempts -and -not $complete; $attempt++) {
+        $response = $null
+        $source = $null
+        try {
+          $target.SetLength($start)
+          $target.Position = $start
+          $request = [Net.HttpWebRequest]::Create($url)
+          $request.Method = "GET"
+          $request.Headers["Authorization"] = $AuthorizationToken
+          $request.AddRange($start, $requestedEnd)
+          $request.Timeout = 120000
+          $request.ReadWriteTimeout = 120000
+          $response = [Net.HttpWebResponse]$request.GetResponse()
+          if ([int]$response.StatusCode -ne 206) { throw "B2 did not honor a byte-range download request." }
+          $contentRange = [string]$response.Headers["Content-Range"]
+          if ($contentRange -notmatch '^bytes ([0-9]+)-([0-9]+)/([0-9]+)$') { throw "B2 returned an invalid Content-Range header." }
+          $responseStart = [int64]$Matches[1]
+          $responseEnd = [int64]$Matches[2]
+          $responseTotal = [int64]$Matches[3]
+          if ($responseStart -ne $start -or $responseEnd -lt $responseStart -or $responseEnd -gt $requestedEnd -or $responseTotal -le $responseEnd) {
+            throw "B2 returned an inconsistent byte range."
+          }
+          if ($total -ge 0 -and $responseTotal -ne $total) { throw "B2 object size changed during download." }
+          $total = $responseTotal
+          $chunkSha1 = [string]$response.Headers["X-Bz-Content-Sha1"]
+          if ($declaredSha1 -and $chunkSha1 -and $chunkSha1 -ne "none" -and $chunkSha1 -ine $declaredSha1) {
+            throw "B2 object hash changed during download."
+          }
+          if (-not $declaredSha1 -and $chunkSha1 -and $chunkSha1 -ne "none") { $declaredSha1 = $chunkSha1 }
+          $source = $response.GetResponseStream()
+          $source.CopyTo($target, 1MB)
+          $expectedPosition = $responseEnd + 1
+          if ($target.Position -ne $expectedPosition) { throw "B2 returned an incomplete byte range." }
+          $start = $expectedPosition
+          $complete = $true
+        } catch {
+          if ($attempt -ge $maxAttempts) { throw "B2 download failed after $maxAttempts attempts at byte $start`: $($_.Exception.Message)" }
+          Write-Host "Retrying interrupted OpenAI-CC download (attempt $($attempt + 1) of $maxAttempts)..." -ForegroundColor Yellow
+          Start-Sleep -Seconds ([Math]::Min(2 * $attempt, 6))
+        } finally {
+          if ($source) { $source.Dispose() }
+          if ($response) { $response.Dispose() }
+        }
+      }
+    }
+  } finally {
+    $target.Dispose()
+  }
+  if ($total -lt 0 -or [int64](Get-Item $Destination).Length -ne $total) { throw "B2 download size verification failed for $FileName." }
   if ($declaredSha1 -and $declaredSha1 -ne "none") {
     $actualSha1 = Get-Sha1 $Destination
     if ($actualSha1 -ine $declaredSha1) { throw "B2 transport SHA-1 verification failed for $FileName." }
