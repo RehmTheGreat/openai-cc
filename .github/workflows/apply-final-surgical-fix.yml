@@ -2,7 +2,8 @@ name: Apply final surgical fixes
 
 on:
   push:
-    branches: [fix/custom-provider-luna-context-v2]
+    branches:
+      - fix/custom-provider-luna-context-v2
 
 permissions:
   contents: write
@@ -17,137 +18,10 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - name: Apply narrow replacements
-        shell: python
-        run: |
-          from pathlib import Path
-
-          def patch(path, old, new, expected=1):
-              p = Path(path)
-              text = p.read_text(encoding='utf-8')
-              count = text.count(old)
-              if expected is not None and count != expected:
-                  raise SystemExit(f'{path}: expected {expected} matches, found {count}: {old[:100]!r}')
-              p.write_text(text.replace(old, new), encoding='utf-8')
-
-          # Restore three unrelated dispatcher regexes accidentally altered by an earlier blob write.
-          patch('src/dispatcher.ts', r'(?:ec(?:ond)?s)?/i', r'(?:ec(?:ond)?s?)?/i')
-          patch('src/dispatcher.ts', r'[^\s,{;]+', r'[^\s,;]+')
-          patch('src/dispatcher.ts', r'[A-Za-z0-9_-] {20,}', r'[A-Za-z0-9_-]{20,}')
-
-          # Claude Desktop: any route deliberately configured above the 200K fallback must carry the extended-context capability flag.
-          patch('src/claude-desktop.ts', 'info.max_input_tokens >= 1000000', 'info.max_input_tokens > 200000')
-
-          # Admin UI: remove the artificial custom-model 200K/false/false reconstruction and expose the new controls.
-          patch('src/admin/page.ts',
-              '<div class="field"><label for="provider-style">API style</label><select id="provider-style"><option value="chat-completions">Chat Completions</option><option value="responses">Responses</option></select></div><div class="field"><button type="submit">Add provider</button></div>',
-              '<div class="field"><label for="provider-style">API style</label><select id="provider-style"><option value="chat-completions">Chat Completions</option><option value="responses">Responses</option></select></div><div class="field"><label for="provider-tier">Service tier <span class="sr-only">optional</span></label><input id="provider-tier" maxlength="64" placeholder="Optional, e.g. flex"></div><div class="field"><button type="submit">Add provider</button></div>')
-          patch('src/admin/page.ts',
-              "function providerModels(provider){const byId=new Map();const meta=providerMeta(provider);for(const m of meta?.models||[]){byId.set(m.id,{provider,upstreamModelId:m.id,friendlyName:m.id,availability:'available',contextWindow:m.contextWindow||200000,maxOutputTokens:m.maxOutputTokens||16384,capabilities:{text:true,image:false,tools:false,streaming:true,reasoning:false}})}for(const a of state.accounts.filter(a=>a.provider===provider)){for(const m of discovered.get(a.id)||[]){if(!byId.has(m.upstreamModelId))byId.set(m.upstreamModelId,m)}}return [...byId.values()].sort((a,b)=>String(a.friendlyName||a.upstreamModelId).localeCompare(String(b.friendlyName||b.upstreamModelId)))}",
-              "function providerModels(provider){const byId=new Map();const meta=providerMeta(provider);for(const m of meta?.models||[]){byId.set(m.id,{provider,upstreamModelId:m.id,friendlyName:m.id,availability:'available',contextWindow:m.contextWindow||1000000,maxOutputTokens:m.maxOutputTokens||16384,capabilities:{text:true,image:false,tools:Boolean(m.tools),streaming:true,reasoning:Boolean(m.reasoning)}})}for(const a of state.accounts.filter(a=>a.provider===provider)){for(const m of discovered.get(a.id)||[]){if(!byId.has(m.upstreamModelId))byId.set(m.upstreamModelId,m)}}return [...byId.values()].sort((a,b)=>String(a.friendlyName||a.upstreamModelId).localeCompare(String(b.friendlyName||b.upstreamModelId)))}")
-          patch('src/admin/page.ts',
-              "function routeFacts(slot,provider,model,saved){const meta=findModel(provider,model),health=state.routeHealth?.[slot],sameSaved=saved&&health?.provider===provider&&health?.model===model;const target=Number(document.querySelector('#context-window')?.value||state.modelConfig.contextWindow||0),reported=meta?.contextWindow,ctx=reported?Math.min(target,reported):(sameSaved?health?.contextWindow:undefined);const caps=meta?.capabilities;return '<span>Context: <strong>'+(ctx?Number(ctx).toLocaleString()+' tokens':'Not reported')+'</strong></span><span>Vision: <strong>'+(caps?(caps.image?'Supported':'Not supported'):'Not reported')+'</strong></span><span>Tools: <strong>'+(caps?(caps.tools?'Supported':'Not supported'):'Not reported')+'</strong></span>'}",
-              "function routeFacts(slot,provider,model,saved){const meta=findModel(provider,model),health=state.routeHealth?.[slot],sameSaved=saved&&health?.provider===provider&&health?.model===model;const target=Number(document.querySelector('#context-window')?.value||state.modelConfig.contextWindow||0),reported=meta?.contextWindow,ctx=reported?Math.min(target,reported):(sameSaved?health?.contextWindow:undefined);const caps=meta?.capabilities;return '<span>Context: <strong>'+(ctx?Number(ctx).toLocaleString()+' tokens':'Not reported')+'</strong></span><span>Vision: <strong>'+(caps?(caps.image?'Supported':'Not supported'):'Not reported')+'</strong></span><span>Tools: <strong>'+(caps?(caps.tools?'Supported':'Not supported'):'Not reported')+'</strong></span><span>Reasoning: <strong>'+(caps?(caps.reasoning?'Supported':'Not supported'):'Not reported')+'</strong></span>'}")
-          patch('src/admin/page.ts',
-              "function customProviderCard(p){const models=(p.models||[]).map(m=>'<div class=\"credential-line\">'+esc(m.id)+' · '+Number(m.contextWindow||200000).toLocaleString()+' context · '+Number(m.maxOutputTokens||16384).toLocaleString()+' output</div>').join('');return '<article class=\"credential\"><div class=\"credential-head\"><div class=\"credential-title\"><h3>'+esc(p.displayName)+'</h3><p>'+esc(p.id)+' · '+esc(p.apiStyle)+'</p></div></div><div class=\"actions\"><button type=\"button\" class=\"small secondary\" data-provider-action=\"edit\" data-id=\"'+esc(p.id)+'\">Edit</button><button type=\"button\" class=\"small danger\" data-provider-action=\"delete\" data-id=\"'+esc(p.id)+'\">Remove</button></div>'+models+'<form class=\"replace form-stack\" data-manual-model=\"'+esc(p.id)+'\"><div class=\"field\"><label>Manual model ID</label><input name=\"id\" required maxlength=\"256\" placeholder=\"model-id\"></div><div class=\"field\"><label>Context limit</label><input name=\"contextWindow\" type=\"number\" min=\"1\" placeholder=\"Optional — defaults 200000\"></div><div class=\"field\"><label>Output limit</label><input name=\"maxOutputTokens\" type=\"number\" min=\"1\" placeholder=\"Optional — defaults 16384\"></div><button type=\"submit\">Add / update model</button><span class=\"status\"></span></form></article>'}",
-              "function customProviderCard(p){const models=(p.models||[]).map(m=>'<div class=\"credential-line\">'+esc(m.id)+' · '+Number(m.contextWindow||1000000).toLocaleString()+' context · '+Number(m.maxOutputTokens||16384).toLocaleString()+' output · tools '+(m.tools?'yes':'no')+' · reasoning '+(m.reasoning?'yes':'no')+'</div>').join('');return '<article class=\"credential\"><div class=\"credential-head\"><div class=\"credential-title\"><h3>'+esc(p.displayName)+'</h3><p>'+esc(p.id)+' · '+esc(p.apiStyle)+(p.serviceTier?' · service tier '+esc(p.serviceTier):'')+'</p></div></div><div class=\"actions\"><button type=\"button\" class=\"small secondary\" data-provider-action=\"edit\" data-id=\"'+esc(p.id)+'\">Edit</button><button type=\"button\" class=\"small danger\" data-provider-action=\"delete\" data-id=\"'+esc(p.id)+'\">Remove</button></div>'+models+'<form class=\"replace form-stack\" data-manual-model=\"'+esc(p.id)+'\"><div class=\"field\"><label>Manual model ID</label><input name=\"id\" required maxlength=\"256\" placeholder=\"model-id\"></div><div class=\"field\"><label>Context limit</label><input name=\"contextWindow\" type=\"number\" min=\"1\" placeholder=\"Optional — defaults 1000000\"></div><div class=\"field\"><label>Output limit</label><input name=\"maxOutputTokens\" type=\"number\" min=\"1\" placeholder=\"Optional — defaults 16384\"></div><div class=\"field\"><label>Tools</label><select name=\"tools\"><option value=\"\">Default (not supported)</option><option value=\"true\">Supported</option><option value=\"false\">Not supported</option></select></div><div class=\"field\"><label>Reasoning</label><select name=\"reasoning\"><option value=\"\">Default (not supported)</option><option value=\"true\">Supported</option><option value=\"false\">Not supported</option></select></div><button type=\"submit\">Add / update model</button><span class=\"status\"></span></form></article>'}")
-          patch('src/admin/page.ts',
-              "async function addProvider(event){event.preventDefault();const status=document.querySelector('#provider-status'),buttonEl=event.currentTarget.querySelector('button[type=submit]');setBusy(buttonEl,true,'Adding…');try{await api('/admin/providers',{method:'POST',body:JSON.stringify({displayName:document.querySelector('#provider-name').value,baseUrl:document.querySelector('#provider-url').value,apiStyle:document.querySelector('#provider-style').value})});event.currentTarget.reset();status.textContent='Provider added.';status.className='status success';await refreshAll()}catch(e){status.textContent=e.message;status.className='status error'}finally{setBusy(buttonEl,false)}}",
-              "async function addProvider(event){event.preventDefault();const status=document.querySelector('#provider-status'),buttonEl=event.currentTarget.querySelector('button[type=submit]');setBusy(buttonEl,true,'Adding…');try{await api('/admin/providers',{method:'POST',body:JSON.stringify({displayName:document.querySelector('#provider-name').value,baseUrl:document.querySelector('#provider-url').value,apiStyle:document.querySelector('#provider-style').value,serviceTier:document.querySelector('#provider-tier').value.trim()||undefined})});event.currentTarget.reset();status.textContent='Provider added.';status.className='status success';await refreshAll()}catch(e){status.textContent=e.message;status.className='status error'}finally{setBusy(buttonEl,false)}}")
-          patch('src/admin/page.ts',
-              "async function providerAction(btn){const id=btn.dataset.id,p=providerMeta(id);if(btn.dataset.providerAction==='delete'){if(!confirm('Remove '+p.displayName+'?'))return;try{await api('/admin/providers/'+encodeURIComponent(id),{method:'DELETE',body:'{}'});await refreshAll()}catch(e){alert(e.message)}return}const name=prompt('Display name',p.displayName);if(name===null)return;const baseUrl=prompt('Base URL',p.baseUrl||'');if(baseUrl===null)return;const apiStyle=prompt('API style: chat-completions or responses',p.apiStyle);if(apiStyle===null)return;try{await api('/admin/providers/'+encodeURIComponent(id),{method:'PATCH',body:JSON.stringify({displayName:name,baseUrl,apiStyle})});await refreshAll()}catch(e){alert(e.message)}}",
-              "async function providerAction(btn){const id=btn.dataset.id,p=providerMeta(id);if(btn.dataset.providerAction==='delete'){if(!confirm('Remove '+p.displayName+'?'))return;try{await api('/admin/providers/'+encodeURIComponent(id),{method:'DELETE',body:'{}'});await refreshAll()}catch(e){alert(e.message)}return}const name=prompt('Display name',p.displayName);if(name===null)return;const baseUrl=prompt('Base URL',p.baseUrl||'');if(baseUrl===null)return;const apiStyle=prompt('API style: chat-completions or responses',p.apiStyle);if(apiStyle===null)return;const serviceTier=prompt('Service tier (optional, e.g. flex)',p.serviceTier||'');if(serviceTier===null)return;try{await api('/admin/providers/'+encodeURIComponent(id),{method:'PATCH',body:JSON.stringify({displayName:name,baseUrl,apiStyle,serviceTier})});await refreshAll()}catch(e){alert(e.message)}}")
-          patch('src/admin/page.ts',
-              "async function saveManualModel(event){event.preventDefault();const form=event.currentTarget,status=form.querySelector('.status'),buttonEl=form.querySelector('button');setBusy(buttonEl,true,'Saving…');try{await api('/admin/providers/'+encodeURIComponent(form.dataset.manualModel)+'/models',{method:'POST',body:JSON.stringify({id:form.id.value,contextWindow:form.contextWindow.value||undefined,maxOutputTokens:form.maxOutputTokens.value||undefined})});status.textContent='Model saved.';status.className='status success';form.reset();await refreshAll()}catch(e){status.textContent=e.message;status.className='status error'}finally{setBusy(buttonEl,false)}}",
-              "async function saveManualModel(event){event.preventDefault();const form=event.currentTarget,status=form.querySelector('.status'),buttonEl=form.querySelector('button');setBusy(buttonEl,true,'Saving…');try{await api('/admin/providers/'+encodeURIComponent(form.dataset.manualModel)+'/models',{method:'POST',body:JSON.stringify({id:form.id.value,contextWindow:form.contextWindow.value||undefined,maxOutputTokens:form.maxOutputTokens.value||undefined,tools:form.tools.value===''?undefined:form.tools.value==='true',reasoning:form.reasoning.value===''?undefined:form.reasoning.value==='true'})});status.textContent='Model saved.';status.className='status success';form.reset();await refreshAll()}catch(e){status.textContent=e.message;status.className='status error'}finally{setBusy(buttonEl,false)}}")
-
-          # Fresh installer contract only; update path/data preservation stays untouched.
-          for old, new in [
-              ('default = @{ provider = "zen"; model = "deepseek-v4-flash-free"; context = 200000 }', 'default = @{ provider = "chatgpt"; model = "gpt-5.6-luna"; context = 1000000 }'),
-              ('fable = @{ provider = "chatgpt"; model = "gpt-5.6-terra"; context = 850000 }', 'fable = @{ provider = "chatgpt"; model = "gpt-5.6-luna"; context = 1000000 }'),
-              ('sonnet = @{ provider = "google"; model = "gemini-3.5-flash-lite"; context = 850000 }', 'sonnet = @{ provider = "google"; model = "gemini-3.5-flash-lite"; context = 1000000 }'),
-              ('haiku = @{ provider = "google"; model = "gemini-3.5-flash-lite"; context = 850000 }', 'haiku = @{ provider = "google"; model = "gemini-3.5-flash-lite"; context = 1000000 }'),
-              ('fresh-install $slot route does not match the Session 4.5 capability contract.', 'fresh-install $slot route does not match the current default routing contract.'),
-              ('[OK] Fresh defaults: DeepSeek 200K / Terra 850K / DeepSeek 200K / Gemini 850K / Gemini 850K', '[OK] Fresh defaults: Luna 1M / Luna 1M / DeepSeek 200K / Gemini 1M / Gemini 1M'),
-          ]:
-              patch('install.ps1', old, new)
-
-          # Client-context smoke verifier: labels/defaults change, while generous threshold still catches 200K fallback.
-          for old, new in [
-              ('["default/deepseek-free", configured.ANTHROPIC_MODEL, 0, 250000]', '["default/luna", configured.ANTHROPIC_MODEL, 850000, Infinity]'),
-              ('["fable/terra", configured.ANTHROPIC_DEFAULT_FABLE_MODEL, 850000, Infinity]', '["fable/luna", configured.ANTHROPIC_DEFAULT_FABLE_MODEL, 850000, Infinity]'),
-          ]:
-              patch('scripts/verify-claude-code-context.mjs', old, new)
-
-          # Model-config focused expectations.
-          patch('tests/model-config.test.ts', 'test("fresh routing uses DeepSeek Default/Opus, Terra Fable, and Gemini Flash-Lite Sonnet/Haiku"', 'test("fresh routing uses Luna Default/Fable, DeepSeek Opus, and Gemini Flash-Lite Sonnet/Haiku"')
-          patch('tests/model-config.test.ts', 'assert.deepEqual(config.routes.default, { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: 128000 });', 'assert.deepEqual(config.routes.default, { provider: "chatgpt", model: "gpt-5.6-luna", maxOutputTokens: 128000 });')
-          patch('tests/model-config.test.ts', 'assert.deepEqual(config.routes.fable, { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 });', 'assert.deepEqual(config.routes.fable, { provider: "chatgpt", model: "gpt-5.6-luna", maxOutputTokens: 128000 });', expected=1)
-          patch('tests/model-config.test.ts', '''  assert.equal(config.contextWindow, 850000);
-          assert.equal(contextWindowForRoute(config, "default"), 200000);
-          assert.equal(contextWindowForRoute(config, "fable"), 850000);
-          assert.equal(contextWindowForRoute(config, "opus"), 200000);
-          assert.equal(contextWindowForRoute(config, "sonnet"), 850000);
-          assert.equal(contextWindowForRoute(config, "haiku"), 850000);''', '''  assert.equal(config.contextWindow, 1000000);
-          assert.equal(contextWindowForRoute(config, "default"), 1000000);
-          assert.equal(contextWindowForRoute(config, "fable"), 1000000);
-          assert.equal(contextWindowForRoute(config, "opus"), 200000);
-          assert.equal(contextWindowForRoute(config, "sonnet"), 1000000);
-          assert.equal(contextWindowForRoute(config, "haiku"), 1000000);''')
-          patch('tests/model-config.test.ts', 'assert.equal(claudeCodeModelAlias(config, "default"), "claude-opus-4-8");', 'assert.equal(claudeCodeModelAlias(config, "default"), "claude-opus-4-8[1m]");')
-          patch('tests/model-config.test.ts', 'assert.equal(models.slotForRequestedModel("claude-opus-4-8"), "default");', 'assert.equal(models.slotForRequestedModel("claude-opus-4-8[1m]"), "default");')
-          patch('tests/model-config.test.ts', '  assert.equal(models.snapshot().routes.sonnet.model, "gemini-3.6-flash");', '  assert.equal(models.snapshot().contextWindow, 850000);\n  assert.equal(models.snapshot().routes.sonnet.model, "gemini-3.6-flash");')
-
-          # Session 4.5 regression suite: keep verified DeepSeek 200K, move fresh long routes to 1M, and verify custom request defaults end-to-end.
-          for old, new in [
-              ('contextWindowForRoute(c,"default",f.providers),200_000', 'contextWindowForRoute(c,"default",f.providers),1_000_000'),
-              ('contextWindowForRoute(c,"fable",f.providers),850_000', 'contextWindowForRoute(c,"fable",f.providers),1_000_000'),
-              ('contextWindowForRoute(c,"sonnet",f.providers),850_000', 'contextWindowForRoute(c,"sonnet",f.providers),1_000_000'),
-              ('contextWindowForRoute(c,"haiku",f.providers),850_000', 'contextWindowForRoute(c,"haiku",f.providers),1_000_000'),
-              ('metadata(p.id,"unknown")?.contextWindow,200000', 'metadata(p.id,"unknown")?.contextWindow,1000000'),
-              ('assert.equal(result[1].contextWindow,200000)', 'assert.equal(result[1].contextWindow,1000000)'),
-          ]:
-              patch('tests/session45.test.ts', old, new)
-          patch('tests/session45.test.ts',
-              'test("DeepSeek Default enforces the recorded 200K effective context before upstream dispatch",async()=>{const f=await fixture();await f.store.createApiKey({id:"z1",provider:"zen",apiKey:"secret"});let calls=0;',
-              'test("DeepSeek route enforces the recorded 200K effective context before upstream dispatch",async()=>{const f=await fixture();await f.store.createApiKey({id:"z1",provider:"zen",apiKey:"secret"});const cfg=f.models.snapshot();cfg.routes.default={provider:"zen",model:"deepseek-v4-flash-free",maxOutputTokens:128000};await f.models.update(cfg);let calls=0;')
-          patch('tests/session45.test.ts',
-              'body:JSON.stringify({displayName:"Admin Custom",baseUrl:"https://custom.invalid/v1",apiStyle:"responses"})',
-              'body:JSON.stringify({displayName:"Admin Custom",baseUrl:"https://custom.invalid/v1",apiStyle:"responses",serviceTier:"flex"})')
-          patch('tests/session45.test.ts',
-              'body:JSON.stringify({id:"manual",contextWindow:444000,maxOutputTokens:22222})',
-              'body:JSON.stringify({id:"manual",contextWindow:444000,maxOutputTokens:22222,tools:true,reasoning:true})')
-          patch('tests/session45.test.ts',
-              'assert.equal(publicProvider.baseUrl,"https://custom2.invalid/v1");assert.equal(publicProvider.models[0].contextWindow,444000);',
-              'assert.equal(publicProvider.baseUrl,"https://custom2.invalid/v1");assert.equal(publicProvider.serviceTier,"flex");assert.equal(publicProvider.models[0].contextWindow,444000);assert.equal(publicProvider.models[0].tools,true);assert.equal(publicProvider.models[0].reasoning,true);')
-          focused = '''test("custom provider service tier and capabilities reach the production request body",async()=>{const f=await fixture();const p=await f.providers.createCustom({displayName:"DeepInfra",baseUrl:"https://api.deepinfra.com/v1/openai",apiStyle:"chat-completions",serviceTier:"flex"});await f.providers.upsertManualModel(p.id,{id:"deepinfra/model",maxOutputTokens:32000,tools:true,reasoning:true});const meta=f.providers.metadata(p.id,"deepinfra/model");assert.equal(meta?.contextWindow,1_000_000);assert.equal(meta?.capabilities.tools,true);assert.equal(meta?.capabilities.reasoning,true);assert.deepEqual(f.providers.requestBodyDefaults(p.id),{service_tier:"flex"});await f.store.createApiKey({id:"di1",provider:p.id,apiKey:"secret"});const cfg=f.models.snapshot();cfg.routes.sonnet={provider:p.id,model:"deepinfra/model",maxOutputTokens:32000};await f.models.update(cfg);let captured:any;const server=createReplicatedServer(f.store,f.models,{bindHost:"127.0.0.1",providerRegistry:f.providers,clientFactory:()=>({chat:{completions:{create:async(req:any)=>{captured=req;return{id:"ok",choices:[{message:{content:"done"},finish_reason:"stop"}],usage:{prompt_tokens:1,completion_tokens:1}};}}}})});const base=await listen(server);try{const response=await fetch(base+"/v1/messages",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({model:"sonnet",max_tokens:32,tools:[{name:"lookup",input_schema:{type:"object",properties:{}}}],messages:[{role:"user",content:"use tool if needed"}]})});assert.equal(response.status,200);assert.equal(captured.model,"deepinfra/model");assert.equal(captured.service_tier,"flex");assert.equal(captured.tools[0].type,"function");}finally{await close(server);}});
-
-'''
-          patch('tests/session45.test.ts', 'test("custom Responses provider runs through the production dispatcher with tools and streaming"', focused + 'test("custom Responses provider runs through the production dispatcher with tools and streaming"')
-
-          # Other focused tests locked to the old fresh defaults/UI carrier.
-          patch('tests/provider-registry.test.ts', 'assert.equal(sonnet.max_input_tokens, 850000);', 'assert.equal(sonnet.max_input_tokens, 1000000);')
-          patch('tests/provider-registry.test.ts', 'assert.equal(haiku.max_input_tokens, 850000);', 'assert.equal(haiku.max_input_tokens, 1000000);')
-          patch('tests/claude-desktop.test.ts', 'assert.equal(profile.inferenceModels.some((model: any) => model.supports1m === true), false);', 'assert.equal(profile.inferenceModels.some((model: any) => model.supports1m === true), true);\n  assert.equal(profile.inferenceModels.find((model: any) => model.name === claudeCodeModelAlias(config, "default"))?.supports1m, true);')
-          patch('tests/admin-ui.test.ts', 'assert.match(f.html, /Tools: <strong>/);', 'assert.match(f.html, /Tools: <strong>/);\n    assert.match(f.html, /Reasoning: <strong>/);\n    assert.match(f.html, /id="provider-tier"/);\n    assert.match(f.html, /name="tools"/);\n    assert.match(f.html, /name="reasoning"/);\n    assert.match(f.html, /defaults 1000000/);')
-          patch('tests/admin-ui.test.ts', 'assert.equal(state.modelConfig.routes.fable.model, "gpt-5.6-terra");', 'assert.equal(state.modelConfig.routes.fable.model, "gpt-5.6-luna");')
-          patch('tests/admin-ui.test.ts', 'assert.equal(publicJson.includes("gpt-5.6-terra"), false);', 'assert.equal(publicJson.includes("gpt-5.6-luna"), false);')
-
-          patch('tests/install-bootstrap.test.ts', 'test("fresh-install verification enforces Session 4.5 defaults and route-specific context"', 'test("fresh-install verification enforces current defaults and route-specific context"')
-          for old, new in [
-              ('/default = @\\{ provider = "zen"; model = "deepseek-v4-flash-free"; context = 200000 \\}/', '/default = @\\{ provider = "chatgpt"; model = "gpt-5\\.6-luna"; context = 1000000 \\}/'),
-              ('/fable = @\\{ provider = "chatgpt"; model = "gpt-5\\.6-terra"; context = 850000 \\}/', '/fable = @\\{ provider = "chatgpt"; model = "gpt-5\\.6-luna"; context = 1000000 \\}/'),
-              ('/sonnet = @\\{ provider = "google"; model = "gemini-3\\.5-flash-lite"; context = 850000 \\}/', '/sonnet = @\\{ provider = "google"; model = "gemini-3\\.5-flash-lite"; context = 1000000 \\}/'),
-              ('/haiku = @\\{ provider = "google"; model = "gemini-3\\.5-flash-lite"; context = 850000 \\}/', '/haiku = @\\{ provider = "google"; model = "gemini-3\\.5-flash-lite"; context = 1000000 \\}/'),
-          ]:
-              patch('tests/install-bootstrap.test.ts', old, new)
-
-          # Temporary workflow removes itself; final branch contains only product/test changes.
-          Path('.github/workflows/apply-final-surgical-fix.yml').unlink()
-
-      - name: Commit patched branch
-        shell: bash
+          python-version: "3.12"
+      - name: Apply surgical patch
+        run: python scripts/apply-final-surgical-fix.py
+      - name: Commit final branch
         run: |
           git config user.name "openai-cc-maintenance"
           git config user.email "actions@users.noreply.github.com"
