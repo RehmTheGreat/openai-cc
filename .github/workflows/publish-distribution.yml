@@ -67,7 +67,7 @@ jobs:
           $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $env:PUBLISH_DIR ([string]$manifest.bundleUrl)))
           try {
             foreach ($entry in $zip.Entries) {
-              $name = $entry.FullName.Replace('\\','/').ToLowerInvariant()
+              $name = $entry.FullName.Replace('\','/').ToLowerInvariant()
               foreach ($needle in @(".data/", "accounts.json", "providers.json", "model-config.json", "auth.json", ".env", ".git/")) {
                 if ($name -eq $needle -or $name.StartsWith($needle) -or $name.EndsWith("/$needle")) {
                   throw "Forbidden persistent/provider state in distributable runtime: $($entry.FullName)"
@@ -78,3 +78,65 @@ jobs:
 
       - name: Publish to private Backblaze B2 bucket
         run: node distribution/b2/publish-release.mjs "${{ env.PUBLISH_DIR }}"
+
+  publish-macos-arm64-runtime:
+    runs-on: macos-14
+    timeout-minutes: 25
+    env:
+      B2_PUBLISH_KEY_ID: ${{ secrets.B2_PUBLISH_KEY_ID }}
+      B2_PUBLISH_KEY: ${{ secrets.B2_PUBLISH_KEY }}
+      B2_BUCKET_ID: ${{ vars.B2_BUCKET_ID }}
+    steps:
+      - name: Require hard-free distribution configuration
+        run: |
+          test -n "$B2_PUBLISH_KEY_ID" || { echo "Missing B2_PUBLISH_KEY_ID" >&2; exit 1; }
+          test -n "$B2_PUBLISH_KEY" || { echo "Missing B2_PUBLISH_KEY" >&2; exit 1; }
+          test -n "$B2_BUCKET_ID" || { echo "Missing B2_BUCKET_ID" >&2; exit 1; }
+
+      - name: Checkout exact selected source commit
+        uses: actions/checkout@v4
+
+      - name: Require native Apple Silicon runner
+        run: |
+          test "$(uname -s)" = "Darwin"
+          test "$(uname -m)" = "arm64"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Test exact build identity
+        run: |
+          export OPENAI_CC_SOURCE_SHA="$(git rev-parse HEAD)"
+          export OPENAI_CC_BUILD_TIME="$(git show -s --format=%cI HEAD)"
+          npm test
+          node -e 'const b=require("./dist/build-info.json");if(b.buildSha!==process.env.OPENAI_CC_SOURCE_SHA)process.exit(1)'
+
+      - name: Prune development dependencies
+        run: npm prune --omit=dev --no-audit --no-fund
+
+      - name: Build deterministic darwin-arm64 runtime
+        run: |
+          out="$RUNNER_TEMP/openai-cc-b2-publish-mac"
+          node scripts/build-runtime-bundle-macos.mjs --output "$out"
+          node - "$out/openai-cc-runtime-manifest-darwin-arm64.json" <<'NODE'
+          const fs=require("node:fs"),p=require("node:path");
+          const m=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));
+          if(m.platform!=="darwin-arm64"||!fs.existsSync(p.join(p.dirname(process.argv[2]),m.bundleUrl)))process.exit(1);
+          NODE
+          echo "PUBLISH_DIR=$out" >> "$GITHUB_ENV"
+
+      - name: Verify no persistent user state is distributable
+        run: |
+          bundle="$(node -e 'const p=require("node:path"),m=require(process.argv[1]);process.stdout.write(p.join(p.dirname(process.argv[1]),m.bundleUrl))' "$PUBLISH_DIR/openai-cc-runtime-manifest-darwin-arm64.json")"
+          if unzip -Z1 "$bundle" | tr '[:upper:]' '[:lower:]' | grep -E '(^|/)(\.data|accounts\.json|providers\.json|model-config\.json|auth\.json|\.env|\.git)(/|$)'; then
+            echo "Forbidden persistent/provider state in macOS runtime" >&2
+            exit 1
+          fi
+
+      - name: Publish darwin-arm64 files to private Backblaze B2 bucket
+        run: node distribution/b2/publish-release.mjs "$PUBLISH_DIR" --platform darwin-arm64

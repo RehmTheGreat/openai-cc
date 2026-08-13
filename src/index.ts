@@ -6,6 +6,7 @@ import { configureClaudeDesktop } from "./claude-desktop.js";
 import { Dispatcher } from "./dispatcher.js";
 import { ModelConfigStore } from "./model-config.js";
 import { ProviderRegistry } from "./provider-registry.js";
+import { watchManagedRuntimeSwap } from "./runtime-swap.js";
 
 const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || 8082);
@@ -64,6 +65,7 @@ const shutdown = (): void => {
 };
 process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);
+watchManagedRuntimeSwap(shutdown);
 
 function safePath(url: string | undefined, hostHeader: string | undefined): string {
   try { return new URL(url ?? "/", `http://${hostHeader ?? "127.0.0.1"}`).pathname; }

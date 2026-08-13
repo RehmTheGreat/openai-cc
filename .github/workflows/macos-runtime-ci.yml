@@ -1,0 +1,82 @@
+name: macOS ARM64 Runtime CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-arm64-runtime:
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Require native Apple Silicon runner
+        run: |
+          test "$(uname -s)" = "Darwin"
+          test "$(uname -m)" = "arm64"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install and test exact source
+        run: |
+          npm ci --no-audit --no-fund
+          export OPENAI_CC_SOURCE_SHA="$(git rev-parse HEAD)"
+          export OPENAI_CC_BUILD_TIME="$(git show -s --format=%cI HEAD)"
+          npm test
+          node -e 'const b=require("./dist/build-info.json"); if(b.buildSha!==process.env.OPENAI_CC_SOURCE_SHA) process.exit(1)'
+
+      - name: Parse native scripts
+        run: |
+          bash -n install.sh
+          bash -n run-gateway.sh
+          bash -n run-claude.sh
+          node --check install-macos.mjs
+          node --check scripts/build-runtime-bundle-macos.mjs
+          test -f distribution/b2/new-mac-client-installer.ps1
+
+      - name: Build production darwin-arm64 bundle
+        run: |
+          npm prune --omit=dev --no-audit --no-fund
+          out="$RUNNER_TEMP/openai-cc-mac-bundle"
+          node scripts/build-runtime-bundle-macos.mjs --output "$out"
+          echo "BUNDLE_DIR=$out" >> "$GITHUB_ENV"
+
+      - name: Reject persistent state in bundle
+        run: |
+          manifest="$BUNDLE_DIR/openai-cc-runtime-manifest-darwin-arm64.json"
+          bundle="$(node -e 'const p=require("node:path"),m=require(process.argv[1]);process.stdout.write(p.join(p.dirname(process.argv[1]),m.bundleUrl))' "$manifest")"
+          if unzip -Z1 "$bundle" | tr '[:upper:]' '[:lower:]' | grep -E '(^|/)(\.data|accounts\.json|providers\.json|model-config\.json|auth\.json|\.env|\.git)(/|$)'; then
+            echo "Forbidden persistent/provider state in macOS runtime" >&2
+            exit 1
+          fi
+
+      - name: Fresh install from bundle only
+        run: |
+          root="$RUNNER_TEMP/OpenAI-CC-mac-target"
+          manifest="$BUNDLE_DIR/openai-cc-runtime-manifest-darwin-arm64.json"
+          bundle="$(node -e 'const p=require("node:path"),m=require(process.argv[1]);process.stdout.write(p.join(p.dirname(process.argv[1]),m.bundleUrl))' "$manifest")"
+          bash "$BUNDLE_DIR/install.sh" --manifest "$manifest" --bundle "$bundle" --install-root "$root" --skip-desktop-config --no-launch-agent
+          test -f "$root/current/runtime-manifest.json"
+          test -f "$root/.data/model-config.json"
+          test -f "$root/install-state.json"
+          curl -fsS http://127.0.0.1:8082/healthz
+          echo "INSTALL_ROOT=$root" >> "$GITHUB_ENV"
+
+      - name: Reinstall preserves target-local data
+        run: |
+          printf '%s\n' 'mac-persistence-marker' > "$INSTALL_ROOT/.data/mac-ci-marker.txt"
+          manifest="$BUNDLE_DIR/openai-cc-runtime-manifest-darwin-arm64.json"
+          bundle="$(node -e 'const p=require("node:path"),m=require(process.argv[1]);process.stdout.write(p.join(p.dirname(process.argv[1]),m.bundleUrl))' "$manifest")"
+          bash "$BUNDLE_DIR/install.sh" --manifest "$manifest" --bundle "$bundle" --install-root "$INSTALL_ROOT" --skip-desktop-config --no-launch-agent
+          test "$(cat "$INSTALL_ROOT/.data/mac-ci-marker.txt")" = "mac-persistence-marker"
+          curl -fsS http://127.0.0.1:8082/admin >/dev/null
