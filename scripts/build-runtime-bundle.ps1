@@ -29,8 +29,6 @@ if (-not $appVersion) { throw "package.json version is missing." }
 if ($sourceCommit -notmatch '^[0-9a-fA-F]{40}$') { throw "A real 40-character source commit SHA is required; got '$sourceCommit'. Set OPENAI_CC_SOURCE_SHA before npm run build." }
 try { $fixedTime = [DateTimeOffset]::Parse($buildTimestamp).UtcDateTime } catch { throw "Invalid build timestamp '$buildTimestamp'." }
 
-# The runtime artifact must contain production dependencies only. This catches
-# accidental developer bundles before anything is published.
 foreach ($property in $packageJson.devDependencies.PSObject.Properties) {
   $relative = $property.Name.Replace('/', [IO.Path]::DirectorySeparatorChar)
   if (Test-Path (Join-Path $nodeModules $relative)) {
@@ -70,23 +68,18 @@ function Write-Utf8NoBom([string]$PathValue, [string]$Text) {
 }
 
 try {
-  # Explicit allowlist: no source tree, tests, Git metadata, .data, developer
-  # provider files, API keys, OAuth material, or build-machine model config.
   Copy-RuntimeItem "dist\src"
   Copy-RuntimeItem "dist\build-info.json"
   Copy-RuntimeItem "dist\scripts\configure-clients.js"
   Copy-RuntimeItem "dist\scripts\codex-doctor.js"
   Copy-RuntimeItem "dist\scripts\migrate-data.js"
   Copy-RuntimeItem "node_modules"
-  # package.json is required at runtime because the compiled .js tree relies on
-  # its `type: module`; package-lock.json is intentionally not bundled.
   Copy-RuntimeItem "package.json"
   Copy-RuntimeItem "run-gateway.ps1"
+  Copy-RuntimeItem "run-gateway.vbs"
   Copy-RuntimeItem "run-claude.ps1"
   Copy-RuntimeItem "uninstall.ps1"
 
-  # Source maps and npm's install-state lock are useful for development/install
-  # bookkeeping, not for executing the already-built runtime.
   Get-ChildItem -Path (Join-Path $stage "dist") -File -Filter "*.map" -Recurse -ErrorAction SilentlyContinue |
     Remove-Item -Force
   Remove-Item (Join-Path $stage "node_modules\.package-lock.json") -Force -ErrorAction SilentlyContinue
@@ -120,8 +113,6 @@ try {
   $internalManifestFile = Join-Path $stage "runtime-manifest.json"
   Write-Utf8NoBom $internalManifestFile (($internalManifest | ConvertTo-Json -Depth 8) + "`n")
 
-  # Normalize staged timestamps so developer-machine file mtimes do not become
-  # part of the runtime identity.
   Get-ChildItem -Path $stage -Recurse -Force | ForEach-Object { $_.LastWriteTimeUtc = $fixedTime }
   (Get-Item $stage).LastWriteTimeUtc = $fixedTime
 
@@ -137,7 +128,28 @@ try {
 
   $bootstrapSource = Join-Path $RepoRoot "install.ps1"
   $bootstrapOutput = Join-Path $OutputDirectory "install.ps1"
-  Copy-Item $bootstrapSource $bootstrapOutput -Force
+  $bootstrap = Get-Content $bootstrapSource -Raw
+
+  $oldShortcut = @'
+  $shortcut.TargetPath = (Get-Command powershell.exe).Source
+  $launcher = Join-Path $script:CurrentRuntime "run-gateway.ps1"
+  $shortcut.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`" -InstallRoot `"$script:ManagedRoot`""
+'@
+  $newShortcut = @'
+  $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+  if (-not (Test-Path $wscript)) { throw "Windows Script Host is unavailable; cannot install silent startup launcher." }
+  $shortcut.TargetPath = $wscript
+  $launcher = Join-Path $script:CurrentRuntime "run-gateway.vbs"
+  $shortcut.Arguments = "`"$launcher`""
+'@
+  if (-not $bootstrap.Contains($oldShortcut)) { throw "Bootstrap startup-shortcut template changed unexpectedly; refusing to emit a partially patched installer." }
+  $bootstrap = $bootstrap.Replace($oldShortcut, $newShortcut)
+
+  $oldRequired = '@("dist\src\index.js", "dist\scripts\configure-clients.js", "dist\scripts\codex-doctor.js", "node_modules", "run-gateway.ps1", "run-claude.ps1", "uninstall.ps1")'
+  $newRequired = '@("dist\src\index.js", "dist\scripts\configure-clients.js", "dist\scripts\codex-doctor.js", "node_modules", "run-gateway.ps1", "run-gateway.vbs", "run-claude.ps1", "uninstall.ps1")'
+  if (-not $bootstrap.Contains($oldRequired)) { throw "Bootstrap required-runtime template changed unexpectedly; refusing to omit the silent launcher from verification." }
+  $bootstrap = $bootstrap.Replace($oldRequired, $newRequired)
+  Write-Utf8NoBom $bootstrapOutput $bootstrap
   $bootstrapSha256 = Get-Sha256 $bootstrapOutput
 
   if (-not $BundleUrl) { $BundleUrl = $bundleName }
