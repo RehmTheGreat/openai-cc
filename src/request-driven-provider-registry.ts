@@ -31,4 +31,10 @@ export class RequestDrivenProviderRegistry extends ProviderRegistry {
       })),
     } : provider);
   }
+
+  override requestBodyDefaults(provider: ProviderKind): Record<string, unknown> {
+    const defaults = super.requestBodyDefaults(provider);
+    if (this.definition(provider).custom) return defaults;
+    return { ...defaults, reasoning_effort: undefined };
+  }
 }
