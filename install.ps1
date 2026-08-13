@@ -396,20 +396,20 @@ function Verify-Installation([object]$Distribution, [object]$InternalManifest, [
 
   if ($script:FreshModelConfig) {
     $expected = @{
-      default = @{ provider = "zen"; model = "deepseek-v4-flash-free"; context = 200000 }
-      fable = @{ provider = "chatgpt"; model = "gpt-5.6-terra"; context = 850000 }
+      default = @{ provider = "chatgpt"; model = "gpt-5.6-luna"; context = 1000000 }
+      fable = @{ provider = "chatgpt"; model = "gpt-5.6-luna"; context = 1000000 }
       opus = @{ provider = "zen"; model = "deepseek-v4-flash-free"; context = 200000 }
-      sonnet = @{ provider = "google"; model = "gemini-3.5-flash-lite"; context = 850000 }
-      haiku = @{ provider = "google"; model = "gemini-3.5-flash-lite"; context = 850000 }
+      sonnet = @{ provider = "google"; model = "gemini-3.5-flash-lite"; context = 1000000 }
+      haiku = @{ provider = "google"; model = "gemini-3.5-flash-lite"; context = 1000000 }
     }
     foreach ($slot in $expected.Keys) {
       $route = $state.modelConfig.routes.PSObject.Properties[$slot].Value
       $routeHealth = $state.routeHealth.PSObject.Properties[$slot].Value
       if ([string]$route.provider -ne [string]$expected[$slot].provider -or [string]$route.model -ne [string]$expected[$slot].model -or [int64]$routeHealth.contextWindow -ne [int64]$expected[$slot].context) {
-        throw "Verification failed: fresh-install $slot route does not match the Session 4.5 capability contract."
+        throw "Verification failed: fresh-install $slot route does not match the current default routing contract."
       }
     }
-    Write-Host "[OK] Fresh defaults: DeepSeek 200K / Terra 850K / DeepSeek 200K / Gemini 850K / Gemini 850K" -ForegroundColor Green
+    Write-Host "[OK] Fresh defaults: Luna 1M / Luna 1M / DeepSeek 200K / Gemini 1M / Gemini 1M" -ForegroundColor Green
   }
 
   if ($PreDataFingerprint) {

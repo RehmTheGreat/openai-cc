@@ -92,7 +92,7 @@ export function claudeDesktopProfile(baseUrl: string, config: ModelConfig, provi
     return {
       name: info.id,
       labelOverride: info.display_name,
-      ...(info.max_input_tokens >= 1000000 ? { supports1m: true } : {}),
+      ...(info.max_input_tokens > 200000 ? { supports1m: true } : {}),
     };
   });
 

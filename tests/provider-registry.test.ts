@@ -106,8 +106,8 @@ test("Claude-facing model discovery keeps aliases clean while retaining route-sp
   assert.doesNotMatch(visible, /OpenAI-CC|gpt-5\.6-terra|deepseek-v4-flash-free|gemma-4-26b|cloudflare/i);
   const sonnet = list.data.find((model) => model.display_name === "Sonnet")!;
   const haiku = list.data.find((model) => model.display_name === "Haiku")!;
-  assert.equal(sonnet.max_input_tokens, 850000);
-  assert.equal(haiku.max_input_tokens, 850000);
+  assert.equal(sonnet.max_input_tokens, 1000000);
+  assert.equal(haiku.max_input_tokens, 1000000);
   assert.equal(sonnet.max_tokens, 65536);
   assert.equal((sonnet.capabilities.image_input as any).supported, true);
   store.close();

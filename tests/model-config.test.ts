@@ -19,11 +19,11 @@ async function fixture() {
   return { root, accounts, models };
 }
 
-test("fresh routing uses DeepSeek Default/Opus, Terra Fable, and Gemini Flash-Lite Sonnet/Haiku", async () => {
+test("fresh routing uses Luna Default/Fable, DeepSeek Opus, and Gemini Flash-Lite Sonnet/Haiku", async () => {
   const { accounts, models } = await fixture();
   const config = models.snapshot();
-  assert.deepEqual(config.routes.default, { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: 128000 });
-  assert.deepEqual(config.routes.fable, { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 });
+  assert.deepEqual(config.routes.default, { provider: "chatgpt", model: "gpt-5.6-luna", maxOutputTokens: 128000 });
+  assert.deepEqual(config.routes.fable, { provider: "chatgpt", model: "gpt-5.6-luna", maxOutputTokens: 128000 });
   assert.deepEqual(config.routes.opus, { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: 128000 });
   assert.deepEqual(config.routes.sonnet, { provider: "google", model: "gemini-3.5-flash-lite", maxOutputTokens: 65536 });
   assert.deepEqual(config.routes.haiku, { provider: "google", model: "gemini-3.5-flash-lite", maxOutputTokens: 65536 });
@@ -86,19 +86,19 @@ test("route save rejects unsupported provider, empty model, invalid limits, and 
 test("verified route contexts drive Claude Code capability aliases without over-advertising", async () => {
   const { accounts, models } = await fixture();
   const config = models.snapshot();
-  assert.equal(config.contextWindow, 850000);
-  assert.equal(contextWindowForRoute(config, "default"), 200000);
-  assert.equal(contextWindowForRoute(config, "fable"), 850000);
+  assert.equal(config.contextWindow, 1000000);
+  assert.equal(contextWindowForRoute(config, "default"), 1000000);
+  assert.equal(contextWindowForRoute(config, "fable"), 1000000);
   assert.equal(contextWindowForRoute(config, "opus"), 200000);
-  assert.equal(contextWindowForRoute(config, "sonnet"), 850000);
-  assert.equal(contextWindowForRoute(config, "haiku"), 850000);
+  assert.equal(contextWindowForRoute(config, "sonnet"), 1000000);
+  assert.equal(contextWindowForRoute(config, "haiku"), 1000000);
 
-  assert.equal(claudeCodeModelAlias(config, "default"), "claude-opus-4-8");
+  assert.equal(claudeCodeModelAlias(config, "default"), "claude-opus-4-8[1m]");
   assert.equal(claudeCodeModelAlias(config, "fable"), "claude-fable-5[1m]");
   assert.equal(claudeCodeModelAlias(config, "opus"), "claude-opus-5");
   assert.equal(claudeCodeModelAlias(config, "sonnet"), "claude-sonnet-5");
   assert.equal(claudeCodeModelAlias(config, "haiku"), "claude-opus-4-7[1m]");
-  assert.equal(models.slotForRequestedModel("claude-opus-4-8"), "default");
+  assert.equal(models.slotForRequestedModel("claude-opus-4-8[1m]"), "default");
   assert.equal(models.slotForRequestedModel("claude-fable-5"), "fable");
   assert.equal(models.slotForRequestedModel("claude-sonnet-5"), "sonnet");
   assert.equal(models.slotForRequestedModel("claude-opus-4-7[1m]"), "haiku");
@@ -146,6 +146,7 @@ test("existing user-selected routes survive upgrade unchanged", async () => {
     },
   }));
   const models = new ModelConfigStore(root, accounts); await models.init();
+  assert.equal(models.snapshot().contextWindow, 850000);
   assert.equal(models.snapshot().routes.sonnet.model, "gemini-3.6-flash");
   assert.equal(models.snapshot().routes.sonnet.maxOutputTokens, 32000);
   assert.equal(models.snapshot().routes.haiku.provider, "cloudflare");
