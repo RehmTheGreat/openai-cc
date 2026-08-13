@@ -134,8 +134,9 @@ export class Dispatcher {
         }
 
         const client = this.clientFor(account) as OpenAI;
+        const requestBodyDefaults = this.providers.requestBodyDefaults(account.provider);
         if (upstreamApiFor(account.provider, model, this.providers) === "responses") {
-          const upstream = { ...anthropicToFccResponses(routedBody, toolNames), model };
+          const upstream = { ...anthropicToFccResponses(routedBody, toolNames), model, ...requestBodyDefaults };
           if (body.stream) {
             const stream = await client.responses.create({ ...upstream, stream: true } as any);
             const translator = new AnthropicSseTranslator(body.model, toolNames);
@@ -154,7 +155,7 @@ export class Dispatcher {
           return void json(res, 200, responsesToAnthropic(response, body.model, toolNames));
         }
 
-        const upstream = anthropicToChatCompletions(routedBody, model) as any;
+        const upstream = { ...anthropicToChatCompletions(routedBody, model) as any, ...requestBodyDefaults };
         if (body.stream) {
           const stream = await client.chat.completions.create({ ...upstream, stream: true });
           const translator = new AnthropicChatSseTranslator(body.model);
@@ -275,7 +276,7 @@ function rateLimitCooldownMs(error: any, account: AccountRecord): number | undef
     if (Number.isFinite(date) && date > Date.now()) return date - Date.now();
   }
   const text = `${error?.message ?? ""} ${JSON.stringify(error?.error ?? {})}`;
-  const secondsMatch = text.match(/(?:retry|try again)[^\d]{0,20}(\d+(?:\.\d+)?)\s*s(?:ec(?:ond)?s?)?/i);
+  const secondsMatch = text.match(/(?:retry|try again)[^\d]{0,20}(\d+(?:\.\d+)?)\s*s(?:ec(?:ond)?s)?/i);
   return secondsMatch ? Math.ceil(Number(secondsMatch[1]) * 1000) : undefined;
 }
 
@@ -290,9 +291,9 @@ function sanitizeError(error: unknown): string {
   const value = error as any;
   const raw = value?.error?.message ?? value?.message ?? "The upstream provider rejected the request.";
   return String(raw)
-    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [redacted]")
+    .replace(/\bBearer\s+[^\s,{;]+/gi, "Bearer [redacted]")
     .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, "[redacted]")
-    .replace(/\bAIza[A-Za-z0-9_-]{20,}/g, "[redacted]")
+    .replace(/\bAIza[A-Za-z0-9_-] {20,}/g, "[redacted]")
     .slice(0, 1600);
 }
 
