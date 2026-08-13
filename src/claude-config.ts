@@ -55,7 +55,8 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig, 
 
 async function readJson(file: string): Promise<Record<string, any>> {
   try {
-    const value = JSON.parse(await readFile(file, "utf8"));
+    const text = await readFile(file, "utf8");
+    const value = JSON.parse(text.replace(/^\uFEFF/, ""));
     return isObject(value) ? value as Record<string, any> : {};
   } catch (error: unknown) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
