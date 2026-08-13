@@ -34,12 +34,15 @@ export interface ManualModelDefinition {
   id: string;
   contextWindow?: number;
   maxOutputTokens?: number;
+  tools?: boolean;
+  reasoning?: boolean;
 }
 export interface CustomProviderRecord {
   id: CustomProviderKind;
   displayName: string;
   baseUrl: string;
   apiStyle: CustomProviderApiStyle;
+  serviceTier?: string;
   models: ManualModelDefinition[];
   createdAt: string;
   updatedAt: string;
@@ -54,6 +57,7 @@ export interface PublicProviderDefinition {
   supportsModelDiscovery: boolean;
   models: ManualModelDefinition[];
   baseUrl?: string;
+  serviceTier?: string;
 }
 export interface ProviderDefinition {
   id: ProviderKind;
@@ -70,7 +74,9 @@ const CHATGPT_CAPABILITIES: ModelCapabilities = { text: true, image: true, tools
 const GEMINI_CAPABILITIES: ModelCapabilities = { text: true, image: true, tools: true, streaming: true, reasoning: true };
 const CLOUDFLARE_GEMMA_CAPABILITIES: ModelCapabilities = { text: true, image: true, tools: true, streaming: true, reasoning: true };
 const CUSTOM_CAPABILITIES: ModelCapabilities = { text: true, image: false, tools: false, streaming: true, reasoning: false };
-export const CONSERVATIVE_CUSTOM_CONTEXT_WINDOW = 200_000;
+export const DEFAULT_CUSTOM_CONTEXT_WINDOW = 1_000_000;
+// Backwards-compatible export for callers compiled against the Session 4.5 name.
+export const CONSERVATIVE_CUSTOM_CONTEXT_WINDOW = DEFAULT_CUSTOM_CONTEXT_WINDOW;
 export const CONSERVATIVE_CUSTOM_MAX_OUTPUT_TOKENS = 16_384;
 export const GEMINI_FLASH_LITE_MODEL = "gemini-3.5-flash-lite";
 
@@ -83,6 +89,7 @@ const BUILT_INS: Record<string, ProviderDefinition> = {
 };
 
 const KNOWN_MODELS = new Map<string, KnownModelMetadata>([
+  [modelKey("chatgpt", "gpt-5.6-luna"), { friendlyName: "GPT-5.6 Luna", contextWindow: 1_050_000, maxOutputTokens: 128_000, capabilities: CHATGPT_CAPABILITIES }],
   [modelKey("chatgpt", "gpt-5.6-terra"), { friendlyName: "GPT-5.6 Terra", contextWindow: 1_050_000, capabilities: CHATGPT_CAPABILITIES }],
   [modelKey("zen", "deepseek-v4-flash-free"), { friendlyName: "DeepSeek V4 Flash Free", contextWindow: 200_000, capabilities: { text: true, image: false, tools: true, streaming: true, reasoning: true } }],
   [modelKey("google", GEMINI_FLASH_LITE_MODEL), { friendlyName: "Gemini 3.5 Flash-Lite", contextWindow: 1_048_576, maxOutputTokens: 65_536, capabilities: GEMINI_CAPABILITIES }],
@@ -92,6 +99,8 @@ const KNOWN_MODELS = new Map<string, KnownModelMetadata>([
 ]);
 
 interface ProviderStoreFile { version: 1; providers: CustomProviderRecord[]; }
+
+type CustomProviderInput = { displayName?: string; baseUrl?: string; apiStyle?: string; serviceTier?: unknown; service_tier?: unknown };
 
 export class ProviderRegistry extends EventEmitter {
   private readonly file?: string;
@@ -121,21 +130,23 @@ export class ProviderRegistry extends EventEmitter {
     const custom = this.customProviders.map((record) => ({
       id: record.id, displayName: record.displayName, apiStyle: record.apiStyle, credentialType: "api-key" as const,
       custom: true, requiresAccountId: false, supportsModelDiscovery: true, models: record.models.map((model) => ({ ...model })), baseUrl: record.baseUrl,
+      ...(record.serviceTier ? { serviceTier: record.serviceTier } : {}),
     }));
     return [...built, ...custom];
   }
   getCustom(id: string): CustomProviderRecord | undefined { const value=this.customProviders.find((item)=>item.id===id); return value ? structuredClone(value) : undefined; }
-  async createCustom(input: { displayName?: string; baseUrl?: string; apiStyle?: string }): Promise<CustomProviderRecord> {
-    const now=new Date().toISOString();
-    const record: CustomProviderRecord = { id: this.generateId(), displayName: cleanDisplayName(input.displayName), baseUrl: cleanBaseUrl(input.baseUrl), apiStyle: cleanApiStyle(input.apiStyle), models: [], createdAt: now, updatedAt: now };
+  async createCustom(input: CustomProviderInput): Promise<CustomProviderRecord> {
+    const now=new Date().toISOString(); const serviceTier=cleanServiceTier(input.serviceTier ?? input.service_tier);
+    const record: CustomProviderRecord = { id: this.generateId(), displayName: cleanDisplayName(input.displayName), baseUrl: cleanBaseUrl(input.baseUrl), apiStyle: cleanApiStyle(input.apiStyle), ...(serviceTier?{serviceTier}:{}), models: [], createdAt: now, updatedAt: now };
     this.customProviders.push(record); await this.persist(); this.emit("event", { type: "providers_changed", provider: this.publicFor(record) }); return structuredClone(record);
   }
-  async updateCustom(id: string, input: { displayName?: string; baseUrl?: string; apiStyle?: string }): Promise<CustomProviderRecord> {
+  async updateCustom(id: string, input: CustomProviderInput): Promise<CustomProviderRecord> {
     const record=this.requireCustom(id); const before=structuredClone(record);
     try {
       if (input.displayName !== undefined) record.displayName=cleanDisplayName(input.displayName);
       if (input.baseUrl !== undefined) record.baseUrl=cleanBaseUrl(input.baseUrl);
       if (input.apiStyle !== undefined) record.apiStyle=cleanApiStyle(input.apiStyle);
+      if (input.serviceTier !== undefined || input.service_tier !== undefined) { const serviceTier=cleanServiceTier(input.serviceTier ?? input.service_tier); if(serviceTier)record.serviceTier=serviceTier;else delete record.serviceTier; }
       record.updatedAt=new Date().toISOString(); await this.persist();
     } catch (error) { Object.assign(record,before); throw error; }
     this.emit("event", { type: "providers_changed", provider: this.publicFor(record) }); return structuredClone(record);
@@ -144,11 +155,12 @@ export class ProviderRegistry extends EventEmitter {
     const index=this.customProviders.findIndex((item)=>item.id===id); if(index<0) throw notFound(`Unknown custom provider: ${id}`,"provider_not_found");
     this.customProviders.splice(index,1); await this.persist(); this.emit("event", { type:"providers_changed", providerId:id });
   }
-  async upsertManualModel(id: string, input: { id?: string; contextWindow?: unknown; maxOutputTokens?: unknown }): Promise<ManualModelDefinition> {
+  async upsertManualModel(id: string, input: { id?: string; contextWindow?: unknown; maxOutputTokens?: unknown; tools?: unknown; reasoning?: unknown }): Promise<ManualModelDefinition> {
     const provider=this.requireCustom(id); const modelId=cleanModelId(input.id);
     const contextWindow=optionalInteger(input.contextWindow,"contextWindow",1,10_000_000);
     const maxOutputTokens=optionalInteger(input.maxOutputTokens,"maxOutputTokens",1,1_000_000);
-    const next: ManualModelDefinition = { id:modelId, ...(contextWindow?{contextWindow}:{}), ...(maxOutputTokens?{maxOutputTokens}:{}) };
+    const tools=optionalBoolean(input.tools,"tools"); const reasoning=optionalBoolean(input.reasoning,"reasoning");
+    const next: ManualModelDefinition = { id:modelId, ...(contextWindow?{contextWindow}:{}), ...(maxOutputTokens?{maxOutputTokens}:{}), ...(tools!==undefined?{tools}:{}), ...(reasoning!==undefined?{reasoning}:{}) };
     const index=provider.models.findIndex((model)=>model.id===modelId); if(index>=0) provider.models[index]=next; else provider.models.push(next);
     provider.updatedAt=new Date().toISOString(); await this.persist(); this.emit("event",{type:"providers_changed",provider:this.publicFor(provider)}); return {...next};
   }
@@ -167,11 +179,15 @@ export class ProviderRegistry extends EventEmitter {
     if(!value){ if(definition.requiresAccountId) throw new OpenAICCError(`${definition.displayName} credential is missing its Account ID.`,409,"missing_account_id"); throw new OpenAICCError(`${definition.displayName} does not use an API-key base URL.`,409,"provider_base_url_unavailable"); }
     return value;
   }
+  requestBodyDefaults(provider: ProviderKind): Record<string, unknown> {
+    const custom=this.customProviders.find((item)=>item.id===provider);
+    return custom?.serviceTier ? { service_tier: custom.serviceTier } : {};
+  }
   metadata(provider: ProviderKind, model: string): KnownModelMetadata | undefined {
     const known=KNOWN_MODELS.get(modelKey(provider,model)); if(known) return cloneMetadata(known);
     const custom=this.customProviders.find((item)=>item.id===provider); if(!custom) return undefined;
     const manual=custom.models.find((item)=>item.id===model);
-    return { friendlyName:model, contextWindow:manual?.contextWindow ?? CONSERVATIVE_CUSTOM_CONTEXT_WINDOW, maxOutputTokens:manual?.maxOutputTokens ?? CONSERVATIVE_CUSTOM_MAX_OUTPUT_TOKENS, capabilities:{...CUSTOM_CAPABILITIES} };
+    return { friendlyName:model, contextWindow:manual?.contextWindow ?? DEFAULT_CUSTOM_CONTEXT_WINDOW, maxOutputTokens:manual?.maxOutputTokens ?? CONSERVATIVE_CUSTOM_MAX_OUTPUT_TOKENS, capabilities:{...CUSTOM_CAPABILITIES,tools:manual?.tools ?? CUSTOM_CAPABILITIES.tools,reasoning:manual?.reasoning ?? CUSTOM_CAPABILITIES.reasoning} };
   }
   contextWindow(provider: ProviderKind, model: string): number | undefined { return this.metadata(provider,model)?.contextWindow; }
   maxOutputTokens(provider: ProviderKind, model: string): number | undefined { return this.metadata(provider,model)?.maxOutputTokens; }
@@ -194,7 +210,7 @@ export class ProviderRegistry extends EventEmitter {
     const ids=definition.discovery==="cloudflare-models"?cloudflareModelIds(body):openAiModelIds(body);
     return normalizeDiscovered(account.provider,ids,this);
   }
-  private publicFor(record: CustomProviderRecord): PublicProviderDefinition { return {  id:record.id,displayName:record.displayName,apiStyle:record.apiStyle,credentialType:"api-key",custom:true,requiresAccountId:false,supportsModelDiscovery:true,models:record.models.map((m)=>({...m})),baseUrl:record.baseUrl }; }
+  private publicFor(record: CustomProviderRecord): PublicProviderDefinition { return { id:record.id,displayName:record.displayName,apiStyle:record.apiStyle,credentialType:"api-key",custom:true,requiresAccountId:false,supportsModelDiscovery:true,models:record.models.map((m)=>({...m})),baseUrl:record.baseUrl,...(record.serviceTier?{serviceTier:record.serviceTier}:{}) }; }
   private requireCustom(id:string): CustomProviderRecord { const record=this.customProviders.find((item)=>item.id===id); if(!record) throw notFound(`Unknown custom provider: ${id}`,"provider_not_found"); return record; }
   private generateId(): CustomProviderKind { for(let i=0;i<20;i++){const id=`custom-${randomUUID().replace(/-/g,"").slice(0,12)}` as CustomProviderKind;if(!this.has(id))return id;} throw new OpenAICCError("Could not allocate custom provider id.",500,"provider_id_generation_failed"); }
   private async persist(): Promise<void> { if(!this.file)return; await mkdir(path.dirname(this.file),{recursive:true,mode:0o700}); const tmp=`${this.file}.${process.pid}.tmp`; await writeFile(tmp,`${JSON.stringify({version:1,providers:this.customProviders},null,2)}\n`,{mode:0o600}); await rename(tmp,this.file); }
@@ -235,8 +251,10 @@ function redact(value:string,exactSecret?:string):string{let safe=String(value).
 function cleanDisplayName(value:unknown):string{const name=String(value??"").trim();if(!name)throw new OpenAICCError("Provider display name is required.",400,"provider_name_required");if(name.length>120)throw new OpenAICCError("Provider display name is too long.",400,"provider_name_too_long");return name;}
 function cleanBaseUrl(value:unknown):string{const raw=String(value??"").trim();let url:URL;try{url=new URL(raw);}catch{throw new OpenAICCError("Provider base URL must be a valid HTTP(S) URL.",400,"invalid_provider_base_url");}if(!["http:","https:"].includes(url.protocol)||url.username||url.password||url.search||url.hash)throw new OpenAICCError("Provider base URL must be HTTP(S) without credentials, query parameters, or fragments.",400,"invalid_provider_base_url");return url.toString().replace(/\/+$/,"");}
 function cleanApiStyle(value:unknown):CustomProviderApiStyle{if(value!=="chat-completions"&&value!=="responses")throw new OpenAICCError("API style must be chat-completions or responses.",400,"invalid_api_style");return value;}
+function cleanServiceTier(value:unknown):string|undefined{if(value===undefined||value===null||value==="")return undefined;const tier=String(value).trim();if(!tier)return undefined;if(tier.length>64)throw new OpenAICCError("service_tier is too long.",400,"service_tier_too_long");return tier;}
 function cleanModelId(value:unknown):string{const id=String(value??"").trim();if(!id)throw new OpenAICCError("Model id is required.",400,"model_required");if(id.length>256)throw new OpenAICCError("Model id is too long.",400,"model_too_long");return id;}
 function optionalInteger(value:unknown,name:string,min:number,max:number):number|undefined{if(value===undefined||value===null||value==="")return undefined;const number=Number(value);if(!Number.isInteger(number)||number<min||number>max)throw new OpenAICCError(`${name} must be an integer between ${min} and ${max}.`,400,"invalid_number",{field:name,min,max});return number;}
-function normalizeStoredProvider(raw:any):CustomProviderRecord{const id=String(raw?.id??"");if(!/^custom-[a-f0-9]{12}$/.test(id))throw new OpenAICCError("Stored custom provider has an invalid id.",500,"invalid_provider_store");return{id:id as CustomProviderKind,displayName:cleanDisplayName(raw.displayName),baseUrl:cleanBaseUrl(raw.baseUrl),apiStyle:cleanApiStyle(raw.apiStyle),models:Array.isArray(raw.models)?raw.models.map((m:any)=>({id:cleanModelId(m.id),...(optionalInteger(m.contextWindow,"contextWindow",1,10_000_000)?{contextWindow:Number(m.contextWindow)}:{}),...(optionalInteger(m.maxOutputTokens,"maxOutputTokens",1,1_000_000)?{maxOutputTokens:Number(m.maxOutputTokens)}:{})})):[],createdAt:String(raw.createdAt||new Date(0).toISOString()),updatedAt:String(raw.updatedAt||raw.createdAt||new Date(0).toISOString())};}
+function optionalBoolean(value:unknown,name:string):boolean|undefined{if(value===undefined||value===null||value==="")return undefined;if(typeof value!=="boolean")throw new OpenAICCError(`${name} must be a boolean.`,400,"invalid_boolean",{field:name});return value;}
+function normalizeStoredProvider(raw:any):CustomProviderRecord{const id=String(raw?.id??"");if(!/^custom-[a-f0-9]{12}$/.test(id))throw new OpenAICCError("Stored custom provider has an invalid id.",500,"invalid_provider_store");const serviceTier=cleanServiceTier(raw.serviceTier??raw.service_tier);return{id:id as CustomProviderKind,displayName:cleanDisplayName(raw.displayName),baseUrl:cleanBaseUrl(raw.baseUrl),apiStyle:cleanApiStyle(raw.apiStyle),...(serviceTier?{serviceTier}:{}),models:Array.isArray(raw.models)?raw.models.map((m:any)=>({id:cleanModelId(m.id),...(optionalInteger(m.contextWindow,"contextWindow",1,10_000_000)?{contextWindow:Number(m.contextWindow)}:{}),...(optionalInteger(m.maxOutputTokens,"maxOutputTokens",1,1_000_000)?{maxOutputTokens:Number(m.maxOutputTokens)}:{}),...(optionalBoolean(m.tools,"tools")!==undefined?{tools:Boolean(m.tools)}:{}),...(optionalBoolean(m.reasoning,"reasoning")!==undefined?{reasoning:Boolean(m.reasoning)}:{})})):[],createdAt:String(raw.createdAt||new Date(0).toISOString()),updatedAt:String(raw.updatedAt||raw.createdAt||new Date(0).toISOString())};}
 function modelKey(provider:ProviderKind,model:string):string{return`${provider}:${String(model||"").trim().toLowerCase()}`;}
 function isRecord(value:unknown):value is Record<string,any>{return Boolean(value)&&typeof value==="object"&&!Array.isArray(value);}
