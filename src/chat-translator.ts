@@ -9,6 +9,7 @@ export interface ChatCompletionRequest {
   top_p?: number;
   tools?: any[];
   tool_choice?: any;
+  reasoning_effort?: string;
   stream: boolean;
 }
 
@@ -89,6 +90,7 @@ export function anthropicToChatCompletions(req: AnthropicRequest, model: string)
     top_p: req.top_p,
     tools: tools?.length ? tools : undefined,
     tool_choice: mapToolChoice(req.tool_choice),
+    reasoning_effort: reasoningEffort(req),
     stream: Boolean(req.stream),
   });
 }
@@ -242,6 +244,36 @@ function mapToolChoice(choice: any): any {
   if (choice.type === "any") return "required";
   if (choice.type === "tool" && choice.name) return { type: "function", function: { name: choice.name } };
   return undefined;
+}
+
+function reasoningEffort(req: AnthropicRequest): string | undefined {
+  const raw = req as any;
+  if (raw.thinking?.type === "disabled") return "none";
+  const explicit = normalizeReasoningEffort(raw.output_config?.effort);
+  if (explicit) return explicit;
+  if (raw.thinking?.type === "enabled" || raw.thinking?.type === "adaptive" || positiveNumber(raw.thinking?.budget_tokens)) {
+    const budget = positiveNumber(raw.thinking?.budget_tokens) ? Number(raw.thinking.budget_tokens) : undefined;
+    return budget ? budgetToEffort(budget) : "medium";
+  }
+  return undefined;
+}
+
+function normalizeReasoningEffort(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const effort = value.trim().toLowerCase();
+  return ["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(effort) ? effort : undefined;
+}
+
+function budgetToEffort(tokens: number): "minimal" | "low" | "medium" | "high" | "xhigh" | "max" {
+  if (tokens <= 512) return "minimal";
+  if (tokens <= 1024) return "medium";
+  if (tokens <= 2048) return "high";
+  if (tokens <= 4096) return "xhigh";
+  return "max";
+}
+
+function positiveNumber(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
 function mapStopReason(reason: string | undefined, content: any[]): string {
