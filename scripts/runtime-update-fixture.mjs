@@ -65,6 +65,7 @@ if (mode === "seed") {
   await accounts.prefer(preferredId);
 
   await models.update({
+    contextWindow: 850000,
     routes: {
       default: {
         provider: provider.id,
