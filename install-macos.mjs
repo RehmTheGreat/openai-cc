@@ -237,7 +237,7 @@ try {
   }
 
   let state = await health();
-  if (!state?.ok || resolve(String(state.installRoot || "")) !== installRoot || String(state.buildSha).toLowerCase() !== String(distribution.sourceCommit).toLowerCase()) {
+  if (!state?.ok || resolve(String(state.installRoot || "")) !== installRoot) {
     const stdout = openSync(join(logDir, "gateway.log"), "a");
     const stderr = openSync(join(logDir, "gateway.err.log"), "a");
     const child = spawn("/bin/bash", [join(current, "run-gateway.sh"), "--install-root", installRoot], {
