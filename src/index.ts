@@ -5,7 +5,7 @@ import { configureClaudeCode } from "./claude-config.js";
 import { configureClaudeDesktop } from "./claude-desktop.js";
 import { Dispatcher } from "./dispatcher.js";
 import { ModelConfigStore } from "./model-config.js";
-import { ProviderRegistry } from "./provider-registry.js";
+import { RequestDrivenProviderRegistry } from "./request-driven-provider-registry.js";
 import { watchManagedRuntimeSwap } from "./runtime-swap.js";
 
 const host = process.env.HOST || "127.0.0.1";
@@ -13,7 +13,7 @@ const port = Number(process.env.PORT || 8082);
 const dataDir = process.env.DATA_DIR || ".data";
 const store = new AccountStore(dataDir);
 await store.init();
-const providers = new ProviderRegistry(dataDir);
+const providers = new RequestDrivenProviderRegistry(dataDir);
 await providers.init();
 const modelConfig = new ModelConfigStore(dataDir, store, providers);
 await modelConfig.init();
