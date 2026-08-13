@@ -140,12 +140,34 @@ try {
   foreach ($item in $replacements.GetEnumerator()) { $clientScript = $clientScript.Replace([string]$item.Key, [string]$item.Value) }
   if ($clientScript -match '@@[A-Z0-9_]+@@') { throw "Client installer template still contains unresolved placeholders." }
 
-  $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($clientScript))
+  # Keep the one-file .cmd installer without putting the full PowerShell program
+  # on one Windows command line. The short encoded loader reads the UTF-8 Base64
+  # payload from lines after the marker in this same .cmd file.
+  $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($clientScript))
+  $payloadLines = @()
+  for ($offset = 0; $offset -lt $payload.Length; $offset += 120) {
+    $payloadLines += $payload.Substring($offset, [Math]::Min(120, $payload.Length - $offset))
+  }
+  $loader = @'
+$p=$env:OPENAI_CC_SELF
+$l=[IO.File]::ReadAllLines($p)
+$i=[Array]::IndexOf($l,":__OPENAI_CC_PAYLOAD__")
+if($i -lt 0 -or $i -ge ($l.Length-1)){throw "Installer payload marker is missing."}
+$b=($l[($i+1)..($l.Length-1)] -join "")
+try{$s=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))}catch{throw "Installer payload is corrupt or truncated."}
+&([ScriptBlock]::Create($s))
+exit $LASTEXITCODE
+'@
+  $encodedLoader = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($loader))
+  $launcher = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedLoader"
+  if ($launcher.Length -gt 7000) { throw "Internal error: generated CMD launcher is too long." }
+
   $cmdLines = @(
     "@echo off",
     "setlocal",
     "title OpenAI-CC Client Installer",
-    "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedCommand",
+    'set "OPENAI_CC_SELF=%~f0"',
+    $launcher,
     'set "OPENAI_CC_INSTALL_EXIT=%ERRORLEVEL%"',
     'echo.',
     'if not "%OPENAI_CC_INSTALL_EXIT%"=="0" (',
@@ -155,8 +177,9 @@ try {
     ')',
     'if not defined OPENAI_CC_CLIENT_NONINTERACTIVE pause',
     'if "%OPENAI_CC_INSTALL_EXIT%"=="0" if not defined OPENAI_CC_CLIENT_KEEP_INSTALLER del /f /q "%~f0" >nul 2>&1',
-    'exit /b %OPENAI_CC_INSTALL_EXIT%'
-  )
+    'exit /b %OPENAI_CC_INSTALL_EXIT%',
+    ':__OPENAI_CC_PAYLOAD__'
+  ) + $payloadLines
   New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($OutputPath)) | Out-Null
   [IO.File]::WriteAllText($OutputPath, (($cmdLines -join "`r`n") + "`r`n"), [Text.Encoding]::ASCII)
 
