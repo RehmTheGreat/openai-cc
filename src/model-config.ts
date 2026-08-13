@@ -40,7 +40,7 @@ export const DEFAULT_MAX_OUTPUT_TOKENS: Record<ModelSlot, number> = {
   haiku: 65536,
 };
 
-export const DEFAULT_CONTEXT_WINDOW = 850000;
+export const DEFAULT_CONTEXT_WINDOW = 1_000_000;
 export const FALLBACK_CONTEXT_WINDOW = 200000;
 export const CLOUDFLARE_GEMMA_MODEL = "@cf/google/gemma-4-26b-a4b-it";
 export const GEMINI_FLASH_LITE_MODEL = "gemini-3.5-flash-lite";
@@ -70,8 +70,8 @@ const CLAUDE_CODE_EXTENDED_MODEL_IDS: Record<ModelSlot, string> = {
 const DEFAULTS: ModelConfig = {
   contextWindow: DEFAULT_CONTEXT_WINDOW,
   routes: {
-    default: { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.default },
-    fable: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.fable },
+    default: { provider: "chatgpt", model: "gpt-5.6-luna", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.default },
+    fable: { provider: "chatgpt", model: "gpt-5.6-luna", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.fable },
     opus: { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.opus },
     sonnet: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.sonnet },
     haiku: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.haiku },
