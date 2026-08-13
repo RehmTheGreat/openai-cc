@@ -72,6 +72,7 @@ async function copyItem(rel) {
   await cp(source, destination, {
     recursive: true,
     force: true,
+    dereference: true,
     filter: (candidate) => {
       const leaf = basename(candidate);
       if (candidate.endsWith(".map")) return false;
