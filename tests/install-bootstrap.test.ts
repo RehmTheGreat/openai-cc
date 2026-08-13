@@ -75,14 +75,14 @@ test("B2 installer layers stream child output without collapsing stderr", async 
   assert.match(fixture, /start === 0 && requestedEnd >= size - 1/);
 });
 
-test("fresh-install verification enforces Session 4.5 defaults and route-specific context", async () => {
+test("fresh-install verification enforces current defaults and route-specific context", async () => {
   const install = await readFile(path.join(process.cwd(), "install.ps1"), "utf8");
 
-  assert.match(install, /default = @\{ provider = "zen"; model = "deepseek-v4-flash-free"; context = 200000 \}/);
-  assert.match(install, /fable = @\{ provider = "chatgpt"; model = "gpt-5\.6-terra"; context = 850000 \}/);
+  assert.match(install, /default = @\{ provider = "chatgpt"; model = "gpt-5\.6-luna"; context = 1000000 \}/);
+  assert.match(install, /fable = @\{ provider = "chatgpt"; model = "gpt-5\.6-luna"; context = 1000000 \}/);
   assert.match(install, /opus = @\{ provider = "zen"; model = "deepseek-v4-flash-free"; context = 200000 \}/);
-  assert.match(install, /sonnet = @\{ provider = "google"; model = "gemini-3\.5-flash-lite"; context = 850000 \}/);
-  assert.match(install, /haiku = @\{ provider = "google"; model = "gemini-3\.5-flash-lite"; context = 850000 \}/);
+  assert.match(install, /sonnet = @\{ provider = "google"; model = "gemini-3\.5-flash-lite"; context = 1000000 \}/);
+  assert.match(install, /haiku = @\{ provider = "google"; model = "gemini-3\.5-flash-lite"; context = 1000000 \}/);
   assert.match(install, /model\.max_input_tokens -ne \[int64\]\$routeHealth\.contextWindow/);
   assert.match(install, /model\.max_tokens -ne \[int64\]\$route\.maxOutputTokens/);
   assert.match(install, /configuredAlias -ne \[string\]\$model\.id/);

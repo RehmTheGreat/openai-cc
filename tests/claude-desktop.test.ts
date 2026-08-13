@@ -71,7 +71,8 @@ test("Claude Desktop 3P configuration is merged and idempotent", async () => {
   assert.equal(profile.inferenceGatewayBaseUrl, "http://127.0.0.1:8082");
   assert.equal(profile.inferenceGatewayAuthScheme, "bearer");
   assert.deepEqual(profile.inferenceModels.map((model: any) => model.name), MODEL_SLOTS.map((slot) => claudeCodeModelAlias(config, slot)));
-  assert.equal(profile.inferenceModels.some((model: any) => model.supports1m === true), false);
+  assert.equal(profile.inferenceModels.some((model: any) => model.supports1m === true), true);
+  assert.equal(profile.inferenceModels.find((model: any) => model.name === claudeCodeModelAlias(config, "default"))?.supports1m, true);
   assert.equal(meta.appliedId, CLAUDE_DESKTOP_PROFILE_ID);
   assert.equal(meta.entries.filter((entry: any) => entry.id === CLAUDE_DESKTOP_PROFILE_ID).length, 1);
   assert.equal(meta.entries.some((entry: any) => entry.id === "other"), true);

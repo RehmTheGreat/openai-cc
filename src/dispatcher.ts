@@ -134,8 +134,9 @@ export class Dispatcher {
         }
 
         const client = this.clientFor(account) as OpenAI;
+        const requestBodyDefaults = this.providers.requestBodyDefaults(account.provider);
         if (upstreamApiFor(account.provider, model, this.providers) === "responses") {
-          const upstream = { ...anthropicToFccResponses(routedBody, toolNames), model };
+          const upstream = { ...anthropicToFccResponses(routedBody, toolNames), model, ...requestBodyDefaults };
           if (body.stream) {
             const stream = await client.responses.create({ ...upstream, stream: true } as any);
             const translator = new AnthropicSseTranslator(body.model, toolNames);
@@ -154,7 +155,7 @@ export class Dispatcher {
           return void json(res, 200, responsesToAnthropic(response, body.model, toolNames));
         }
 
-        const upstream = anthropicToChatCompletions(routedBody, model) as any;
+        const upstream = { ...anthropicToChatCompletions(routedBody, model) as any, ...requestBodyDefaults };
         if (body.stream) {
           const stream = await client.chat.completions.create({ ...upstream, stream: true });
           const translator = new AnthropicChatSseTranslator(body.model);
