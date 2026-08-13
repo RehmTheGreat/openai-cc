@@ -1,1 +1,0 @@
-Generated Windows client installers keep the executable launcher below the cmd.exe command-line limit. The full client PowerShell program is UTF-8/Base64 data stored after :__OPENAI_CC_PAYLOAD__ in the same .cmd file and is loaded by a short encoded PowerShell bootstrap.
