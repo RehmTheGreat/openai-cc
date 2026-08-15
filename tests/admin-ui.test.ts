@@ -96,7 +96,7 @@ async function mutate(base: string, csrf: string, pathname: string, body: unknow
   });
 }
 
-test("Admin UI keeps one context target, edits route capabilities, and has no manual model adder", async () => {
+test("Admin UI edits context and capabilities per route and has no manual model adder", async () => {
   const f = await fixture();
   try {
     assert.match(f.html, /class="claude-mark"/);
@@ -113,8 +113,14 @@ test("Admin UI keeps one context target, edits route capabilities, and has no ma
     assert.doesNotMatch(f.html, /id="oauth-name"/);
     assert.match(f.html, /<select class="route-model"/);
 
-    assert.match(f.html, /<label for="context-window">Model Context Window<\/label>/);
-    assert.match(f.html, /Single Claude context target for all routes/);
+    assert.match(f.html, /for="ctx-'\+slot\+'">Context window/);
+    assert.match(f.html, /class="route-context"/);
+    assert.match(f.html, /contextWindow:Number\(document\.querySelector\('#ctx-'\+slot\)/);
+    assert.doesNotMatch(f.html, /id="context-window"/);
+    assert.doesNotMatch(f.html, /Single Claude context target for all routes/);
+    assert.match(f.html, /seedDiscoveredLimits/);
+    assert.match(f.html, /meta\?\.contextWindow/);
+
     assert.match(f.html, /capabilityField\(slot,'vision','Vision'/);
     assert.match(f.html, /capabilityField\(slot,'tools','Tools'/);
     assert.match(f.html, /capabilityField\(slot,'reasoning','Reasoning'/);
@@ -165,7 +171,7 @@ test("simplified Admin credential creation generates internal IDs and does not r
   }
 });
 
-test("Admin route capability overrides persist while Claude-facing names remain clean", async () => {
+test("Admin route context and capability overrides persist while Claude-facing names remain clean", async () => {
   const f = await fixture();
   try {
     let stateResponse = await fetch(`${f.base}/admin/state`);
@@ -173,11 +179,14 @@ test("Admin route capability overrides persist while Claude-facing names remain 
     let state = await stateResponse.json() as any;
     assert.equal(state.modelConfig.routes.fable.provider, "chatgpt");
     assert.equal(state.modelConfig.routes.fable.model, "gpt-5.6-luna");
+    assert.equal(state.modelConfig.routes.fable.contextWindow, 1_000_000);
+    assert.equal(state.modelConfig.routes.opus.contextWindow, 200_000);
     assert.equal(state.modelConfig.routes.sonnet.provider, "google");
     assert.equal(state.modelConfig.routes.sonnet.model, "gemini-3.5-flash-lite");
     assert.equal(typeof state.routeHealth.fable.contextWindow, "number");
 
     const next = structuredClone(state.modelConfig);
+    next.routes.sonnet.contextWindow = 360000;
     next.routes.sonnet.vision = false;
     next.routes.sonnet.tools = false;
     next.routes.sonnet.reasoning = false;
@@ -186,7 +195,9 @@ test("Admin route capability overrides persist while Claude-facing names remain 
 
     stateResponse = await fetch(`${f.base}/admin/state`);
     state = await stateResponse.json() as any;
-    assert.equal(state.modelConfig.contextWindow, 1_000_000);
+    assert.equal(state.modelConfig.contextWindow, undefined);
+    assert.equal(state.modelConfig.routes.sonnet.contextWindow, 360000);
+    assert.equal(state.routeHealth.sonnet.contextWindow, 360000);
     assert.equal(state.modelConfig.routes.sonnet.vision, false);
     assert.equal(state.modelConfig.routes.sonnet.tools, false);
     assert.equal(state.modelConfig.routes.sonnet.reasoning, false);
@@ -194,6 +205,7 @@ test("Admin route capability overrides persist while Claude-facing names remain 
     const publicModels = await (await fetch(`${f.base}/v1/models`)).json() as any;
     assert.deepEqual(publicModels.data.map((model: any) => model.display_name), ["Default", "Fable", "Opus", "Sonnet", "Haiku"]);
     const sonnet = publicModels.data.find((model: any) => model.display_name === "Sonnet");
+    assert.equal(sonnet.max_input_tokens, 360000);
     assert.equal(sonnet.capabilities.image_input.supported, false);
     assert.equal(sonnet.capabilities.thinking.supported, false);
     const publicJson = JSON.stringify(publicModels);
