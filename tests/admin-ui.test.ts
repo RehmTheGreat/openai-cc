@@ -195,7 +195,9 @@ test("Admin route context and capability overrides persist while Claude-facing n
 
     stateResponse = await fetch(`${f.base}/admin/state`);
     state = await stateResponse.json() as any;
-    assert.equal(state.modelConfig.contextWindow, undefined);
+    // Compatibility metadata may carry the largest route window internally,
+    // but the Admin has no global editor; each route value is authoritative.
+    assert.equal(state.modelConfig.contextWindow, 1_000_000);
     assert.equal(state.modelConfig.routes.sonnet.contextWindow, 360000);
     assert.equal(state.routeHealth.sonnet.contextWindow, 360000);
     assert.equal(state.modelConfig.routes.sonnet.vision, false);
