@@ -17,6 +17,8 @@ export interface ModelRoute {
   provider: ProviderKind;
   model: string;
   credentialId?: string;
+  /** Authoritative Claude/gateway context window for this route. */
+  contextWindow: number;
   maxOutputTokens: number;
   /** Optional capability overrides. Undefined means use provider/model discovery metadata. */
   vision?: boolean;
@@ -25,8 +27,6 @@ export interface ModelRoute {
 }
 
 export interface ModelConfig {
-  /** The single Claude-facing context target for every route. Verified upstream caps can lower the effective route window. */
-  contextWindow: number;
   routes: Record<ModelSlot, ModelRoute>;
 }
 
@@ -51,10 +51,19 @@ export const DEFAULT_MAX_OUTPUT_TOKENS: Record<ModelSlot, number> = {
   haiku: 65536,
 };
 
+/** Kept for migration/backward compatibility with the former global setting. */
 export const DEFAULT_CONTEXT_WINDOW = 1_000_000;
 export const FALLBACK_CONTEXT_WINDOW = 200000;
 export const CLOUDFLARE_GEMMA_MODEL = "@cf/google/gemma-4-26b-a4b-it";
 export const GEMINI_FLASH_LITE_MODEL = "gemini-3.5-flash-lite";
+
+export const DEFAULT_CONTEXT_WINDOWS: Record<ModelSlot, number> = {
+  default: 1_000_000,
+  fable: 1_000_000,
+  opus: 200_000,
+  sonnet: 1_000_000,
+  haiku: 1_000_000,
+};
 
 const CLAUDE_PUBLIC_STANDARD_MODEL_IDS: Record<ModelSlot, string> = {
   default: "claude-opus-4-8",
@@ -89,14 +98,18 @@ const CLAUDE_CODE_EXTENDED_TRANSPORT_IDS: Record<ModelSlot, string> = {
 };
 
 const DEFAULTS: ModelConfig = {
-  contextWindow: DEFAULT_CONTEXT_WINDOW,
   routes: {
-    default: { provider: "chatgpt", model: "gpt-5.6-luna", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.default },
-    fable: { provider: "chatgpt", model: "gpt-5.6-luna", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.fable },
-    opus: { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.opus },
-    sonnet: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.sonnet },
-    haiku: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.haiku },
+    default: { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: DEFAULT_CONTEXT_WINDOWS.default, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.default },
+    fable: { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: DEFAULT_CONTEXT_WINDOWS.fable, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.fable },
+    opus: { provider: "zen", model: "deepseek-v4-flash-free", contextWindow: DEFAULT_CONTEXT_WINDOWS.opus, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.opus },
+    sonnet: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, contextWindow: DEFAULT_CONTEXT_WINDOWS.sonnet, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.sonnet },
+    haiku: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, contextWindow: DEFAULT_CONTEXT_WINDOWS.haiku, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.haiku },
   },
+};
+
+type StoredModelConfig = Partial<ModelConfig> & {
+  /** Legacy pre-route setting. It is migrated into every route and then removed. */
+  contextWindow?: unknown;
 };
 
 export class ModelConfigStore extends EventEmitter {
@@ -110,7 +123,7 @@ export class ModelConfigStore extends EventEmitter {
 
   async init(): Promise<void> {
     try {
-      const raw = JSON.parse(await readFile(this.file, "utf8")) as Partial<ModelConfig>;
+      const raw = JSON.parse(await readFile(this.file, "utf8")) as StoredModelConfig;
       const normalized = normalizeForLoad(raw, this.providers);
       this.state = normalized.config;
       let repaired = normalized.changed;
@@ -256,9 +269,8 @@ export class ModelConfigStore extends EventEmitter {
 
 export const MODEL_SLOTS: ModelSlot[] = ["default", "fable", "opus", "sonnet", "haiku"];
 
-export function contextWindowForRoute(config: ModelConfig, slot: ModelSlot, providers?: ProviderRegistry): number {
-  const configuredTarget = Math.max(FALLBACK_CONTEXT_WINDOW, Math.floor(Number(config.contextWindow) || FALLBACK_CONTEXT_WINDOW));
-  return Math.min(configuredTarget, verifiedUpstreamContextWindow(config.routes[slot], providers));
+export function contextWindowForRoute(config: ModelConfig, slot: ModelSlot, _providers?: ProviderRegistry): number {
+  return config.routes[slot].contextWindow;
 }
 
 export function capabilitiesForRoute(route: ModelRoute, providers?: ProviderRegistry): ModelCapabilities {
@@ -300,12 +312,11 @@ export function slotForClaudeCodeModel(config: ModelConfig, model: string, provi
   return undefined;
 }
 
-function verifiedUpstreamContextWindow(route: ModelRoute, providers?: ProviderRegistry): number {
+function verifiedUpstreamContextWindow(route: Pick<ModelRoute, "provider" | "model">, providers?: ProviderRegistry): number {
   return verifiedModelContextWindow(route.provider, route.model, providers) ?? FALLBACK_CONTEXT_WINDOW;
 }
 
 function normalizeStrict(input: Partial<ModelConfig>, providers?: ProviderRegistry): ModelConfig {
-  const contextWindow = finiteInteger(input.contextWindow, "contextWindow", 200000, 1000000);
   const routes = {} as Record<ModelSlot, ModelRoute>;
   for (const slot of MODEL_SLOTS) {
     const candidate = input.routes?.[slot];
@@ -314,6 +325,7 @@ function normalizeStrict(input: Partial<ModelConfig>, providers?: ProviderRegist
     const model = String(candidate.model ?? "").trim();
     if (!model) throw new OpenAICCError(`Model id is required for ${slot}.`, 400, "model_required", { slot });
     if (model.length > 256) throw new OpenAICCError(`Model id is too long for ${slot}.`, 400, "model_too_long", { slot });
+    const contextWindow = finiteInteger(candidate.contextWindow, `${slot}.contextWindow`, 1, 1000000);
     const maxOutputTokens = finiteInteger(candidate.maxOutputTokens, `${slot}.maxOutputTokens`, 1, 1000000);
     const verifiedOutputCap = verifiedModelMaxOutputTokens(candidate.provider, model, providers);
     if (verifiedOutputCap !== undefined && maxOutputTokens > verifiedOutputCap) {
@@ -327,20 +339,23 @@ function normalizeStrict(input: Partial<ModelConfig>, providers?: ProviderRegist
       provider: candidate.provider,
       model,
       credentialId,
+      contextWindow,
       maxOutputTokens,
       ...(vision !== undefined ? { vision } : {}),
       ...(tools !== undefined ? { tools } : {}),
       ...(reasoning !== undefined ? { reasoning } : {}),
     };
   }
-  return { contextWindow, routes };
+  return { routes };
 }
 
-function normalizeForLoad(input: Partial<ModelConfig>, providers?: ProviderRegistry): { config: ModelConfig; changed: boolean } {
-  const contextRaw = Number(input.contextWindow ?? DEFAULTS.contextWindow);
-  const contextWindow = Number.isFinite(contextRaw) ? Math.max(200000, Math.min(1000000, Math.floor(contextRaw))) : DEFAULTS.contextWindow;
+function normalizeForLoad(input: StoredModelConfig, providers?: ProviderRegistry): { config: ModelConfig; changed: boolean } {
+  const legacyRaw = Number(input.contextWindow ?? DEFAULT_CONTEXT_WINDOW);
+  const legacyContextWindow = Number.isFinite(legacyRaw)
+    ? Math.max(1, Math.min(1000000, Math.floor(legacyRaw)))
+    : DEFAULT_CONTEXT_WINDOW;
   const routes = {} as Record<ModelSlot, ModelRoute>;
-  let changed = false;
+  let changed = input.contextWindow !== undefined;
   for (const slot of MODEL_SLOTS) {
     const fallback = DEFAULTS.routes[slot];
     const original = input.routes?.[slot];
@@ -348,6 +363,16 @@ function normalizeForLoad(input: Partial<ModelConfig>, providers?: ProviderRegis
     const provider = isProvider(candidate.provider, providers) ? candidate.provider : fallback.provider;
     if (original && provider !== candidate.provider) changed = true;
     const model = String(candidate.model ?? fallback.model).trim() || fallback.model;
+    const rawContext = Number(candidate.contextWindow);
+    let contextWindow: number;
+    if (Number.isFinite(rawContext) && Number.isInteger(rawContext) && rawContext >= 1 && rawContext <= 1000000) {
+      contextWindow = rawContext;
+    } else if (original) {
+      contextWindow = Math.min(legacyContextWindow, verifiedUpstreamContextWindow({ provider, model }, providers));
+      changed = true;
+    } else {
+      contextWindow = fallback.contextWindow;
+    }
     const rawMax = Number(candidate.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS[slot]);
     let maxOutputTokens = Number.isFinite(rawMax) ? Math.max(1, Math.min(1000000, Math.floor(rawMax))) : DEFAULT_MAX_OUTPUT_TOKENS[slot];
     const verifiedOutputCap = verifiedModelMaxOutputTokens(provider, model, providers);
@@ -366,13 +391,14 @@ function normalizeForLoad(input: Partial<ModelConfig>, providers?: ProviderRegis
       provider,
       model,
       credentialId,
+      contextWindow,
       maxOutputTokens,
       ...(vision !== undefined ? { vision } : {}),
       ...(tools !== undefined ? { tools } : {}),
       ...(reasoning !== undefined ? { reasoning } : {}),
     };
   }
-  return { config: { contextWindow, routes }, changed };
+  return { config: { routes }, changed };
 }
 
 function finiteInteger(value: unknown, name: string, min: number, max: number): number {
