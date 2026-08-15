@@ -109,17 +109,19 @@ test("bare-PC installer only requires the cleaned runtime dependency and never r
   assert.doesNotMatch(setup, /git\s+(clone|pull|fetch|reset|clean)/i);
 });
 
-test("shared Claude settings retain gateway context, clean route names, picker policy, and transport overrides", async () => {
+test("shared Claude settings retain gateway context, clean route names, picker policy, and public family pins", async () => {
   const source = await readFile(path.join(process.cwd(), "src", "claude-config.ts"), "utf8");
   const clients = await readFile(path.join(process.cwd(), "scripts", "configure-clients.ts"), "utf8");
-  assert.match(source, /claudeCodeTransportAlias\(config, "fable", providers\)/);
+  assert.match(source, /claudeCodeModelAlias\(config, "default", providers\)/);
   assert.match(source, /delete env\.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY/);
   assert.doesNotMatch(source, /CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY:\s*"1"/);
   assert.match(source, /settings\.availableModels = \["fable", "opus", "sonnet", "haiku"\]/);
-  assert.match(source, /modelOverrides\["claude-fable-5"\]/);
-  assert.match(source, /modelOverrides\["claude-sonnet-5"\]/);
-  assert.match(source, /delete env\.ANTHROPIC_DEFAULT_FABLE_MODEL/);
-  assert.match(source, /delete env\.ANTHROPIC_DEFAULT_SONNET_MODEL/);
+  assert.match(source, /ANTHROPIC_DEFAULT_FABLE_MODEL:\s*claudeCodeModelAlias\(config, "fable", providers\)/);
+  assert.match(source, /ANTHROPIC_DEFAULT_OPUS_MODEL:\s*claudeCodeModelAlias\(config, "opus", providers\)/);
+  assert.match(source, /ANTHROPIC_DEFAULT_SONNET_MODEL:\s*claudeCodeModelAlias\(config, "sonnet", providers\)/);
+  assert.match(source, /ANTHROPIC_DEFAULT_HAIKU_MODEL:\s*claudeCodeModelAlias\(config, "haiku", providers\)/);
+  assert.match(source, /delete modelOverrides\["claude-fable-5"\]/);
+  assert.match(source, /delete modelOverrides\["claude-sonnet-5"\]/);
   assert.match(source, /ANTHROPIC_DEFAULT_FABLE_MODEL_NAME:\s*"Fable"/);
   assert.match(source, /ANTHROPIC_DEFAULT_OPUS_MODEL_NAME:\s*"Opus"/);
   assert.match(source, /ANTHROPIC_DEFAULT_SONNET_MODEL_NAME:\s*"Sonnet"/);
