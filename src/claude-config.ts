@@ -24,16 +24,25 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig, 
   if (oldContextValues.has(String(env.CLAUDE_CODE_CONTEXT_WINDOW ?? ""))) delete env.CLAUDE_CODE_CONTEXT_WINDOW;
   if (oldContextValues.has(String(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? ""))) delete env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
 
+  // The five logical routes are already supplied through ANTHROPIC_MODEL and the
+  // per-family defaults below. Enabling gateway model discovery at the same time
+  // makes Claude Code add a second discovered copy of those same five routes to
+  // /model (for example Fable + Fable 1M). Clear the old flag on upgrades.
+  delete env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY;
+
   settings.env = {
     ...env,
     ANTHROPIC_BASE_URL: normalizeBaseUrl(baseUrl),
     ANTHROPIC_AUTH_TOKEN: "local-not-used",
     ANTHROPIC_MODEL: claudeCodeModelAlias(config, "default", providers),
     ANTHROPIC_DEFAULT_FABLE_MODEL: claudeCodeModelAlias(config, "fable", providers),
+    ANTHROPIC_DEFAULT_FABLE_MODEL_NAME: "Fable",
     ANTHROPIC_DEFAULT_OPUS_MODEL: claudeCodeModelAlias(config, "opus", providers),
+    ANTHROPIC_DEFAULT_OPUS_MODEL_NAME: "Opus",
     ANTHROPIC_DEFAULT_SONNET_MODEL: claudeCodeModelAlias(config, "sonnet", providers),
+    ANTHROPIC_DEFAULT_SONNET_MODEL_NAME: "Sonnet",
     ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeCodeModelAlias(config, "haiku", providers),
-    CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME: "Haiku",
     // Claude Code 2.1.x otherwise resolves a plain ANTHROPIC_BASE_URL as
     // first-party-with-a-custom-host and hard-falls back to a 200K budget.
     CLAUDE_CODE_USE_GATEWAY: "1",
