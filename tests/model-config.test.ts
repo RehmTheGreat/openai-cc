@@ -39,7 +39,7 @@ test("fresh routing uses model-specific context defaults", async () => {
 
 test("auto routing uses preferred ready credential then same-provider fallback", async () => {
   const { accounts, models } = await fixture();
-  await models.update({ routes: { sonnet: { provider: "nvidia", model: "nim-model", maxOutputTokens: 64000 } as any } });
+  await models.update({ routes: { sonnet: { provider: "nvidia", model: "nim-model", maxOutputTokens: 64000 } } });
   await accounts.prefer("n2");
   assert.equal(models.credentialForRequestedModel("sonnet")?.id, "n2");
   await accounts.markRateLimited("n2", "429", 60_000);
@@ -100,6 +100,7 @@ test("route context windows are independent, authoritative, and choose the corre
   assert.equal(contextWindowForRoute(config, "opus"), 131072);
   assert.equal(contextWindowForRoute(config, "sonnet"), 1000000);
   assert.equal(contextWindowForRoute(config, "haiku"), 200000);
+  assert.equal(config.contextWindow, 1000000, "derived compatibility ceiling must be the largest route window");
 
   assert.equal(claudeCodeModelAlias(config, "default"), "claude-opus-4-8[1m]");
   assert.equal(claudeCodeModelAlias(config, "fable"), "claude-fable-5[1m]");
@@ -151,13 +152,13 @@ test("load repair clamps stored output limits and migrates the legacy global con
   assert.equal(snapshot.routes.default.contextWindow, 850000);
   assert.equal(snapshot.routes.fable.contextWindow, 850000);
   assert.equal(snapshot.routes.opus.contextWindow, 200000);
-  assert.equal(snapshot.routes.sonnet.contextWindow, 131072);
-  assert.equal(snapshot.routes.haiku.contextWindow, 131072);
+  assert.equal(snapshot.routes.sonnet.contextWindow, 200000);
+  assert.equal(snapshot.routes.haiku.contextWindow, 200000);
   assert.equal(snapshot.routes.sonnet.maxOutputTokens, 16384);
   assert.equal(snapshot.routes.haiku.maxOutputTokens, 16384);
   const persisted = JSON.parse(await readFile(path.join(root, "model-config.json"), "utf8"));
   assert.equal(persisted.contextWindow, undefined);
-  assert.equal(persisted.routes.sonnet.contextWindow, 131072);
+  assert.equal(persisted.routes.sonnet.contextWindow, 200000);
   assert.equal(persisted.routes.sonnet.maxOutputTokens, 16384);
   assert.equal(persisted.routes.haiku.maxOutputTokens, 16384);
   accounts.close();
@@ -179,7 +180,7 @@ test("existing user-selected routes and capability overrides survive upgrade wit
   assert.equal(snapshot.routes.fable.contextWindow, 850000);
   assert.equal(snapshot.routes.opus.contextWindow, 200000);
   assert.equal(snapshot.routes.sonnet.contextWindow, 850000);
-  assert.equal(snapshot.routes.haiku.contextWindow, 131072);
+  assert.equal(snapshot.routes.haiku.contextWindow, 200000);
   assert.equal(snapshot.routes.sonnet.model, "gemini-3.6-flash");
   assert.equal(snapshot.routes.sonnet.maxOutputTokens, 32000);
   assert.equal(snapshot.routes.sonnet.vision, false);
