@@ -102,11 +102,16 @@ test("bare-PC installer only requires the cleaned runtime dependency and never r
   assert.doesNotMatch(setup, /git\s+(clone|pull|fetch|reset|clean)/i);
 });
 
-test("shared Claude settings retain gateway-aware aliases, route capability behavior, and onboarding repair", async () => {
+test("shared Claude settings retain gateway-aware aliases, clean route names, and onboarding repair", async () => {
   const source = await readFile(path.join(process.cwd(), "src", "claude-config.ts"), "utf8");
   const clients = await readFile(path.join(process.cwd(), "scripts", "configure-clients.ts"), "utf8");
   assert.match(source, /claudeCodeModelAlias\(config, "fable", providers\)/);
-  assert.match(source, /CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY/);
+  assert.match(source, /delete env\.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY/);
+  assert.doesNotMatch(source, /CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY:\s*"1"/);
+  assert.match(source, /ANTHROPIC_DEFAULT_FABLE_MODEL_NAME:\s*"Fable"/);
+  assert.match(source, /ANTHROPIC_DEFAULT_OPUS_MODEL_NAME:\s*"Opus"/);
+  assert.match(source, /ANTHROPIC_DEFAULT_SONNET_MODEL_NAME:\s*"Sonnet"/);
+  assert.match(source, /ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME:\s*"Haiku"/);
   assert.match(source, /CLAUDE_CODE_USE_GATEWAY/);
   assert.match(source, /CLAUDE_CODE_AUTO_COMPACT_WINDOW/);
   assert.match(source, /hasCompletedOnboarding = true/);
@@ -118,11 +123,14 @@ test("shared Claude settings retain gateway-aware aliases, route capability beha
   assert.doesNotMatch(clients, /OPENAI_CC_CONTEXT_WINDOW/);
 });
 
-test("gateway launcher binds persistent data to managed root and refuses an unrelated 8082 listener", async () => {
+test("gateway launcher refreshes Claude clients after model changes and refuses an unrelated 8082 listener", async () => {
   const index = await readFile(path.join(process.cwd(), "src", "index.ts"), "utf8");
   const launcher = await readFile(path.join(process.cwd(), "run-gateway.ps1"), "utf8");
   const clients = await readFile(path.join(process.cwd(), "scripts", "configure-clients.ts"), "utf8");
   assert.match(index, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP !== "0"/);
+  assert.match(index, /modelConfig\.on\("event"/);
+  assert.match(index, /event\?\.type !== "model_config_changed"/);
+  assert.match(index, /refreshClaudeClients\("refreshed"\)/);
   assert.match(clients, /OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP !== "0"/);
   assert.match(launcher, /OPENAI_CC_HOME/);
   assert.match(launcher, /OPENAI_CC_RUNTIME_ROOT/);
