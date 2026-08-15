@@ -18,7 +18,7 @@ export interface ModelRoute {
   model: string;
   credentialId?: string;
   /** Authoritative Claude/gateway context window for this route. */
-  contextWindow: number;
+  contextWindow?: number;
   maxOutputTokens: number;
   /** Optional capability overrides. Undefined means use provider/model discovery metadata. */
   vision?: boolean;
@@ -27,8 +27,19 @@ export interface ModelRoute {
 }
 
 export interface ModelConfig {
+  /**
+   * Derived compatibility ceiling only: the largest route context window.
+   * It is not editable and is never persisted. Route contextWindow values are authoritative.
+   */
+  contextWindow: number;
   routes: Record<ModelSlot, ModelRoute>;
 }
+
+export type ModelConfigUpdate = {
+  routes?: Partial<Record<ModelSlot, Partial<ModelRoute>>>;
+  /** Deprecated compatibility input. New callers must set routes.<slot>.contextWindow. */
+  contextWindow?: unknown;
+};
 
 export interface RouteHealth {
   slot: ModelSlot;
@@ -97,17 +108,21 @@ const CLAUDE_CODE_EXTENDED_TRANSPORT_IDS: Record<ModelSlot, string> = {
   haiku: "claude-opus-4-7[1m]",
 };
 
-const DEFAULTS: ModelConfig = {
-  routes: {
-    default: { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: DEFAULT_CONTEXT_WINDOWS.default, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.default },
-    fable: { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: DEFAULT_CONTEXT_WINDOWS.fable, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.fable },
-    opus: { provider: "zen", model: "deepseek-v4-flash-free", contextWindow: DEFAULT_CONTEXT_WINDOWS.opus, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.opus },
-    sonnet: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, contextWindow: DEFAULT_CONTEXT_WINDOWS.sonnet, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.sonnet },
-    haiku: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, contextWindow: DEFAULT_CONTEXT_WINDOWS.haiku, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.haiku },
-  },
+const DEFAULT_ROUTES: Record<ModelSlot, ModelRoute> = {
+  default: { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: DEFAULT_CONTEXT_WINDOWS.default, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.default },
+  fable: { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: DEFAULT_CONTEXT_WINDOWS.fable, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.fable },
+  opus: { provider: "zen", model: "deepseek-v4-flash-free", contextWindow: DEFAULT_CONTEXT_WINDOWS.opus, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.opus },
+  sonnet: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, contextWindow: DEFAULT_CONTEXT_WINDOWS.sonnet, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.sonnet },
+  haiku: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, contextWindow: DEFAULT_CONTEXT_WINDOWS.haiku, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.haiku },
 };
 
-type StoredModelConfig = Partial<ModelConfig> & {
+const DEFAULTS: ModelConfig = {
+  contextWindow: Math.max(...Object.values(DEFAULT_CONTEXT_WINDOWS)),
+  routes: DEFAULT_ROUTES,
+};
+
+type StoredModelConfig = {
+  routes?: Partial<Record<ModelSlot, Partial<ModelRoute>>>;
   /** Legacy pre-route setting. It is migrated into every route and then removed. */
   contextWindow?: unknown;
 };
@@ -147,12 +162,12 @@ export class ModelConfigStore extends EventEmitter {
     return structuredClone(this.state);
   }
 
-  async update(input: Partial<ModelConfig>): Promise<ModelConfig> {
+  async update(input: ModelConfigUpdate): Promise<ModelConfig> {
     const candidateRoutes = Object.fromEntries(MODEL_SLOTS.map((slot) => [
       slot,
       { ...this.state.routes[slot], ...(input.routes?.[slot] ?? {}) },
     ])) as Record<ModelSlot, ModelRoute>;
-    const candidate = normalizeStrict({ ...this.state, ...input, routes: candidateRoutes }, this.providers);
+    const candidate = normalizeStrict({ routes: candidateRoutes }, this.providers);
     this.validatePins(candidate);
     this.state = candidate;
     await this.persist();
@@ -262,15 +277,23 @@ export class ModelConfigStore extends EventEmitter {
   private async persist(): Promise<void> {
     await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
     const tmp = `${this.file}.${process.pid}.tmp`;
-    await writeFile(tmp, `${JSON.stringify(this.state, null, 2)}\n`, { mode: 0o600 });
+    // Persist only the route-specific source of truth. The top-level ceiling is derived.
+    await writeFile(tmp, `${JSON.stringify({ routes: this.state.routes }, null, 2)}\n`, { mode: 0o600 });
     await rename(tmp, this.file);
   }
 }
 
 export const MODEL_SLOTS: ModelSlot[] = ["default", "fable", "opus", "sonnet", "haiku"];
 
-export function contextWindowForRoute(config: ModelConfig, slot: ModelSlot, _providers?: ProviderRegistry): number {
-  return config.routes[slot].contextWindow;
+export function contextWindowForRoute(config: ModelConfig, slot: ModelSlot, providers?: ProviderRegistry): number {
+  const route = config.routes[slot];
+  const explicit = Number(route.contextWindow);
+  if (Number.isFinite(explicit) && Number.isInteger(explicit) && explicit >= 1 && explicit <= 1_000_000) return explicit;
+  // Compatibility only for old in-memory callers/tests that still construct a
+  // config with the former top-level ceiling. Persisted configs are migrated.
+  const legacy = Number(config.contextWindow);
+  const target = Number.isFinite(legacy) && legacy >= 1 ? Math.min(1_000_000, Math.floor(legacy)) : DEFAULT_CONTEXT_WINDOWS[slot];
+  return Math.min(target, verifiedUpstreamContextWindow(route, providers));
 }
 
 export function capabilitiesForRoute(route: ModelRoute, providers?: ProviderRegistry): ModelCapabilities {
@@ -316,7 +339,7 @@ function verifiedUpstreamContextWindow(route: Pick<ModelRoute, "provider" | "mod
   return verifiedModelContextWindow(route.provider, route.model, providers) ?? FALLBACK_CONTEXT_WINDOW;
 }
 
-function normalizeStrict(input: Partial<ModelConfig>, providers?: ProviderRegistry): ModelConfig {
+function normalizeStrict(input: { routes?: Partial<Record<ModelSlot, Partial<ModelRoute>>> }, providers?: ProviderRegistry): ModelConfig {
   const routes = {} as Record<ModelSlot, ModelRoute>;
   for (const slot of MODEL_SLOTS) {
     const candidate = input.routes?.[slot];
@@ -346,7 +369,7 @@ function normalizeStrict(input: Partial<ModelConfig>, providers?: ProviderRegist
       ...(reasoning !== undefined ? { reasoning } : {}),
     };
   }
-  return { routes };
+  return { contextWindow: maximumRouteContext(routes), routes };
 }
 
 function normalizeForLoad(input: StoredModelConfig, providers?: ProviderRegistry): { config: ModelConfig; changed: boolean } {
@@ -357,7 +380,7 @@ function normalizeForLoad(input: StoredModelConfig, providers?: ProviderRegistry
   const routes = {} as Record<ModelSlot, ModelRoute>;
   let changed = input.contextWindow !== undefined;
   for (const slot of MODEL_SLOTS) {
-    const fallback = DEFAULTS.routes[slot];
+    const fallback = DEFAULT_ROUTES[slot];
     const original = input.routes?.[slot];
     const candidate = original ?? fallback;
     const provider = isProvider(candidate.provider, providers) ? candidate.provider : fallback.provider;
@@ -371,7 +394,7 @@ function normalizeForLoad(input: StoredModelConfig, providers?: ProviderRegistry
       contextWindow = Math.min(legacyContextWindow, verifiedUpstreamContextWindow({ provider, model }, providers));
       changed = true;
     } else {
-      contextWindow = fallback.contextWindow;
+      contextWindow = fallback.contextWindow ?? DEFAULT_CONTEXT_WINDOWS[slot];
     }
     const rawMax = Number(candidate.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS[slot]);
     let maxOutputTokens = Number.isFinite(rawMax) ? Math.max(1, Math.min(1000000, Math.floor(rawMax))) : DEFAULT_MAX_OUTPUT_TOKENS[slot];
@@ -398,7 +421,11 @@ function normalizeForLoad(input: StoredModelConfig, providers?: ProviderRegistry
       ...(reasoning !== undefined ? { reasoning } : {}),
     };
   }
-  return { config: { routes }, changed };
+  return { config: { contextWindow: maximumRouteContext(routes), routes }, changed };
+}
+
+function maximumRouteContext(routes: Record<ModelSlot, ModelRoute>): number {
+  return Math.max(...MODEL_SLOTS.map((slot) => Number(routes[slot].contextWindow) || DEFAULT_CONTEXT_WINDOWS[slot]));
 }
 
 function finiteInteger(value: unknown, name: string, min: number, max: number): number {
