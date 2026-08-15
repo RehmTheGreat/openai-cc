@@ -24,11 +24,16 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig, 
   if (oldContextValues.has(String(env.CLAUDE_CODE_CONTEXT_WINDOW ?? ""))) delete env.CLAUDE_CODE_CONTEXT_WINDOW;
   if (oldContextValues.has(String(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? ""))) delete env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
 
-  // The five logical routes are already supplied through ANTHROPIC_MODEL and the
-  // per-family defaults below. Enabling gateway model discovery at the same time
-  // makes Claude Code add a second discovered copy of those same five routes to
-  // /model (for example Fable + Fable 1M). Clear the old flag on upgrades.
+  // The five logical routes are supplied through ANTHROPIC_MODEL and the
+  // per-family defaults below. Gateway discovery would add a second copy.
   delete env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY;
+
+  // Claude Code also exposes explicit [1m] variants when a pinned family model
+  // uses an extended-context carrier. Keep the carrier (it is required for the
+  // real client context budget), but allow only the four named logical aliases.
+  // Claude's special Default option is always present even when not allowlisted,
+  // yielding exactly: Default, Fable, Opus, Sonnet, Haiku.
+  settings.availableModels = ["fable", "opus", "sonnet", "haiku"];
 
   settings.env = {
     ...env,
