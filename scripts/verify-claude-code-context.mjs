@@ -13,15 +13,20 @@ const env = {
   NO_COLOR: "1",
 };
 
-function runClaude(args) {
+function runClaudeRaw(args) {
   const npmArgs = ["exec", "--yes", "--package=@anthropic-ai/claude-code@" + CLAUDE_VERSION, "--", "claude", ...args];
   const command = process.platform === "win32" ? (process.env.ComSpec || "cmd.exe") : "npm";
   const commandArgs = process.platform === "win32" ? ["/d", "/s", "/c", "npm", ...npmArgs] : npmArgs;
   const result = spawnSync(command, commandArgs, { env, encoding: "utf8", timeout: 120000 });
   const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
   if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error("Claude Code failed (" + result.status + "):\n" + output);
-  return output;
+  return { ...result, output };
+}
+
+function runClaude(args) {
+  const result = runClaudeRaw(args);
+  if (result.status !== 0) throw new Error("Claude Code failed (" + result.status + "):\n" + result.output);
+  return result.output;
 }
 
 function parseContextBudget(output) {
@@ -41,6 +46,11 @@ if (String(configured.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY ?? "") === "1")
 }
 if (String(configured.CLAUDE_CODE_USE_GATEWAY ?? "") !== "1") {
   throw new Error("CLAUDE_CODE_USE_GATEWAY must be enabled for third-party context capability handling.");
+}
+
+const expectedAvailableModels = ["fable", "opus", "sonnet", "haiku"];
+if (JSON.stringify(settings.availableModels) !== JSON.stringify(expectedAvailableModels)) {
+  throw new Error("Claude availableModels must expose only the four named OpenAI-CC aliases; Default is always present. Got: " + JSON.stringify(settings.availableModels));
 }
 
 const target = Number(configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
@@ -70,6 +80,7 @@ console.log("Claude Code version:", version.split("\n")[0]);
 console.log("CLAUDE_CODE_USE_GATEWAY=" + configured.CLAUDE_CODE_USE_GATEWAY);
 console.log("CLAUDE_CODE_AUTO_COMPACT_WINDOW=" + configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
 console.log("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=" + String(configured.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY ?? "<unset>"));
+console.log("availableModels=" + JSON.stringify(settings.availableModels));
 
 for (const [label, model, min, max] of probes) {
   if (!model) throw new Error("Missing configured model for " + label);
@@ -82,3 +93,19 @@ for (const [label, model, min, max] of probes) {
     );
   }
 }
+
+// The picker allowlist must hide explicit extended variants while the base logical
+// alias still resolves through its pinned [1m] carrier. This is the key invariant
+// that removes "Fable 1M" without regressing Fable's actual context budget.
+const fableAlias = runClaude(["--model", "fable", "-p", "/context"]);
+const fableAliasBudget = parseContextBudget(fableAlias);
+console.log("fable alias: client_context=" + fableAliasBudget);
+if (fableAliasBudget !== target) {
+  throw new Error("Base Fable alias lost the configured context target: " + fableAliasBudget + " != " + target);
+}
+
+const blockedExtended = runClaudeRaw(["--model", "fable[1m]", "-p", "/context"]);
+if (blockedExtended.status === 0) {
+  throw new Error("Explicit fable[1m] is still selectable despite the five-route availableModels policy.\n" + blockedExtended.output);
+}
+console.log("explicit fable[1m] blocked by availableModels as expected");
