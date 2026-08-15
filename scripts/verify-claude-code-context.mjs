@@ -75,7 +75,10 @@ for (const [key, expected] of Object.entries(expectedNames)) {
   if (configured[key] !== expected) throw new Error(key + " must be " + expected + "; got " + configured[key]);
 }
 
-for (const key of ["ANTHROPIC_DEFAULT_FABLE_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"]) {
+// The current public carrier selection uses explicit [1m] for Fable and Haiku,
+// while Sonnet 5 can carry the configured long budget without a suffixed ID.
+// The live /context probes below remain the source of truth for client budget.
+for (const key of ["ANTHROPIC_DEFAULT_FABLE_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"]) {
   if (!String(configured[key] ?? "").endsWith("[1m]")) {
     throw new Error(key + " must carry [1m] for the fresh 1M route; got " + configured[key]);
   }
@@ -93,12 +96,13 @@ console.log("CLAUDE_CODE_AUTO_COMPACT_WINDOW=" + configured.CLAUDE_CODE_AUTO_COM
 console.log("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=" + String(configured.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY ?? "<unset>"));
 console.log("ANTHROPIC_MODEL=" + configured.ANTHROPIC_MODEL);
 console.log("FABLE_PIN=" + configured.ANTHROPIC_DEFAULT_FABLE_MODEL);
+console.log("OPUS_PIN=" + configured.ANTHROPIC_DEFAULT_OPUS_MODEL);
 console.log("SONNET_PIN=" + configured.ANTHROPIC_DEFAULT_SONNET_MODEL);
 console.log("HAIKU_PIN=" + configured.ANTHROPIC_DEFAULT_HAIKU_MODEL);
 console.log("availableModels=" + JSON.stringify(settings.availableModels));
 
-// Probe aliases, not their backing ids. This is the path users, Auto mode,
-// compact, and subagents actually exercise.
+// Probe aliases, not just backing IDs. This is the path users, Auto mode,
+// compaction, and subagents actually exercise.
 const probes = [
   ["default/luna", configured.ANTHROPIC_MODEL, target, target],
   ["fable/luna", "fable", target, target],
