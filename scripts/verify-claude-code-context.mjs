@@ -36,17 +36,40 @@ if (!version.includes(CLAUDE_VERSION)) {
   throw new Error("Expected Claude Code " + CLAUDE_VERSION + ", got: " + version);
 }
 
+if (String(configured.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY ?? "") === "1") {
+  throw new Error("Gateway model discovery must stay disabled: the five logical routes are already supplied by ANTHROPIC_*_MODEL settings.");
+}
+if (String(configured.CLAUDE_CODE_USE_GATEWAY ?? "") !== "1") {
+  throw new Error("CLAUDE_CODE_USE_GATEWAY must be enabled for third-party context capability handling.");
+}
+
+const target = Number(configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
+if (!Number.isFinite(target) || target < 200000 || target > 1000000) {
+  throw new Error("Invalid CLAUDE_CODE_AUTO_COMPACT_WINDOW: " + configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
+}
+
+const expectedNames = {
+  ANTHROPIC_DEFAULT_FABLE_MODEL_NAME: "Fable",
+  ANTHROPIC_DEFAULT_OPUS_MODEL_NAME: "Opus",
+  ANTHROPIC_DEFAULT_SONNET_MODEL_NAME: "Sonnet",
+  ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME: "Haiku",
+};
+for (const [key, expected] of Object.entries(expectedNames)) {
+  if (configured[key] !== expected) throw new Error(key + " must be " + expected + "; got " + configured[key]);
+}
+
 const probes = [
-  ["default/luna", configured.ANTHROPIC_MODEL, 850000, Infinity],
-  ["fable/luna", configured.ANTHROPIC_DEFAULT_FABLE_MODEL, 850000, Infinity],
+  ["default/luna", configured.ANTHROPIC_MODEL, target, target],
+  ["fable/luna", configured.ANTHROPIC_DEFAULT_FABLE_MODEL, target, target],
   ["opus/deepseek-free", configured.ANTHROPIC_DEFAULT_OPUS_MODEL, 0, 250000],
-  ["sonnet/gemini-flash-lite", configured.ANTHROPIC_DEFAULT_SONNET_MODEL, 850000, Infinity],
-  ["haiku/gemini-flash-lite", configured.ANTHROPIC_DEFAULT_HAIKU_MODEL, 850000, Infinity],
+  ["sonnet/gemini-flash-lite", configured.ANTHROPIC_DEFAULT_SONNET_MODEL, target, target],
+  ["haiku/gemini-flash-lite", configured.ANTHROPIC_DEFAULT_HAIKU_MODEL, target, target],
 ];
 
 console.log("Claude Code version:", version.split("\n")[0]);
 console.log("CLAUDE_CODE_USE_GATEWAY=" + configured.CLAUDE_CODE_USE_GATEWAY);
 console.log("CLAUDE_CODE_AUTO_COMPACT_WINDOW=" + configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
+console.log("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=" + String(configured.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY ?? "<unset>"));
 
 for (const [label, model, min, max] of probes) {
   if (!model) throw new Error("Missing configured model for " + label);
