@@ -56,9 +56,8 @@ export const FALLBACK_CONTEXT_WINDOW = 200000;
 export const CLOUDFLARE_GEMMA_MODEL = "@cf/google/gemma-4-26b-a4b-it";
 export const GEMINI_FLASH_LITE_MODEL = "gemini-3.5-flash-lite";
 
-// Claude Code currently derives its usable window from its own model catalog, not
-// from /v1/models alone. These ids are therefore client capability carriers;
-// OpenAI-CC still routes by slot and sends the configured upstream model.
+// Claude Code derives its usable window from its own model catalog, not from
+// /v1/models alone. Standard ids intentionally remain conservative at 200K.
 const CLAUDE_CODE_STANDARD_MODEL_IDS: Record<ModelSlot, string> = {
   default: "claude-opus-4-8",
   fable: "claude-fable-5",
@@ -67,14 +66,17 @@ const CLAUDE_CODE_STANDARD_MODEL_IDS: Record<ModelSlot, string> = {
   haiku: "claude-haiku-4-5",
 };
 
+// Extended routes need distinct provider-side ids so the gateway can still tell
+// the five logical slots apart. Default uses Sonnet 5 because Claude 2.1.x
+// budgets that known carrier at 1M behind a gateway without a visible [1m]
+// suffix. Fable/Sonnet use modelOverrides: Claude budgets the known family model
+// but sends these OpenAI-CC ids to the gateway. Haiku retains its hidden carrier;
+// it does not create a Haiku 1M picker row.
 const CLAUDE_CODE_EXTENDED_MODEL_IDS: Record<ModelSlot, string> = {
-  // Keep the public Sonnet id stable so existing Sonnet routing remains intact.
-  // Sonnet 5 becomes native-1M when Claude Code resolves provider=gateway;
-  // the other extended carriers use raw [1m] ids whose suffix is client-side.
-  default: "claude-opus-4-8[1m]",
-  fable: "claude-fable-5[1m]",
+  default: "claude-sonnet-5",
+  fable: "openai-cc-fable",
   opus: "claude-opus-5[1m]",
-  sonnet: "claude-sonnet-5",
+  sonnet: "openai-cc-sonnet",
   haiku: "claude-opus-4-7[1m]",
 };
 
@@ -232,7 +234,7 @@ export class ModelConfigStore extends EventEmitter {
         throw unprocessable(
           `Credential ${route.credentialId} uses ${credential.provider}, but ${slot} is configured for ${route.provider}.`,
           "credential_provider_mismatch",
-          { slot, credentialId: route.credentialId, routeProvider: route.provider, credentialProvider: credential.provider },
+          { slot, credentialId: route.credentialId, routeProvider: credential.provider },
         );
       }
     }
