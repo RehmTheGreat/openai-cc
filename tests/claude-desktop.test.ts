@@ -39,6 +39,17 @@ test("Claude model discovery exposes route-specific context caps and client capa
   assert.equal(response.has_more, false);
 });
 
+test("route capability overrides change Claude-facing metadata without changing upstream model selection", () => {
+  const overridden = structuredClone(config);
+  overridden.routes.sonnet.vision = false;
+  overridden.routes.sonnet.tools = false;
+  overridden.routes.sonnet.reasoning = false;
+  const sonnet = claudeDesktopModelList(overridden).data.find((model) => model.display_name === "Sonnet")!;
+  assert.equal((sonnet.capabilities.image_input as any).supported, false);
+  assert.equal((sonnet.capabilities.thinking as any).supported, false);
+  assert.equal(overridden.routes.sonnet.model, "gemini-3.6-flash");
+});
+
 test("model retrieval accepts Claude-family version aliases without exposing upstream ids", () => {
   assert.equal(claudeDesktopModel(config, "claude-opus-5")?.max_tokens, 96000);
   assert.equal(claudeDesktopModel(config, "claude-opus-5-20260724")?.id, "claude-opus-5");
@@ -102,12 +113,13 @@ test("bare-PC installer only requires the cleaned runtime dependency and never r
   assert.doesNotMatch(setup, /git\s+(clone|pull|fetch|reset|clean)/i);
 });
 
-test("shared Claude settings retain gateway-aware aliases, clean route names, and onboarding repair", async () => {
+test("shared Claude settings retain gateway-aware aliases, clean route names, five-route picker policy, and onboarding repair", async () => {
   const source = await readFile(path.join(process.cwd(), "src", "claude-config.ts"), "utf8");
   const clients = await readFile(path.join(process.cwd(), "scripts", "configure-clients.ts"), "utf8");
   assert.match(source, /claudeCodeModelAlias\(config, "fable", providers\)/);
   assert.match(source, /delete env\.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY/);
   assert.doesNotMatch(source, /CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY:\s*"1"/);
+  assert.match(source, /settings\.availableModels = \["fable", "opus", "sonnet", "haiku"\]/);
   assert.match(source, /ANTHROPIC_DEFAULT_FABLE_MODEL_NAME:\s*"Fable"/);
   assert.match(source, /ANTHROPIC_DEFAULT_OPUS_MODEL_NAME:\s*"Opus"/);
   assert.match(source, /ANTHROPIC_DEFAULT_SONNET_MODEL_NAME:\s*"Sonnet"/);
@@ -117,6 +129,7 @@ test("shared Claude settings retain gateway-aware aliases, clean route names, an
   assert.match(source, /hasCompletedOnboarding = true/);
   assert.match(source, /hasSeenOnboarding = true/);
   assert.doesNotMatch(source, /DISABLE_COMPACT\s*[=:]/);
+  assert.doesNotMatch(source, /CLAUDE_CODE_DISABLE_1M_CONTEXT/);
 
   assert.match(clients, /const config = models\.snapshot\(\)/);
   assert.doesNotMatch(clients, /models\.update\(/);
