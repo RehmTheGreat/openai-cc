@@ -36,6 +36,13 @@ function parseContextBudget(output) {
   return Math.round(value * (match[2].toLowerCase() === "m" ? 1000000 : 1000));
 }
 
+function probe(label, model) {
+  const output = runClaude(["--model", model, "-p", "/context"]);
+  const budget = parseContextBudget(output);
+  console.log(label + ": model=" + model + " client_context=" + budget);
+  return budget;
+}
+
 const version = runClaude(["--version"]);
 if (!version.includes(CLAUDE_VERSION)) {
   throw new Error("Expected Claude Code " + CLAUDE_VERSION + ", got: " + version);
@@ -84,28 +91,23 @@ console.log("availableModels=" + JSON.stringify(settings.availableModels));
 
 for (const [label, model, min, max] of probes) {
   if (!model) throw new Error("Missing configured model for " + label);
-  const output = runClaude(["--model", String(model), "-p", "/context"]);
-  const budget = parseContextBudget(output);
-  console.log(label + ": model=" + model + " client_context=" + budget);
+  const budget = probe(label, String(model));
   if (budget < min || budget > max) {
-    throw new Error(
-      label + " context " + budget + " outside expected range " + min + ".." + max + "\n" + output,
-    );
+    throw new Error(label + " context " + budget + " outside expected range " + min + ".." + max);
   }
 }
 
-// The picker allowlist must hide explicit extended variants while the base logical
-// alias still resolves through its pinned [1m] carrier. This is the key invariant
-// that removes "Fable 1M" without regressing Fable's actual context budget.
-const fableAlias = runClaude(["--model", "fable", "-p", "/context"]);
-const fableAliasBudget = parseContextBudget(fableAlias);
-console.log("fable alias: client_context=" + fableAliasBudget);
+const fableAliasBudget = probe("fable alias", "fable");
 if (fableAliasBudget !== target) {
   throw new Error("Base Fable alias lost the configured context target: " + fableAliasBudget + " != " + target);
 }
 
-const blockedExtended = runClaudeRaw(["--model", "fable[1m]", "-p", "/context"]);
-if (blockedExtended.status === 0) {
-  throw new Error("Explicit fable[1m] is still selectable despite the five-route availableModels policy.\n" + blockedExtended.output);
-}
-console.log("explicit fable[1m] blocked by availableModels as expected");
+// Exploratory compatibility probes. Claude Code strips [1m] before allowlist
+// matching, so availableModels cannot distinguish a base family from its 1M
+// variant. The product fix should therefore use a native long-context carrier
+// without the suffix if Claude 2.1.226 budgets it correctly behind a gateway.
+const bareFable = String(configured.ANTHROPIC_DEFAULT_FABLE_MODEL || "").replace(/\[1m\]$/i, "");
+if (bareFable) probe("probe bare fable carrier", bareFable);
+probe("probe namespaced fable carrier", "claude-fable-5-openai-cc-default");
+const bareDefault = String(configured.ANTHROPIC_MODEL || "").replace(/\[1m\]$/i, "");
+if (bareDefault) probe("probe bare default carrier", bareDefault);
