@@ -5,7 +5,14 @@ import path from "node:path";
 import test from "node:test";
 import { AccountStore } from "../src/account-store.js";
 import { OpenAICCError } from "../src/errors.js";
-import { CLOUDFLARE_GEMMA_MODEL, ModelConfigStore, claudeCodeModelAlias, contextWindowForRoute } from "../src/model-config.js";
+import {
+  CLOUDFLARE_GEMMA_MODEL,
+  ModelConfigStore,
+  capabilitiesForRoute,
+  claudeCodeModelAlias,
+  claudeCodeTransportAlias,
+  contextWindowForRoute,
+} from "../src/model-config.js";
 
 async function fixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-model-"));
@@ -65,25 +72,18 @@ test("route save rejects nonexistent and provider-mismatched pins", async () => 
 
 test("route save rejects unsupported provider, empty model, invalid limits, and verified output-cap violations", async () => {
   const { accounts, models } = await fixture();
-  const bad: any = models.snapshot();
-  bad.routes.default.provider = "bogus";
+  const bad: any = models.snapshot(); bad.routes.default.provider = "bogus";
   await assert.rejects(() => models.update(bad), (error: unknown) => error instanceof OpenAICCError && error.code === "invalid_provider");
-  const badModel: any = models.snapshot();
-  badModel.routes.default.model = "";
+  const badModel: any = models.snapshot(); badModel.routes.default.model = "";
   await assert.rejects(() => models.update(badModel), (error: unknown) => error instanceof OpenAICCError && error.code === "model_required");
-  const badOutput: any = models.snapshot();
-  badOutput.routes.default.maxOutputTokens = 0;
+  const badOutput: any = models.snapshot(); badOutput.routes.default.maxOutputTokens = 0;
   await assert.rejects(() => models.update(badOutput), (error: unknown) => error instanceof OpenAICCError && error.code === "invalid_number");
-  const aboveVerified: any = models.snapshot();
-  aboveVerified.routes.sonnet.maxOutputTokens = 65537;
-  await assert.rejects(
-    () => models.update(aboveVerified),
-    (error: unknown) => error instanceof OpenAICCError && error.code === "max_output_exceeds_verified_cap",
-  );
+  const aboveVerified: any = models.snapshot(); aboveVerified.routes.sonnet.maxOutputTokens = 65537;
+  await assert.rejects(() => models.update(aboveVerified), (error: unknown) => error instanceof OpenAICCError && error.code === "max_output_exceeds_verified_cap");
   accounts.close();
 });
 
-test("verified route contexts drive distinct picker-safe transport ids without over-advertising", async () => {
+test("verified contexts keep public Claude aliases clean and Claude Code transports picker-safe", async () => {
   const { accounts, models } = await fixture();
   const config = models.snapshot();
   assert.equal(config.contextWindow, 1000000);
@@ -92,38 +92,57 @@ test("verified route contexts drive distinct picker-safe transport ids without o
   assert.equal(contextWindowForRoute(config, "opus"), 200000);
   assert.equal(contextWindowForRoute(config, "sonnet"), 1000000);
   assert.equal(contextWindowForRoute(config, "haiku"), 1000000);
-
-  assert.equal(claudeCodeModelAlias(config, "default"), "claude-sonnet-5");
-  assert.equal(claudeCodeModelAlias(config, "fable"), "openai-cc-fable");
+  assert.equal(claudeCodeModelAlias(config, "default"), "claude-opus-4-8[1m]");
+  assert.equal(claudeCodeModelAlias(config, "fable"), "claude-fable-5[1m]");
   assert.equal(claudeCodeModelAlias(config, "opus"), "claude-opus-5");
-  assert.equal(claudeCodeModelAlias(config, "sonnet"), "openai-cc-sonnet");
+  assert.equal(claudeCodeModelAlias(config, "sonnet"), "claude-sonnet-4-6[1m]");
   assert.equal(claudeCodeModelAlias(config, "haiku"), "claude-opus-4-7[1m]");
+  assert.equal(claudeCodeTransportAlias(config, "default"), "claude-sonnet-5");
+  assert.equal(claudeCodeTransportAlias(config, "fable"), "openai-cc-fable");
+  assert.equal(claudeCodeTransportAlias(config, "opus"), "claude-opus-5");
+  assert.equal(claudeCodeTransportAlias(config, "sonnet"), "openai-cc-sonnet");
+  assert.equal(claudeCodeTransportAlias(config, "haiku"), "claude-opus-4-7[1m]");
   assert.equal(models.slotForRequestedModel("claude-sonnet-5"), "default");
   assert.equal(models.slotForRequestedModel("openai-cc-fable"), "fable");
   assert.equal(models.slotForRequestedModel("openai-cc-sonnet"), "sonnet");
+  assert.equal(models.slotForRequestedModel("claude-sonnet-4-6[1m]"), "sonnet");
   assert.equal(models.slotForRequestedModel("claude-opus-4-7[1m]"), "haiku");
-
   const changed = models.snapshot();
   changed.routes.haiku = { provider: "nvidia", model: "unverified-haiku", maxOutputTokens: 32000 };
   const conservative = await models.update(changed);
   assert.equal(contextWindowForRoute(conservative, "haiku"), 200000);
   assert.equal(claudeCodeModelAlias(conservative, "haiku"), "claude-haiku-4-5");
+  assert.equal(claudeCodeTransportAlias(conservative, "haiku"), "claude-haiku-4-5");
+  accounts.close();
+});
+
+test("route capability overrides are persisted independently of provider discovery", async () => {
+  const { accounts, models } = await fixture();
+  const changed = models.snapshot();
+  changed.routes.sonnet.vision = false;
+  changed.routes.sonnet.tools = false;
+  changed.routes.sonnet.reasoning = false;
+  const saved = await models.update(changed);
+  assert.equal(saved.routes.sonnet.vision, false);
+  assert.equal(saved.routes.sonnet.tools, false);
+  assert.equal(saved.routes.sonnet.reasoning, false);
+  const caps = capabilitiesForRoute(saved.routes.sonnet);
+  assert.equal(caps.image, false);
+  assert.equal(caps.tools, false);
+  assert.equal(caps.reasoning, false);
   accounts.close();
 });
 
 test("load repair clamps stored output limits to verified known-model safety caps", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-model-output-repair-"));
   const accounts = new AccountStore(root); await accounts.init();
-  await writeFile(path.join(root, "model-config.json"), JSON.stringify({
-    contextWindow: 850000,
-    routes: {
-      default: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
-      fable: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
-      opus: { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: 128000 },
-      sonnet: { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 999999 },
-      haiku: { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 50000 },
-    },
-  }));
+  await writeFile(path.join(root, "model-config.json"), JSON.stringify({ contextWindow: 850000, routes: {
+    default: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
+    fable: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
+    opus: { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: 128000 },
+    sonnet: { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 999999 },
+    haiku: { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 50000 },
+  } }));
   const models = new ModelConfigStore(root, accounts); await models.init();
   assert.equal(models.snapshot().routes.sonnet.maxOutputTokens, 16384);
   assert.equal(models.snapshot().routes.haiku.maxOutputTokens, 16384);
@@ -133,22 +152,22 @@ test("load repair clamps stored output limits to verified known-model safety cap
   accounts.close();
 });
 
-test("existing user-selected routes survive upgrade unchanged", async () => {
+test("existing user-selected routes and capability overrides survive upgrade unchanged", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-model-preserve-"));
   const accounts = new AccountStore(root); await accounts.init();
-  await writeFile(path.join(root, "model-config.json"), JSON.stringify({
-    contextWindow: 850000, routes: {
-      default: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
-      fable: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
-      opus: { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: 128000 },
-      sonnet: { provider: "google", model: "gemini-3.6-flash", maxOutputTokens: 32000 },
-      haiku: { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 16384 },
-    },
-  }));
+  await writeFile(path.join(root, "model-config.json"), JSON.stringify({ contextWindow: 850000, routes: {
+    default: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
+    fable: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
+    opus: { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: 128000 },
+    sonnet: { provider: "google", model: "gemini-3.6-flash", maxOutputTokens: 32000, vision: false, tools: true, reasoning: false },
+    haiku: { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 16384 },
+  } }));
   const models = new ModelConfigStore(root, accounts); await models.init();
   assert.equal(models.snapshot().contextWindow, 850000);
   assert.equal(models.snapshot().routes.sonnet.model, "gemini-3.6-flash");
   assert.equal(models.snapshot().routes.sonnet.maxOutputTokens, 32000);
+  assert.equal(models.snapshot().routes.sonnet.vision, false);
+  assert.equal(models.snapshot().routes.sonnet.tools, true);
   assert.equal(models.snapshot().routes.haiku.provider, "cloudflare");
   accounts.close();
 });
