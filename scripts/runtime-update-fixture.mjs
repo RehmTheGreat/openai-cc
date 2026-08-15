@@ -41,11 +41,6 @@ if (mode === "seed") {
     baseUrl: providerBaseUrl,
     apiStyle: "responses",
   });
-  await providers.upsertManualModel(provider.id, {
-    id: modelId,
-    contextWindow: 333000,
-    maxOutputTokens: 8192,
-  });
 
   await accounts.createApiKey({
     id: preferredId,
@@ -64,14 +59,17 @@ if (mode === "seed") {
   await accounts.disable(disabledId);
   await accounts.prefer(preferredId);
 
+  // Route model ids and route-specific context are persisted user selections.
+  // The Admin obtains new ids/metadata from the provider's /models API.
   await models.update({
-    contextWindow: 850000,
     routes: {
       default: {
         provider: provider.id,
         model: modelId,
         credentialId: preferredId,
+        contextWindow: 850000,
         maxOutputTokens: 8192,
+        tools: true,
       },
     },
   });
@@ -86,7 +84,7 @@ if (mode === "seed") {
   assert.ok(provider, "custom provider did not survive update");
   assert.equal(provider.baseUrl, providerBaseUrl);
   assert.equal(provider.apiStyle, "responses");
-  assert.deepEqual(provider.models, [{ id: modelId, contextWindow: 333000, maxOutputTokens: 8192 }]);
+  assert.equal(provider.models, undefined, "legacy manual model catalog must not be persisted");
 
   const primary = accountsFile.accounts.find((item) => item.id === preferredId);
   const disabled = accountsFile.accounts.find((item) => item.id === disabledId);
@@ -103,8 +101,10 @@ if (mode === "seed") {
   assert.equal(modelConfig.routes.default.provider, provider.id);
   assert.equal(modelConfig.routes.default.model, modelId);
   assert.equal(modelConfig.routes.default.credentialId, preferredId);
+  assert.equal(modelConfig.routes.default.contextWindow, 850000);
   assert.equal(modelConfig.routes.default.maxOutputTokens, 8192);
-  assert.equal(modelConfig.contextWindow, 850000);
+  assert.equal(modelConfig.routes.default.tools, true);
+  assert.equal(modelConfig.contextWindow, undefined, "legacy global context setting must be removed");
 
   console.log("Session 6A persistence fixture verified.");
 }

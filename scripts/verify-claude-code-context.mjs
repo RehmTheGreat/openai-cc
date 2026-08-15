@@ -13,15 +13,20 @@ const env = {
   NO_COLOR: "1",
 };
 
-function runClaude(args) {
+function runClaudeRaw(args) {
   const npmArgs = ["exec", "--yes", "--package=@anthropic-ai/claude-code@" + CLAUDE_VERSION, "--", "claude", ...args];
   const command = process.platform === "win32" ? (process.env.ComSpec || "cmd.exe") : "npm";
   const commandArgs = process.platform === "win32" ? ["/d", "/s", "/c", "npm", ...npmArgs] : npmArgs;
   const result = spawnSync(command, commandArgs, { env, encoding: "utf8", timeout: 120000 });
   const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
   if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error("Claude Code failed (" + result.status + "):\n" + output);
-  return output;
+  return { ...result, output };
+}
+
+function runClaude(args) {
+  const result = runClaudeRaw(args);
+  if (result.status !== 0) throw new Error("Claude Code failed (" + result.status + "):\n" + result.output);
+  return result.output;
 }
 
 function parseContextBudget(output) {
@@ -31,16 +36,28 @@ function parseContextBudget(output) {
   return Math.round(value * (match[2].toLowerCase() === "m" ? 1000000 : 1000));
 }
 
+function probe(label, model) {
+  const output = runClaude(["--model", model, "-p", "/context"]);
+  const budget = parseContextBudget(output);
+  console.log(label + ": model=" + model + " client_context=" + budget);
+  return budget;
+}
+
 const version = runClaude(["--version"]);
 if (!version.includes(CLAUDE_VERSION)) {
   throw new Error("Expected Claude Code " + CLAUDE_VERSION + ", got: " + version);
 }
 
 if (String(configured.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY ?? "") === "1") {
-  throw new Error("Gateway model discovery must stay disabled: the five logical routes are already supplied by ANTHROPIC_*_MODEL settings.");
+  throw new Error("Gateway model discovery must stay disabled: the five logical routes are already supplied by Claude aliases and OpenAI-CC transport mappings.");
 }
 if (String(configured.CLAUDE_CODE_USE_GATEWAY ?? "") !== "1") {
   throw new Error("CLAUDE_CODE_USE_GATEWAY must be enabled for third-party context capability handling.");
+}
+
+const expectedAvailableModels = ["fable", "opus", "sonnet", "haiku"];
+if (JSON.stringify(settings.availableModels) !== JSON.stringify(expectedAvailableModels)) {
+  throw new Error("Claude availableModels must expose only the four named OpenAI-CC aliases; Default is always present. Got: " + JSON.stringify(settings.availableModels));
 }
 
 const target = Number(configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
@@ -58,27 +75,39 @@ for (const [key, expected] of Object.entries(expectedNames)) {
   if (configured[key] !== expected) throw new Error(key + " must be " + expected + "; got " + configured[key]);
 }
 
-const probes = [
-  ["default/luna", configured.ANTHROPIC_MODEL, target, target],
-  ["fable/luna", configured.ANTHROPIC_DEFAULT_FABLE_MODEL, target, target],
-  ["opus/deepseek-free", configured.ANTHROPIC_DEFAULT_OPUS_MODEL, 0, 250000],
-  ["sonnet/gemini-flash-lite", configured.ANTHROPIC_DEFAULT_SONNET_MODEL, target, target],
-  ["haiku/gemini-flash-lite", configured.ANTHROPIC_DEFAULT_HAIKU_MODEL, target, target],
-];
+if (configured.ANTHROPIC_DEFAULT_FABLE_MODEL !== undefined) {
+  throw new Error("Extended Fable must not use a direct [1m] family pin; got " + configured.ANTHROPIC_DEFAULT_FABLE_MODEL);
+}
+if (configured.ANTHROPIC_DEFAULT_SONNET_MODEL !== undefined) {
+  throw new Error("Extended Sonnet must use version-level modelOverrides; got direct pin " + configured.ANTHROPIC_DEFAULT_SONNET_MODEL);
+}
+if (settings.modelOverrides?.["claude-fable-5"] !== "openai-cc-fable") {
+  throw new Error("Missing Fable modelOverride transport mapping: " + JSON.stringify(settings.modelOverrides));
+}
+if (settings.modelOverrides?.["claude-sonnet-5"] !== "openai-cc-sonnet") {
+  throw new Error("Missing Sonnet modelOverride transport mapping: " + JSON.stringify(settings.modelOverrides));
+}
 
 console.log("Claude Code version:", version.split("\n")[0]);
 console.log("CLAUDE_CODE_USE_GATEWAY=" + configured.CLAUDE_CODE_USE_GATEWAY);
 console.log("CLAUDE_CODE_AUTO_COMPACT_WINDOW=" + configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
 console.log("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=" + String(configured.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY ?? "<unset>"));
+console.log("ANTHROPIC_MODEL=" + configured.ANTHROPIC_MODEL);
+console.log("modelOverrides=" + JSON.stringify(settings.modelOverrides));
+console.log("availableModels=" + JSON.stringify(settings.availableModels));
+
+const probes = [
+  ["default/luna", configured.ANTHROPIC_MODEL, target, target],
+  ["fable/luna", "fable", target, target],
+  ["opus/deepseek-free", configured.ANTHROPIC_DEFAULT_OPUS_MODEL, 0, 250000],
+  ["sonnet/gemini-flash-lite", "sonnet", target, target],
+  ["haiku/gemini-flash-lite", configured.ANTHROPIC_DEFAULT_HAIKU_MODEL, target, target],
+];
 
 for (const [label, model, min, max] of probes) {
   if (!model) throw new Error("Missing configured model for " + label);
-  const output = runClaude(["--model", String(model), "-p", "/context"]);
-  const budget = parseContextBudget(output);
-  console.log(label + ": model=" + model + " client_context=" + budget);
+  const budget = probe(label, String(model));
   if (budget < min || budget > max) {
-    throw new Error(
-      label + " context " + budget + " outside expected range " + min + ".." + max + "\n" + output,
-    );
+    throw new Error(label + " context " + budget + " outside expected range " + min + ".." + max);
   }
 }

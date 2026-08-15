@@ -3,7 +3,13 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { AccountRecord, AccountStore, ProviderKind, PublicCredential } from "./account-store.js";
 import { OpenAICCError, unprocessable } from "./errors.js";
-import { ProviderRegistry, verifiedModelContextWindow, verifiedModelMaxOutputTokens } from "./provider-registry.js";
+import {
+  ModelCapabilities,
+  ProviderRegistry,
+  modelCapabilities,
+  verifiedModelContextWindow,
+  verifiedModelMaxOutputTokens,
+} from "./provider-registry.js";
 
 export type ModelSlot = "default" | "fable" | "opus" | "sonnet" | "haiku";
 
@@ -11,13 +17,29 @@ export interface ModelRoute {
   provider: ProviderKind;
   model: string;
   credentialId?: string;
+  /** Authoritative Claude/gateway context window for this route. */
+  contextWindow?: number;
   maxOutputTokens: number;
+  /** Optional capability overrides. Undefined means use provider/model discovery metadata. */
+  vision?: boolean;
+  tools?: boolean;
+  reasoning?: boolean;
 }
 
 export interface ModelConfig {
+  /**
+   * Derived compatibility ceiling only: the largest route context window.
+   * It is not editable and is never persisted. Route contextWindow values are authoritative.
+   */
   contextWindow: number;
   routes: Record<ModelSlot, ModelRoute>;
 }
+
+export type ModelConfigUpdate = {
+  routes?: Partial<Record<ModelSlot, Partial<ModelRoute>>>;
+  /** Deprecated compatibility input. New callers must set routes.<slot>.contextWindow. */
+  contextWindow?: unknown;
+};
 
 export interface RouteHealth {
   slot: ModelSlot;
@@ -40,15 +62,21 @@ export const DEFAULT_MAX_OUTPUT_TOKENS: Record<ModelSlot, number> = {
   haiku: 65536,
 };
 
+/** Kept for migration/backward compatibility with the former global setting. */
 export const DEFAULT_CONTEXT_WINDOW = 1_000_000;
 export const FALLBACK_CONTEXT_WINDOW = 200000;
 export const CLOUDFLARE_GEMMA_MODEL = "@cf/google/gemma-4-26b-a4b-it";
 export const GEMINI_FLASH_LITE_MODEL = "gemini-3.5-flash-lite";
 
-// Claude Code currently derives its usable window from its own model catalog, not
-// from /v1/models alone. These ids are therefore client capability carriers;
-// OpenAI-CC still routes by slot and sends the configured upstream model.
-const CLAUDE_CODE_STANDARD_MODEL_IDS: Record<ModelSlot, string> = {
+export const DEFAULT_CONTEXT_WINDOWS: Record<ModelSlot, number> = {
+  default: 1_000_000,
+  fable: 1_000_000,
+  opus: 200_000,
+  sonnet: 1_000_000,
+  haiku: 1_000_000,
+};
+
+const CLAUDE_PUBLIC_STANDARD_MODEL_IDS: Record<ModelSlot, string> = {
   default: "claude-opus-4-8",
   fable: "claude-fable-5",
   opus: "claude-opus-5",
@@ -56,26 +84,47 @@ const CLAUDE_CODE_STANDARD_MODEL_IDS: Record<ModelSlot, string> = {
   haiku: "claude-haiku-4-5",
 };
 
-const CLAUDE_CODE_EXTENDED_MODEL_IDS: Record<ModelSlot, string> = {
-  // Keep the public Sonnet id stable so existing Sonnet routing remains intact.
-  // Sonnet 5 becomes native-1M when Claude Code resolves provider=gateway;
-  // the other extended carriers use raw [1m] ids whose suffix is client-side.
+const CLAUDE_PUBLIC_EXTENDED_MODEL_IDS: Record<ModelSlot, string> = {
   default: "claude-opus-4-8[1m]",
   fable: "claude-fable-5[1m]",
   opus: "claude-opus-5[1m]",
-  sonnet: "claude-sonnet-5",
+  sonnet: "claude-sonnet-4-6[1m]",
   haiku: "claude-opus-4-7[1m]",
 };
 
+const CLAUDE_CODE_STANDARD_TRANSPORT_IDS: Record<ModelSlot, string> = {
+  default: "claude-opus-4-8",
+  fable: "claude-fable-5",
+  opus: "claude-opus-5",
+  sonnet: "claude-sonnet-4-6",
+  haiku: "claude-haiku-4-5",
+};
+
+const CLAUDE_CODE_EXTENDED_TRANSPORT_IDS: Record<ModelSlot, string> = {
+  default: "claude-sonnet-5",
+  fable: "openai-cc-fable",
+  opus: "claude-opus-5[1m]",
+  sonnet: "openai-cc-sonnet",
+  haiku: "claude-opus-4-7[1m]",
+};
+
+const DEFAULT_ROUTES: Record<ModelSlot, ModelRoute> = {
+  default: { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: DEFAULT_CONTEXT_WINDOWS.default, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.default },
+  fable: { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: DEFAULT_CONTEXT_WINDOWS.fable, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.fable },
+  opus: { provider: "zen", model: "deepseek-v4-flash-free", contextWindow: DEFAULT_CONTEXT_WINDOWS.opus, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.opus },
+  sonnet: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, contextWindow: DEFAULT_CONTEXT_WINDOWS.sonnet, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.sonnet },
+  haiku: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, contextWindow: DEFAULT_CONTEXT_WINDOWS.haiku, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.haiku },
+};
+
 const DEFAULTS: ModelConfig = {
-  contextWindow: DEFAULT_CONTEXT_WINDOW,
-  routes: {
-    default: { provider: "chatgpt", model: "gpt-5.6-luna", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.default },
-    fable: { provider: "chatgpt", model: "gpt-5.6-luna", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.fable },
-    opus: { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.opus },
-    sonnet: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.sonnet },
-    haiku: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.haiku },
-  },
+  contextWindow: Math.max(...Object.values(DEFAULT_CONTEXT_WINDOWS)),
+  routes: DEFAULT_ROUTES,
+};
+
+type StoredModelConfig = {
+  routes?: Partial<Record<ModelSlot, Partial<ModelRoute>>>;
+  /** Legacy pre-route setting. It is migrated into every route and then removed. */
+  contextWindow?: unknown;
 };
 
 export class ModelConfigStore extends EventEmitter {
@@ -89,7 +138,7 @@ export class ModelConfigStore extends EventEmitter {
 
   async init(): Promise<void> {
     try {
-      const raw = JSON.parse(await readFile(this.file, "utf8")) as Partial<ModelConfig>;
+      const raw = JSON.parse(await readFile(this.file, "utf8")) as StoredModelConfig;
       const normalized = normalizeForLoad(raw, this.providers);
       this.state = normalized.config;
       let repaired = normalized.changed;
@@ -113,12 +162,23 @@ export class ModelConfigStore extends EventEmitter {
     return structuredClone(this.state);
   }
 
-  async update(input: Partial<ModelConfig>): Promise<ModelConfig> {
-    const candidateRoutes = Object.fromEntries(MODEL_SLOTS.map((slot) => [
-      slot,
-      { ...this.state.routes[slot], ...(input.routes?.[slot] ?? {}) },
-    ])) as Record<ModelSlot, ModelRoute>;
-    const candidate = normalizeStrict({ ...this.state, ...input, routes: candidateRoutes }, this.providers);
+  async update(input: ModelConfigUpdate): Promise<ModelConfig> {
+    const candidateRoutes = Object.fromEntries(MODEL_SLOTS.map((slot) => {
+      const previous = this.state.routes[slot];
+      const patch = input.routes?.[slot] ?? {};
+      const merged: ModelRoute = { ...previous, ...patch };
+      const modelChanged = patch.provider !== undefined && patch.provider !== previous.provider
+        || patch.model !== undefined && patch.model !== previous.model;
+      if (modelChanged && patch.contextWindow === undefined) {
+        // API/legacy callers that switch models without supplying context get a
+        // known provider/model value automatically. The Admin sends the route
+        // context explicitly after seeding it from live model discovery.
+        const detected = verifiedModelContextWindow(merged.provider, merged.model, this.providers);
+        if (detected !== undefined) merged.contextWindow = Math.max(1, Math.min(1_000_000, Math.floor(detected)));
+      }
+      return [slot, merged];
+    })) as Record<ModelSlot, ModelRoute>;
+    const candidate = normalizeStrict({ routes: candidateRoutes }, this.providers);
     this.validatePins(candidate);
     this.state = candidate;
     await this.persist();
@@ -188,9 +248,7 @@ export class ModelConfigStore extends EventEmitter {
     const ready = sameProvider.filter((credential) => credential.status === "ready");
     if (route.credentialId) {
       const pinned = sameProvider.find((credential) => credential.id === route.credentialId);
-      if (!pinned) {
-        return baseHealth(slot, route, ready, contextWindow, "unavailable", "Pinned credential is missing or belongs to another provider.");
-      }
+      if (!pinned) return baseHealth(slot, route, ready, contextWindow, "unavailable", "Pinned credential is missing or belongs to another provider.");
       if (pinned.status !== "ready") {
         const reset = pinned.limitResetsAt ? ` until ${pinned.limitResetsAt}` : "";
         return baseHealth(slot, route, ready, contextWindow, "unavailable", `Pinned credential is ${pinned.status}${reset}.`);
@@ -230,7 +288,8 @@ export class ModelConfigStore extends EventEmitter {
   private async persist(): Promise<void> {
     await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
     const tmp = `${this.file}.${process.pid}.tmp`;
-    await writeFile(tmp, `${JSON.stringify(this.state, null, 2)}\n`, { mode: 0o600 });
+    // Persist only the route-specific source of truth. The top-level ceiling is derived.
+    await writeFile(tmp, `${JSON.stringify({ routes: this.state.routes }, null, 2)}\n`, { mode: 0o600 });
     await rename(tmp, this.file);
   }
 }
@@ -238,18 +297,47 @@ export class ModelConfigStore extends EventEmitter {
 export const MODEL_SLOTS: ModelSlot[] = ["default", "fable", "opus", "sonnet", "haiku"];
 
 export function contextWindowForRoute(config: ModelConfig, slot: ModelSlot, providers?: ProviderRegistry): number {
-  const configuredTarget = Math.max(FALLBACK_CONTEXT_WINDOW, Math.floor(Number(config.contextWindow) || FALLBACK_CONTEXT_WINDOW));
-  return Math.min(configuredTarget, verifiedUpstreamContextWindow(config.routes[slot], providers));
+  const route = config.routes[slot];
+  const explicit = Number(route.contextWindow);
+  if (Number.isFinite(explicit) && Number.isInteger(explicit) && explicit >= 1 && explicit <= 1_000_000) return explicit;
+  // Compatibility only for old in-memory callers/tests that still construct a
+  // config with the former top-level ceiling. Persisted configs are migrated.
+  const legacy = Number(config.contextWindow);
+  const target = Number.isFinite(legacy) && legacy >= 1 ? Math.min(1_000_000, Math.floor(legacy)) : DEFAULT_CONTEXT_WINDOWS[slot];
+  return Math.min(target, verifiedUpstreamContextWindow(route, providers));
 }
 
+export function capabilitiesForRoute(route: ModelRoute, providers?: ProviderRegistry): ModelCapabilities {
+  const detected = modelCapabilities(route.provider, route.model, providers);
+  return {
+    ...detected,
+    image: route.vision ?? detected.image,
+    tools: route.tools ?? detected.tools,
+    reasoning: route.reasoning ?? detected.reasoning,
+  };
+}
+
+/** Public/desktop Claude-facing alias. Never contains a private OpenAI-CC transport id. */
 export function claudeCodeModelAlias(config: ModelConfig, slot: ModelSlot, providers?: ProviderRegistry): string {
   return contextWindowForRoute(config, slot, providers) > FALLBACK_CONTEXT_WINDOW
-    ? CLAUDE_CODE_EXTENDED_MODEL_IDS[slot]
-    : CLAUDE_CODE_STANDARD_MODEL_IDS[slot];
+    ? CLAUDE_PUBLIC_EXTENDED_MODEL_IDS[slot]
+    : CLAUDE_PUBLIC_STANDARD_MODEL_IDS[slot];
+}
+
+/** Provider-side model id sent by Claude Code after picker/model capability resolution. */
+export function claudeCodeTransportAlias(config: ModelConfig, slot: ModelSlot, providers?: ProviderRegistry): string {
+  return contextWindowForRoute(config, slot, providers) > FALLBACK_CONTEXT_WINDOW
+    ? CLAUDE_CODE_EXTENDED_TRANSPORT_IDS[slot]
+    : CLAUDE_CODE_STANDARD_TRANSPORT_IDS[slot];
 }
 
 export function slotForClaudeCodeModel(config: ModelConfig, model: string, providers?: ProviderRegistry): ModelSlot | undefined {
   const id = String(model || "").trim().toLowerCase();
+  for (const slot of MODEL_SLOTS) {
+    const transport = claudeCodeTransportAlias(config, slot, providers).toLowerCase();
+    const strippedTransport = transport.replace(/\[1m\]$/i, "");
+    if (id === transport || id === strippedTransport) return slot;
+  }
   for (const slot of MODEL_SLOTS) {
     const alias = claudeCodeModelAlias(config, slot, providers).toLowerCase();
     const stripped = alias.replace(/\[1m\]$/i, "");
@@ -258,12 +346,11 @@ export function slotForClaudeCodeModel(config: ModelConfig, model: string, provi
   return undefined;
 }
 
-function verifiedUpstreamContextWindow(route: ModelRoute, providers?: ProviderRegistry): number {
+function verifiedUpstreamContextWindow(route: Pick<ModelRoute, "provider" | "model">, providers?: ProviderRegistry): number {
   return verifiedModelContextWindow(route.provider, route.model, providers) ?? FALLBACK_CONTEXT_WINDOW;
 }
 
-function normalizeStrict(input: Partial<ModelConfig>, providers?: ProviderRegistry): ModelConfig {
-  const contextWindow = finiteInteger(input.contextWindow, "contextWindow", 200000, 1000000);
+function normalizeStrict(input: { routes?: Partial<Record<ModelSlot, Partial<ModelRoute>>> }, providers?: ProviderRegistry): ModelConfig {
   const routes = {} as Record<ModelSlot, ModelRoute>;
   for (const slot of MODEL_SLOTS) {
     const candidate = input.routes?.[slot];
@@ -272,34 +359,54 @@ function normalizeStrict(input: Partial<ModelConfig>, providers?: ProviderRegist
     const model = String(candidate.model ?? "").trim();
     if (!model) throw new OpenAICCError(`Model id is required for ${slot}.`, 400, "model_required", { slot });
     if (model.length > 256) throw new OpenAICCError(`Model id is too long for ${slot}.`, 400, "model_too_long", { slot });
+    const contextWindow = finiteInteger(candidate.contextWindow, `${slot}.contextWindow`, 1, 1000000);
     const maxOutputTokens = finiteInteger(candidate.maxOutputTokens, `${slot}.maxOutputTokens`, 1, 1000000);
     const verifiedOutputCap = verifiedModelMaxOutputTokens(candidate.provider, model, providers);
     if (verifiedOutputCap !== undefined && maxOutputTokens > verifiedOutputCap) {
-      throw new OpenAICCError(
-        `${slot}.maxOutputTokens cannot exceed the verified ${verifiedOutputCap}-token safety cap for ${model}.`,
-        400,
-        "max_output_exceeds_verified_cap",
-        { slot, provider: candidate.provider, model, verifiedOutputCap },
-      );
+      throw new OpenAICCError(`${slot}.maxOutputTokens cannot exceed the verified ${verifiedOutputCap}-token safety cap for ${model}.`, 400, "max_output_exceeds_verified_cap", { slot, provider: candidate.provider, model, verifiedOutputCap });
     }
+    const vision = optionalBoolean(candidate.vision, `${slot}.vision`);
+    const tools = optionalBoolean(candidate.tools, `${slot}.tools`);
+    const reasoning = optionalBoolean(candidate.reasoning, `${slot}.reasoning`);
     const credentialId = String(candidate.credentialId ?? "").trim() || undefined;
-    routes[slot] = { provider: candidate.provider, model, credentialId, maxOutputTokens };
+    routes[slot] = {
+      provider: candidate.provider,
+      model,
+      credentialId,
+      contextWindow,
+      maxOutputTokens,
+      ...(vision !== undefined ? { vision } : {}),
+      ...(tools !== undefined ? { tools } : {}),
+      ...(reasoning !== undefined ? { reasoning } : {}),
+    };
   }
-  return { contextWindow, routes };
+  return { contextWindow: maximumRouteContext(routes), routes };
 }
 
-function normalizeForLoad(input: Partial<ModelConfig>, providers?: ProviderRegistry): { config: ModelConfig; changed: boolean } {
-  const contextRaw = Number(input.contextWindow ?? DEFAULTS.contextWindow);
-  const contextWindow = Number.isFinite(contextRaw) ? Math.max(200000, Math.min(1000000, Math.floor(contextRaw))) : DEFAULTS.contextWindow;
+function normalizeForLoad(input: StoredModelConfig, providers?: ProviderRegistry): { config: ModelConfig; changed: boolean } {
+  const legacyRaw = Number(input.contextWindow ?? DEFAULT_CONTEXT_WINDOW);
+  const legacyContextWindow = Number.isFinite(legacyRaw)
+    ? Math.max(1, Math.min(1000000, Math.floor(legacyRaw)))
+    : DEFAULT_CONTEXT_WINDOW;
   const routes = {} as Record<ModelSlot, ModelRoute>;
-  let changed = false;
+  let changed = input.contextWindow !== undefined;
   for (const slot of MODEL_SLOTS) {
-    const fallback = DEFAULTS.routes[slot];
+    const fallback = DEFAULT_ROUTES[slot];
     const original = input.routes?.[slot];
     const candidate = original ?? fallback;
     const provider = isProvider(candidate.provider, providers) ? candidate.provider : fallback.provider;
     if (original && provider !== candidate.provider) changed = true;
     const model = String(candidate.model ?? fallback.model).trim() || fallback.model;
+    const rawContext = Number(candidate.contextWindow);
+    let contextWindow: number;
+    if (Number.isFinite(rawContext) && Number.isInteger(rawContext) && rawContext >= 1 && rawContext <= 1000000) {
+      contextWindow = rawContext;
+    } else if (original) {
+      contextWindow = Math.min(legacyContextWindow, verifiedUpstreamContextWindow({ provider, model }, providers));
+      changed = true;
+    } else {
+      contextWindow = fallback.contextWindow ?? DEFAULT_CONTEXT_WINDOWS[slot];
+    }
     const rawMax = Number(candidate.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS[slot]);
     let maxOutputTokens = Number.isFinite(rawMax) ? Math.max(1, Math.min(1000000, Math.floor(rawMax))) : DEFAULT_MAX_OUTPUT_TOKENS[slot];
     const verifiedOutputCap = verifiedModelMaxOutputTokens(provider, model, providers);
@@ -307,10 +414,29 @@ function normalizeForLoad(input: Partial<ModelConfig>, providers?: ProviderRegis
       maxOutputTokens = verifiedOutputCap;
       changed = true;
     }
+    const vision = validOptionalBoolean(candidate.vision);
+    const tools = validOptionalBoolean(candidate.tools);
+    const reasoning = validOptionalBoolean(candidate.reasoning);
+    if (candidate.vision !== undefined && vision === undefined) changed = true;
+    if (candidate.tools !== undefined && tools === undefined) changed = true;
+    if (candidate.reasoning !== undefined && reasoning === undefined) changed = true;
     const credentialId = String(candidate.credentialId ?? "").trim() || undefined;
-    routes[slot] = { provider, model, credentialId, maxOutputTokens };
+    routes[slot] = {
+      provider,
+      model,
+      credentialId,
+      contextWindow,
+      maxOutputTokens,
+      ...(vision !== undefined ? { vision } : {}),
+      ...(tools !== undefined ? { tools } : {}),
+      ...(reasoning !== undefined ? { reasoning } : {}),
+    };
   }
-  return { config: { contextWindow, routes }, changed };
+  return { config: { contextWindow: maximumRouteContext(routes), routes }, changed };
+}
+
+function maximumRouteContext(routes: Record<ModelSlot, ModelRoute>): number {
+  return Math.max(...MODEL_SLOTS.map((slot) => Number(routes[slot].contextWindow) || DEFAULT_CONTEXT_WINDOWS[slot]));
 }
 
 function finiteInteger(value: unknown, name: string, min: number, max: number): number {
@@ -319,6 +445,16 @@ function finiteInteger(value: unknown, name: string, min: number, max: number): 
     throw new OpenAICCError(`${name} must be an integer between ${min} and ${max}.`, 400, "invalid_number", { field: name, min, max });
   }
   return number;
+}
+
+function optionalBoolean(value: unknown, name: string): boolean | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "boolean") throw new OpenAICCError(`${name} must be true, false, or unset.`, 400, "invalid_boolean", { field: name });
+  return value;
+}
+
+function validOptionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function isProvider(value: unknown, providers?: ProviderRegistry): value is ProviderKind {

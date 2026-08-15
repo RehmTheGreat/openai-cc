@@ -1,7 +1,13 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { ModelConfig, claudeCodeModelAlias } from "./model-config.js";
+import {
+  FALLBACK_CONTEXT_WINDOW,
+  MODEL_SLOTS,
+  ModelConfig,
+  claudeCodeTransportAlias,
+  contextWindowForRoute,
+} from "./model-config.js";
 import { ProviderRegistry } from "./provider-registry.js";
 
 export interface ClaudeConfigureResult {
@@ -18,41 +24,70 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig, 
   const settings = await readJson(settingsFile);
   const env = isObject(settings.env) ? { ...settings.env as Record<string, unknown> } : {};
 
-  // Remove OpenAI-CC's obsolete hard context overrides. MAX_CONTEXT only becomes
-  // effective with DISABLE_COMPACT, which would defeat automatic compaction.
-  const oldContextValues = new Set(["700000", String(config.contextWindow)]);
+  const routeContextWindows = MODEL_SLOTS.map((slot) => contextWindowForRoute(config, slot, providers));
+  const maxContextWindow = Math.max(...routeContextWindows);
+  const oldContextValues = new Set(["700000", ...routeContextWindows.map(String)]);
   if (oldContextValues.has(String(env.CLAUDE_CODE_CONTEXT_WINDOW ?? ""))) delete env.CLAUDE_CODE_CONTEXT_WINDOW;
   if (oldContextValues.has(String(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? ""))) delete env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
 
-  // The five logical routes are already supplied through ANTHROPIC_MODEL and the
-  // per-family defaults below. Enabling gateway model discovery at the same time
-  // makes Claude Code add a second discovered copy of those same five routes to
-  // /model (for example Fable + Fable 1M). Clear the old flag on upgrades.
+  // OpenAI-CC already supplies every logical route. Gateway discovery would add
+  // another discovered copy to /model.
   delete env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY;
 
+  // Default is always present in Claude. Limit the named rows to the remaining
+  // four OpenAI-CC routes. No direct [1m] pin is used for Default or Fable.
+  settings.availableModels = ["fable", "opus", "sonnet", "haiku"];
+
+  const modelOverrides = isObject(settings.modelOverrides)
+    ? { ...settings.modelOverrides as Record<string, unknown> }
+    : {};
+
+  const fableExtended = contextWindowForRoute(config, "fable", providers) > FALLBACK_CONTEXT_WINDOW;
+  const sonnetExtended = contextWindowForRoute(config, "sonnet", providers) > FALLBACK_CONTEXT_WINDOW;
+
+  // Fable 5 and Sonnet 5 are known Claude picker models. Mapping them at the
+  // version level preserves Claude's model capability/context accounting while
+  // sending a distinct private id to OpenAI-CC. This avoids the duplicate
+  // "Fable 1M" row produced by ANTHROPIC_DEFAULT_FABLE_MODEL=... [1m].
+  if (fableExtended) {
+    delete env.ANTHROPIC_DEFAULT_FABLE_MODEL;
+    modelOverrides["claude-fable-5"] = claudeCodeTransportAlias(config, "fable", providers);
+  } else {
+    env.ANTHROPIC_DEFAULT_FABLE_MODEL = claudeCodeTransportAlias(config, "fable", providers);
+    delete modelOverrides["claude-fable-5"];
+  }
+
+  if (sonnetExtended) {
+    delete env.ANTHROPIC_DEFAULT_SONNET_MODEL;
+    modelOverrides["claude-sonnet-5"] = claudeCodeTransportAlias(config, "sonnet", providers);
+  } else {
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL = claudeCodeTransportAlias(config, "sonnet", providers);
+    delete modelOverrides["claude-sonnet-5"];
+  }
+
+  settings.modelOverrides = modelOverrides;
   settings.env = {
     ...env,
     ANTHROPIC_BASE_URL: normalizeBaseUrl(baseUrl),
     ANTHROPIC_AUTH_TOKEN: "local-not-used",
-    ANTHROPIC_MODEL: claudeCodeModelAlias(config, "default", providers),
-    ANTHROPIC_DEFAULT_FABLE_MODEL: claudeCodeModelAlias(config, "fable", providers),
+    // Sonnet 5 is always 1M on gateway deployments and does not need a visible
+    // [1m] suffix, so it is the clean long-context carrier for Default.
+    ANTHROPIC_MODEL: claudeCodeTransportAlias(config, "default", providers),
     ANTHROPIC_DEFAULT_FABLE_MODEL_NAME: "Fable",
-    ANTHROPIC_DEFAULT_OPUS_MODEL: claudeCodeModelAlias(config, "opus", providers),
+    ANTHROPIC_DEFAULT_OPUS_MODEL: claudeCodeTransportAlias(config, "opus", providers),
     ANTHROPIC_DEFAULT_OPUS_MODEL_NAME: "Opus",
-    ANTHROPIC_DEFAULT_SONNET_MODEL: claudeCodeModelAlias(config, "sonnet", providers),
     ANTHROPIC_DEFAULT_SONNET_MODEL_NAME: "Sonnet",
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeCodeModelAlias(config, "haiku", providers),
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeCodeTransportAlias(config, "haiku", providers),
     ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME: "Haiku",
-    // Claude Code 2.1.x otherwise resolves a plain ANTHROPIC_BASE_URL as
-    // first-party-with-a-custom-host and hard-falls back to a 200K budget.
     CLAUDE_CODE_USE_GATEWAY: "1",
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(config.contextWindow),
+    // Claude Code exposes only one process-level auto-compact ceiling. Keep it
+    // at the largest configured route window; the gateway and /v1/models metadata
+    // enforce/report the authoritative per-route contextWindow values.
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(maxContextWindow),
     CLAUDE_CODE_PLUGIN_PREFER_HTTPS: "1",
   };
   await writeFile(settingsFile, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
 
-  // Claude Code occasionally re-enters onboarding when routed through a local gateway.
-  // Preserve every unrelated state field and only mark the local onboarding as completed.
   const state = await readJson(stateFile);
   state.hasCompletedOnboarding = true;
   state.hasSeenOnboarding = true;
