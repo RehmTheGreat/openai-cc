@@ -3,7 +3,13 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { AccountRecord, AccountStore, ProviderKind, PublicCredential } from "./account-store.js";
 import { OpenAICCError, unprocessable } from "./errors.js";
-import { ProviderRegistry, verifiedModelContextWindow, verifiedModelMaxOutputTokens } from "./provider-registry.js";
+import {
+  ModelCapabilities,
+  ProviderRegistry,
+  modelCapabilities,
+  verifiedModelContextWindow,
+  verifiedModelMaxOutputTokens,
+} from "./provider-registry.js";
 
 export type ModelSlot = "default" | "fable" | "opus" | "sonnet" | "haiku";
 
@@ -12,6 +18,12 @@ export interface ModelRoute {
   model: string;
   credentialId?: string;
   maxOutputTokens: number;
+  /** Optional route-specific upstream context cap. The global contextWindow remains the Claude target. */
+  contextWindow?: number;
+  /** Optional capability overrides. Undefined means use provider/model discovery metadata. */
+  vision?: boolean;
+  tools?: boolean;
+  reasoning?: boolean;
 }
 
 export interface ModelConfig {
@@ -239,7 +251,23 @@ export const MODEL_SLOTS: ModelSlot[] = ["default", "fable", "opus", "sonnet", "
 
 export function contextWindowForRoute(config: ModelConfig, slot: ModelSlot, providers?: ProviderRegistry): number {
   const configuredTarget = Math.max(FALLBACK_CONTEXT_WINDOW, Math.floor(Number(config.contextWindow) || FALLBACK_CONTEXT_WINDOW));
-  return Math.min(configuredTarget, verifiedUpstreamContextWindow(config.routes[slot], providers));
+  const route = config.routes[slot];
+  const detectedCap = verifiedModelContextWindow(route.provider, route.model, providers);
+  const explicitCap = validOptionalInteger(route.contextWindow, 1, 1_000_000);
+  const upstreamCap = explicitCap !== undefined
+    ? (detectedCap !== undefined ? Math.min(explicitCap, detectedCap) : explicitCap)
+    : (detectedCap ?? FALLBACK_CONTEXT_WINDOW);
+  return Math.min(configuredTarget, upstreamCap);
+}
+
+export function capabilitiesForRoute(route: ModelRoute, providers?: ProviderRegistry): ModelCapabilities {
+  const detected = modelCapabilities(route.provider, route.model, providers);
+  return {
+    ...detected,
+    image: route.vision ?? detected.image,
+    tools: route.tools ?? detected.tools,
+    reasoning: route.reasoning ?? detected.reasoning,
+  };
 }
 
 export function claudeCodeModelAlias(config: ModelConfig, slot: ModelSlot, providers?: ProviderRegistry): string {
@@ -256,10 +284,6 @@ export function slotForClaudeCodeModel(config: ModelConfig, model: string, provi
     if (id === alias || id === stripped) return slot;
   }
   return undefined;
-}
-
-function verifiedUpstreamContextWindow(route: ModelRoute, providers?: ProviderRegistry): number {
-  return verifiedModelContextWindow(route.provider, route.model, providers) ?? FALLBACK_CONTEXT_WINDOW;
 }
 
 function normalizeStrict(input: Partial<ModelConfig>, providers?: ProviderRegistry): ModelConfig {
@@ -282,8 +306,30 @@ function normalizeStrict(input: Partial<ModelConfig>, providers?: ProviderRegist
         { slot, provider: candidate.provider, model, verifiedOutputCap },
       );
     }
+    const routeContextWindow = optionalFiniteInteger(candidate.contextWindow, `${slot}.contextWindow`, 1, 1_000_000);
+    const verifiedContextCap = verifiedModelContextWindow(candidate.provider, model, providers);
+    if (routeContextWindow !== undefined && verifiedContextCap !== undefined && routeContextWindow > verifiedContextCap) {
+      throw new OpenAICCError(
+        `${slot}.contextWindow cannot exceed the verified ${verifiedContextCap}-token cap for ${model}.`,
+        400,
+        "context_exceeds_verified_cap",
+        { slot, provider: candidate.provider, model, verifiedContextCap },
+      );
+    }
+    const vision = optionalBoolean(candidate.vision, `${slot}.vision`);
+    const tools = optionalBoolean(candidate.tools, `${slot}.tools`);
+    const reasoning = optionalBoolean(candidate.reasoning, `${slot}.reasoning`);
     const credentialId = String(candidate.credentialId ?? "").trim() || undefined;
-    routes[slot] = { provider: candidate.provider, model, credentialId, maxOutputTokens };
+    routes[slot] = {
+      provider: candidate.provider,
+      model,
+      credentialId,
+      maxOutputTokens,
+      ...(routeContextWindow !== undefined ? { contextWindow: routeContextWindow } : {}),
+      ...(vision !== undefined ? { vision } : {}),
+      ...(tools !== undefined ? { tools } : {}),
+      ...(reasoning !== undefined ? { reasoning } : {}),
+    };
   }
   return { contextWindow, routes };
 }
@@ -307,8 +353,33 @@ function normalizeForLoad(input: Partial<ModelConfig>, providers?: ProviderRegis
       maxOutputTokens = verifiedOutputCap;
       changed = true;
     }
+
+    let routeContextWindow = validOptionalInteger(candidate.contextWindow, 1, 1_000_000);
+    if (candidate.contextWindow !== undefined && routeContextWindow === undefined) changed = true;
+    const verifiedContextCap = verifiedModelContextWindow(provider, model, providers);
+    if (routeContextWindow !== undefined && verifiedContextCap !== undefined && routeContextWindow > verifiedContextCap) {
+      routeContextWindow = verifiedContextCap;
+      changed = true;
+    }
+
+    const vision = validOptionalBoolean(candidate.vision);
+    const tools = validOptionalBoolean(candidate.tools);
+    const reasoning = validOptionalBoolean(candidate.reasoning);
+    if (candidate.vision !== undefined && vision === undefined) changed = true;
+    if (candidate.tools !== undefined && tools === undefined) changed = true;
+    if (candidate.reasoning !== undefined && reasoning === undefined) changed = true;
+
     const credentialId = String(candidate.credentialId ?? "").trim() || undefined;
-    routes[slot] = { provider, model, credentialId, maxOutputTokens };
+    routes[slot] = {
+      provider,
+      model,
+      credentialId,
+      maxOutputTokens,
+      ...(routeContextWindow !== undefined ? { contextWindow: routeContextWindow } : {}),
+      ...(vision !== undefined ? { vision } : {}),
+      ...(tools !== undefined ? { tools } : {}),
+      ...(reasoning !== undefined ? { reasoning } : {}),
+    };
   }
   return { config: { contextWindow, routes }, changed };
 }
@@ -319,6 +390,28 @@ function finiteInteger(value: unknown, name: string, min: number, max: number): 
     throw new OpenAICCError(`${name} must be an integer between ${min} and ${max}.`, 400, "invalid_number", { field: name, min, max });
   }
   return number;
+}
+
+function optionalFiniteInteger(value: unknown, name: string, min: number, max: number): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  return finiteInteger(value, name, min, max);
+}
+
+function optionalBoolean(value: unknown, name: string): boolean | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "boolean") throw new OpenAICCError(`${name} must be true, false, or unset.`, 400, "invalid_boolean", { field: name });
+  return value;
+}
+
+function validOptionalInteger(value: unknown, min: number, max: number): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const number = Number(value);
+  if (!Number.isFinite(number) || !Number.isInteger(number) || number < min || number > max) return undefined;
+  return number;
+}
+
+function validOptionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function isProvider(value: unknown, providers?: ProviderRegistry): value is ProviderKind {
