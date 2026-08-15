@@ -112,7 +112,7 @@ test("bare-PC installer only requires the cleaned runtime dependency and never r
 test("shared Claude settings retain gateway context, clean route names, picker policy, and family pins", async () => {
   const source = await readFile(path.join(process.cwd(), "src", "claude-config.ts"), "utf8");
   const clients = await readFile(path.join(process.cwd(), "scripts", "configure-clients.ts"), "utf8");
-  assert.match(source, /claudeCodeTransportAlias\(config, "fable", providers\)/);
+  assert.match(source, /claudeCodeTransportAlias\(config, slot, providers\)/);
   assert.match(source, /delete env\.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY/);
   assert.doesNotMatch(source, /CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY:\s*"1"/);
   assert.match(source, /settings\.availableModels = \["fable", "opus", "sonnet", "haiku"\]/);
