@@ -49,7 +49,7 @@ if (!version.includes(CLAUDE_VERSION)) {
 }
 
 if (String(configured.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY ?? "") === "1") {
-  throw new Error("Gateway model discovery must stay disabled: the five logical routes are already supplied by ANTHROPIC_*_MODEL settings.");
+  throw new Error("Gateway model discovery must stay disabled: the five logical routes are already supplied by Claude aliases and OpenAI-CC transport mappings.");
 }
 if (String(configured.CLAUDE_CODE_USE_GATEWAY ?? "") !== "1") {
   throw new Error("CLAUDE_CODE_USE_GATEWAY must be enabled for third-party context capability handling.");
@@ -75,19 +75,34 @@ for (const [key, expected] of Object.entries(expectedNames)) {
   if (configured[key] !== expected) throw new Error(key + " must be " + expected + "; got " + configured[key]);
 }
 
-const probes = [
-  ["default/luna", configured.ANTHROPIC_MODEL, target, target],
-  ["fable/luna", configured.ANTHROPIC_DEFAULT_FABLE_MODEL, target, target],
-  ["opus/deepseek-free", configured.ANTHROPIC_DEFAULT_OPUS_MODEL, 0, 250000],
-  ["sonnet/gemini-flash-lite", configured.ANTHROPIC_DEFAULT_SONNET_MODEL, target, target],
-  ["haiku/gemini-flash-lite", configured.ANTHROPIC_DEFAULT_HAIKU_MODEL, target, target],
-];
+if (configured.ANTHROPIC_DEFAULT_FABLE_MODEL !== undefined) {
+  throw new Error("Extended Fable must not use a direct [1m] family pin; got " + configured.ANTHROPIC_DEFAULT_FABLE_MODEL);
+}
+if (configured.ANTHROPIC_DEFAULT_SONNET_MODEL !== undefined) {
+  throw new Error("Extended Sonnet must use version-level modelOverrides; got direct pin " + configured.ANTHROPIC_DEFAULT_SONNET_MODEL);
+}
+if (settings.modelOverrides?.["claude-fable-5"] !== "openai-cc-fable") {
+  throw new Error("Missing Fable modelOverride transport mapping: " + JSON.stringify(settings.modelOverrides));
+}
+if (settings.modelOverrides?.["claude-sonnet-5"] !== "openai-cc-sonnet") {
+  throw new Error("Missing Sonnet modelOverride transport mapping: " + JSON.stringify(settings.modelOverrides));
+}
 
 console.log("Claude Code version:", version.split("\n")[0]);
 console.log("CLAUDE_CODE_USE_GATEWAY=" + configured.CLAUDE_CODE_USE_GATEWAY);
 console.log("CLAUDE_CODE_AUTO_COMPACT_WINDOW=" + configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
 console.log("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=" + String(configured.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY ?? "<unset>"));
+console.log("ANTHROPIC_MODEL=" + configured.ANTHROPIC_MODEL);
+console.log("modelOverrides=" + JSON.stringify(settings.modelOverrides));
 console.log("availableModels=" + JSON.stringify(settings.availableModels));
+
+const probes = [
+  ["default/luna", configured.ANTHROPIC_MODEL, target, target],
+  ["fable/luna", "fable", target, target],
+  ["opus/deepseek-free", configured.ANTHROPIC_DEFAULT_OPUS_MODEL, 0, 250000],
+  ["sonnet/gemini-flash-lite", "sonnet", target, target],
+  ["haiku/gemini-flash-lite", configured.ANTHROPIC_DEFAULT_HAIKU_MODEL, target, target],
+];
 
 for (const [label, model, min, max] of probes) {
   if (!model) throw new Error("Missing configured model for " + label);
@@ -96,18 +111,3 @@ for (const [label, model, min, max] of probes) {
     throw new Error(label + " context " + budget + " outside expected range " + min + ".." + max);
   }
 }
-
-const fableAliasBudget = probe("fable alias", "fable");
-if (fableAliasBudget !== target) {
-  throw new Error("Base Fable alias lost the configured context target: " + fableAliasBudget + " != " + target);
-}
-
-// Exploratory compatibility probes. Claude Code strips [1m] before allowlist
-// matching, so availableModels cannot distinguish a base family from its 1M
-// variant. The product fix should therefore use a native long-context carrier
-// without the suffix if Claude 2.1.226 budgets it correctly behind a gateway.
-const bareFable = String(configured.ANTHROPIC_DEFAULT_FABLE_MODEL || "").replace(/\[1m\]$/i, "");
-if (bareFable) probe("probe bare fable carrier", bareFable);
-probe("probe namespaced fable carrier", "claude-fable-5-openai-cc-default");
-const bareDefault = String(configured.ANTHROPIC_MODEL || "").replace(/\[1m\]$/i, "");
-if (bareDefault) probe("probe bare default carrier", bareDefault);
