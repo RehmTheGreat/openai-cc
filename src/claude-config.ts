@@ -1,7 +1,12 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { ModelConfig, claudeCodeModelAlias } from "./model-config.js";
+import {
+  FALLBACK_CONTEXT_WINDOW,
+  ModelConfig,
+  claudeCodeModelAlias,
+  contextWindowForRoute,
+} from "./model-config.js";
 import { ProviderRegistry } from "./provider-registry.js";
 
 export interface ClaudeConfigureResult {
@@ -24,27 +29,57 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig, 
   if (oldContextValues.has(String(env.CLAUDE_CODE_CONTEXT_WINDOW ?? ""))) delete env.CLAUDE_CODE_CONTEXT_WINDOW;
   if (oldContextValues.has(String(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? ""))) delete env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
 
-  // The five logical routes are supplied through ANTHROPIC_MODEL and the
-  // per-family defaults below. Gateway discovery would add a second copy.
+  // The five logical routes are supplied by the standard family aliases plus
+  // OpenAI-CC's transport mapping. Gateway discovery would add a second copy.
   delete env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY;
 
-  // Claude Code also exposes explicit [1m] variants when a pinned family model
-  // uses an extended-context carrier. Keep the carrier (it is required for the
-  // real client context budget), but allow only the four named logical aliases.
-  // Claude's special Default option is always present even when not allowlisted,
-  // yielding exactly: Default, Fable, Opus, Sonnet, Haiku.
   settings.availableModels = ["fable", "opus", "sonnet", "haiku"];
 
+  const modelOverrides = isObject(settings.modelOverrides)
+    ? { ...settings.modelOverrides as Record<string, unknown> }
+    : {};
+
+  const defaultExtended = contextWindowForRoute(config, "default", providers) > FALLBACK_CONTEXT_WINDOW;
+  const fableExtended = contextWindowForRoute(config, "fable", providers) > FALLBACK_CONTEXT_WINDOW;
+  const sonnetExtended = contextWindowForRoute(config, "sonnet", providers) > FALLBACK_CONTEXT_WINDOW;
+
+  // A direct [1m] pin makes Claude Code render a second "Default 1M" or
+  // "Fable 1M" picker row. For Default, Sonnet 5 is the one current gateway
+  // carrier that Claude 2.1.x budgets natively at 1M without a suffix.
+  const defaultModel = defaultExtended
+    ? "claude-sonnet-5"
+    : claudeCodeModelAlias(config, "default", providers);
+
+  // For Fable/Sonnet, use Claude's version-level modelOverrides when the route
+  // needs >200K. The picker remains on the ordinary family row while Claude
+  // computes capability from the known Anthropic model and sends OpenAI-CC's
+  // distinct transport id to the gateway. At <=200K, use the conservative
+  // direct pin so the client window cannot exceed the route's verified cap.
+  if (fableExtended) {
+    delete env.ANTHROPIC_DEFAULT_FABLE_MODEL;
+    modelOverrides["claude-fable-5"] = "openai-cc-fable";
+  } else {
+    env.ANTHROPIC_DEFAULT_FABLE_MODEL = claudeCodeModelAlias(config, "fable", providers);
+    delete modelOverrides["claude-fable-5"];
+  }
+
+  if (sonnetExtended) {
+    delete env.ANTHROPIC_DEFAULT_SONNET_MODEL;
+    modelOverrides["claude-sonnet-5"] = "openai-cc-sonnet";
+  } else {
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL = claudeCodeModelAlias(config, "sonnet", providers);
+    delete modelOverrides["claude-sonnet-5"];
+  }
+
+  settings.modelOverrides = modelOverrides;
   settings.env = {
     ...env,
     ANTHROPIC_BASE_URL: normalizeBaseUrl(baseUrl),
     ANTHROPIC_AUTH_TOKEN: "local-not-used",
-    ANTHROPIC_MODEL: claudeCodeModelAlias(config, "default", providers),
-    ANTHROPIC_DEFAULT_FABLE_MODEL: claudeCodeModelAlias(config, "fable", providers),
+    ANTHROPIC_MODEL: defaultModel,
     ANTHROPIC_DEFAULT_FABLE_MODEL_NAME: "Fable",
     ANTHROPIC_DEFAULT_OPUS_MODEL: claudeCodeModelAlias(config, "opus", providers),
     ANTHROPIC_DEFAULT_OPUS_MODEL_NAME: "Opus",
-    ANTHROPIC_DEFAULT_SONNET_MODEL: claudeCodeModelAlias(config, "sonnet", providers),
     ANTHROPIC_DEFAULT_SONNET_MODEL_NAME: "Sonnet",
     ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeCodeModelAlias(config, "haiku", providers),
     ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME: "Haiku",
