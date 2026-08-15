@@ -56,9 +56,7 @@ export const FALLBACK_CONTEXT_WINDOW = 200000;
 export const CLOUDFLARE_GEMMA_MODEL = "@cf/google/gemma-4-26b-a4b-it";
 export const GEMINI_FLASH_LITE_MODEL = "gemini-3.5-flash-lite";
 
-// Claude Code derives its usable window from its own model catalog, not from
-// /v1/models alone. Standard ids intentionally remain conservative at 200K.
-const CLAUDE_CODE_STANDARD_MODEL_IDS: Record<ModelSlot, string> = {
+const CLAUDE_PUBLIC_STANDARD_MODEL_IDS: Record<ModelSlot, string> = {
   default: "claude-opus-4-8",
   fable: "claude-fable-5",
   opus: "claude-opus-5",
@@ -66,13 +64,23 @@ const CLAUDE_CODE_STANDARD_MODEL_IDS: Record<ModelSlot, string> = {
   haiku: "claude-haiku-4-5",
 };
 
-// Extended routes need distinct provider-side ids so the gateway can still tell
-// the five logical slots apart. Default uses Sonnet 5 because Claude 2.1.x
-// budgets that known carrier at 1M behind a gateway without a visible [1m]
-// suffix. Fable/Sonnet use modelOverrides: Claude budgets the known family model
-// but sends these OpenAI-CC ids to the gateway. Haiku retains its hidden carrier;
-// it does not create a Haiku 1M picker row.
-const CLAUDE_CODE_EXTENDED_MODEL_IDS: Record<ModelSlot, string> = {
+const CLAUDE_PUBLIC_EXTENDED_MODEL_IDS: Record<ModelSlot, string> = {
+  default: "claude-opus-4-8[1m]",
+  fable: "claude-fable-5[1m]",
+  opus: "claude-opus-5[1m]",
+  sonnet: "claude-sonnet-4-6[1m]",
+  haiku: "claude-opus-4-7[1m]",
+};
+
+const CLAUDE_CODE_STANDARD_TRANSPORT_IDS: Record<ModelSlot, string> = {
+  default: "claude-opus-4-8",
+  fable: "claude-fable-5",
+  opus: "claude-opus-5",
+  sonnet: "claude-sonnet-4-6",
+  haiku: "claude-haiku-4-5",
+};
+
+const CLAUDE_CODE_EXTENDED_TRANSPORT_IDS: Record<ModelSlot, string> = {
   default: "claude-sonnet-5",
   fable: "openai-cc-fable",
   opus: "claude-opus-5[1m]",
@@ -201,9 +209,7 @@ export class ModelConfigStore extends EventEmitter {
     const ready = sameProvider.filter((credential) => credential.status === "ready");
     if (route.credentialId) {
       const pinned = sameProvider.find((credential) => credential.id === route.credentialId);
-      if (!pinned) {
-        return baseHealth(slot, route, ready, contextWindow, "unavailable", "Pinned credential is missing or belongs to another provider.");
-      }
+      if (!pinned) return baseHealth(slot, route, ready, contextWindow, "unavailable", "Pinned credential is missing or belongs to another provider.");
       if (pinned.status !== "ready") {
         const reset = pinned.limitResetsAt ? ` until ${pinned.limitResetsAt}` : "";
         return baseHealth(slot, route, ready, contextWindow, "unavailable", `Pinned credential is ${pinned.status}${reset}.`);
@@ -234,7 +240,7 @@ export class ModelConfigStore extends EventEmitter {
         throw unprocessable(
           `Credential ${route.credentialId} uses ${credential.provider}, but ${slot} is configured for ${route.provider}.`,
           "credential_provider_mismatch",
-          { slot, credentialId: route.credentialId, routeProvider: credential.provider },
+          { slot, credentialId: route.credentialId, routeProvider: route.provider, credentialProvider: credential.provider },
         );
       }
     }
@@ -265,14 +271,27 @@ export function capabilitiesForRoute(route: ModelRoute, providers?: ProviderRegi
   };
 }
 
+/** Public/desktop Claude-facing alias. Never contains a private OpenAI-CC transport id. */
 export function claudeCodeModelAlias(config: ModelConfig, slot: ModelSlot, providers?: ProviderRegistry): string {
   return contextWindowForRoute(config, slot, providers) > FALLBACK_CONTEXT_WINDOW
-    ? CLAUDE_CODE_EXTENDED_MODEL_IDS[slot]
-    : CLAUDE_CODE_STANDARD_MODEL_IDS[slot];
+    ? CLAUDE_PUBLIC_EXTENDED_MODEL_IDS[slot]
+    : CLAUDE_PUBLIC_STANDARD_MODEL_IDS[slot];
+}
+
+/** Provider-side model id sent by Claude Code after picker/model capability resolution. */
+export function claudeCodeTransportAlias(config: ModelConfig, slot: ModelSlot, providers?: ProviderRegistry): string {
+  return contextWindowForRoute(config, slot, providers) > FALLBACK_CONTEXT_WINDOW
+    ? CLAUDE_CODE_EXTENDED_TRANSPORT_IDS[slot]
+    : CLAUDE_CODE_STANDARD_TRANSPORT_IDS[slot];
 }
 
 export function slotForClaudeCodeModel(config: ModelConfig, model: string, providers?: ProviderRegistry): ModelSlot | undefined {
   const id = String(model || "").trim().toLowerCase();
+  for (const slot of MODEL_SLOTS) {
+    const transport = claudeCodeTransportAlias(config, slot, providers).toLowerCase();
+    const strippedTransport = transport.replace(/\[1m\]$/i, "");
+    if (id === transport || id === strippedTransport) return slot;
+  }
   for (const slot of MODEL_SLOTS) {
     const alias = claudeCodeModelAlias(config, slot, providers).toLowerCase();
     const stripped = alias.replace(/\[1m\]$/i, "");
@@ -298,12 +317,7 @@ function normalizeStrict(input: Partial<ModelConfig>, providers?: ProviderRegist
     const maxOutputTokens = finiteInteger(candidate.maxOutputTokens, `${slot}.maxOutputTokens`, 1, 1000000);
     const verifiedOutputCap = verifiedModelMaxOutputTokens(candidate.provider, model, providers);
     if (verifiedOutputCap !== undefined && maxOutputTokens > verifiedOutputCap) {
-      throw new OpenAICCError(
-        `${slot}.maxOutputTokens cannot exceed the verified ${verifiedOutputCap}-token safety cap for ${model}.`,
-        400,
-        "max_output_exceeds_verified_cap",
-        { slot, provider: candidate.provider, model, verifiedOutputCap },
-      );
+      throw new OpenAICCError(`${slot}.maxOutputTokens cannot exceed the verified ${verifiedOutputCap}-token safety cap for ${model}.`, 400, "max_output_exceeds_verified_cap", { slot, provider: candidate.provider, model, verifiedOutputCap });
     }
     const vision = optionalBoolean(candidate.vision, `${slot}.vision`);
     const tools = optionalBoolean(candidate.tools, `${slot}.tools`);
@@ -341,14 +355,12 @@ function normalizeForLoad(input: Partial<ModelConfig>, providers?: ProviderRegis
       maxOutputTokens = verifiedOutputCap;
       changed = true;
     }
-
     const vision = validOptionalBoolean(candidate.vision);
     const tools = validOptionalBoolean(candidate.tools);
     const reasoning = validOptionalBoolean(candidate.reasoning);
     if (candidate.vision !== undefined && vision === undefined) changed = true;
     if (candidate.tools !== undefined && tools === undefined) changed = true;
     if (candidate.reasoning !== undefined && reasoning === undefined) changed = true;
-
     const credentialId = String(candidate.credentialId ?? "").trim() || undefined;
     routes[slot] = {
       provider,
