@@ -83,7 +83,7 @@ test("route save rejects unsupported provider, empty model, invalid limits, and 
   accounts.close();
 });
 
-test("verified route contexts drive Claude Code capability aliases without over-advertising", async () => {
+test("verified route contexts drive distinct picker-safe transport ids without over-advertising", async () => {
   const { accounts, models } = await fixture();
   const config = models.snapshot();
   assert.equal(config.contextWindow, 1000000);
@@ -93,14 +93,14 @@ test("verified route contexts drive Claude Code capability aliases without over-
   assert.equal(contextWindowForRoute(config, "sonnet"), 1000000);
   assert.equal(contextWindowForRoute(config, "haiku"), 1000000);
 
-  assert.equal(claudeCodeModelAlias(config, "default"), "claude-opus-4-8[1m]");
-  assert.equal(claudeCodeModelAlias(config, "fable"), "claude-fable-5[1m]");
+  assert.equal(claudeCodeModelAlias(config, "default"), "claude-sonnet-5");
+  assert.equal(claudeCodeModelAlias(config, "fable"), "openai-cc-fable");
   assert.equal(claudeCodeModelAlias(config, "opus"), "claude-opus-5");
-  assert.equal(claudeCodeModelAlias(config, "sonnet"), "claude-sonnet-5");
+  assert.equal(claudeCodeModelAlias(config, "sonnet"), "openai-cc-sonnet");
   assert.equal(claudeCodeModelAlias(config, "haiku"), "claude-opus-4-7[1m]");
-  assert.equal(models.slotForRequestedModel("claude-opus-4-8[1m]"), "default");
-  assert.equal(models.slotForRequestedModel("claude-fable-5"), "fable");
-  assert.equal(models.slotForRequestedModel("claude-sonnet-5"), "sonnet");
+  assert.equal(models.slotForRequestedModel("claude-sonnet-5"), "default");
+  assert.equal(models.slotForRequestedModel("openai-cc-fable"), "fable");
+  assert.equal(models.slotForRequestedModel("openai-cc-sonnet"), "sonnet");
   assert.equal(models.slotForRequestedModel("claude-opus-4-7[1m]"), "haiku");
 
   const changed = models.snapshot();
