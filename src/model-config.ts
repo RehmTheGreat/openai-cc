@@ -163,10 +163,21 @@ export class ModelConfigStore extends EventEmitter {
   }
 
   async update(input: ModelConfigUpdate): Promise<ModelConfig> {
-    const candidateRoutes = Object.fromEntries(MODEL_SLOTS.map((slot) => [
-      slot,
-      { ...this.state.routes[slot], ...(input.routes?.[slot] ?? {}) },
-    ])) as Record<ModelSlot, ModelRoute>;
+    const candidateRoutes = Object.fromEntries(MODEL_SLOTS.map((slot) => {
+      const previous = this.state.routes[slot];
+      const patch = input.routes?.[slot] ?? {};
+      const merged: ModelRoute = { ...previous, ...patch };
+      const modelChanged = patch.provider !== undefined && patch.provider !== previous.provider
+        || patch.model !== undefined && patch.model !== previous.model;
+      if (modelChanged && patch.contextWindow === undefined) {
+        // API/legacy callers that switch models without supplying context get a
+        // known provider/model value automatically. The Admin sends the route
+        // context explicitly after seeding it from live model discovery.
+        const detected = verifiedModelContextWindow(merged.provider, merged.model, this.providers);
+        if (detected !== undefined) merged.contextWindow = Math.max(1, Math.min(1_000_000, Math.floor(detected)));
+      }
+      return [slot, merged];
+    })) as Record<ModelSlot, ModelRoute>;
     const candidate = normalizeStrict({ routes: candidateRoutes }, this.providers);
     this.validatePins(candidate);
     this.state = candidate;
