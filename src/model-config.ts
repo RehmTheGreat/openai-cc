@@ -18,8 +18,6 @@ export interface ModelRoute {
   model: string;
   credentialId?: string;
   maxOutputTokens: number;
-  /** Optional route-specific upstream context cap. The global contextWindow remains the Claude target. */
-  contextWindow?: number;
   /** Optional capability overrides. Undefined means use provider/model discovery metadata. */
   vision?: boolean;
   tools?: boolean;
@@ -27,6 +25,7 @@ export interface ModelRoute {
 }
 
 export interface ModelConfig {
+  /** The single Claude-facing context target for every route. Verified upstream caps can lower the effective route window. */
   contextWindow: number;
   routes: Record<ModelSlot, ModelRoute>;
 }
@@ -251,13 +250,7 @@ export const MODEL_SLOTS: ModelSlot[] = ["default", "fable", "opus", "sonnet", "
 
 export function contextWindowForRoute(config: ModelConfig, slot: ModelSlot, providers?: ProviderRegistry): number {
   const configuredTarget = Math.max(FALLBACK_CONTEXT_WINDOW, Math.floor(Number(config.contextWindow) || FALLBACK_CONTEXT_WINDOW));
-  const route = config.routes[slot];
-  const detectedCap = verifiedModelContextWindow(route.provider, route.model, providers);
-  const explicitCap = validOptionalInteger(route.contextWindow, 1, 1_000_000);
-  const upstreamCap = explicitCap !== undefined
-    ? (detectedCap !== undefined ? Math.min(explicitCap, detectedCap) : explicitCap)
-    : (detectedCap ?? FALLBACK_CONTEXT_WINDOW);
-  return Math.min(configuredTarget, upstreamCap);
+  return Math.min(configuredTarget, verifiedUpstreamContextWindow(config.routes[slot], providers));
 }
 
 export function capabilitiesForRoute(route: ModelRoute, providers?: ProviderRegistry): ModelCapabilities {
@@ -286,6 +279,10 @@ export function slotForClaudeCodeModel(config: ModelConfig, model: string, provi
   return undefined;
 }
 
+function verifiedUpstreamContextWindow(route: ModelRoute, providers?: ProviderRegistry): number {
+  return verifiedModelContextWindow(route.provider, route.model, providers) ?? FALLBACK_CONTEXT_WINDOW;
+}
+
 function normalizeStrict(input: Partial<ModelConfig>, providers?: ProviderRegistry): ModelConfig {
   const contextWindow = finiteInteger(input.contextWindow, "contextWindow", 200000, 1000000);
   const routes = {} as Record<ModelSlot, ModelRoute>;
@@ -306,16 +303,6 @@ function normalizeStrict(input: Partial<ModelConfig>, providers?: ProviderRegist
         { slot, provider: candidate.provider, model, verifiedOutputCap },
       );
     }
-    const routeContextWindow = optionalFiniteInteger(candidate.contextWindow, `${slot}.contextWindow`, 1, 1_000_000);
-    const verifiedContextCap = verifiedModelContextWindow(candidate.provider, model, providers);
-    if (routeContextWindow !== undefined && verifiedContextCap !== undefined && routeContextWindow > verifiedContextCap) {
-      throw new OpenAICCError(
-        `${slot}.contextWindow cannot exceed the verified ${verifiedContextCap}-token cap for ${model}.`,
-        400,
-        "context_exceeds_verified_cap",
-        { slot, provider: candidate.provider, model, verifiedContextCap },
-      );
-    }
     const vision = optionalBoolean(candidate.vision, `${slot}.vision`);
     const tools = optionalBoolean(candidate.tools, `${slot}.tools`);
     const reasoning = optionalBoolean(candidate.reasoning, `${slot}.reasoning`);
@@ -325,7 +312,6 @@ function normalizeStrict(input: Partial<ModelConfig>, providers?: ProviderRegist
       model,
       credentialId,
       maxOutputTokens,
-      ...(routeContextWindow !== undefined ? { contextWindow: routeContextWindow } : {}),
       ...(vision !== undefined ? { vision } : {}),
       ...(tools !== undefined ? { tools } : {}),
       ...(reasoning !== undefined ? { reasoning } : {}),
@@ -354,14 +340,6 @@ function normalizeForLoad(input: Partial<ModelConfig>, providers?: ProviderRegis
       changed = true;
     }
 
-    let routeContextWindow = validOptionalInteger(candidate.contextWindow, 1, 1_000_000);
-    if (candidate.contextWindow !== undefined && routeContextWindow === undefined) changed = true;
-    const verifiedContextCap = verifiedModelContextWindow(provider, model, providers);
-    if (routeContextWindow !== undefined && verifiedContextCap !== undefined && routeContextWindow > verifiedContextCap) {
-      routeContextWindow = verifiedContextCap;
-      changed = true;
-    }
-
     const vision = validOptionalBoolean(candidate.vision);
     const tools = validOptionalBoolean(candidate.tools);
     const reasoning = validOptionalBoolean(candidate.reasoning);
@@ -375,7 +353,6 @@ function normalizeForLoad(input: Partial<ModelConfig>, providers?: ProviderRegis
       model,
       credentialId,
       maxOutputTokens,
-      ...(routeContextWindow !== undefined ? { contextWindow: routeContextWindow } : {}),
       ...(vision !== undefined ? { vision } : {}),
       ...(tools !== undefined ? { tools } : {}),
       ...(reasoning !== undefined ? { reasoning } : {}),
@@ -392,22 +369,10 @@ function finiteInteger(value: unknown, name: string, min: number, max: number): 
   return number;
 }
 
-function optionalFiniteInteger(value: unknown, name: string, min: number, max: number): number | undefined {
-  if (value === undefined || value === null || value === "") return undefined;
-  return finiteInteger(value, name, min, max);
-}
-
 function optionalBoolean(value: unknown, name: string): boolean | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value !== "boolean") throw new OpenAICCError(`${name} must be true, false, or unset.`, 400, "invalid_boolean", { field: name });
   return value;
-}
-
-function validOptionalInteger(value: unknown, min: number, max: number): number | undefined {
-  if (value === undefined || value === null || value === "") return undefined;
-  const number = Number(value);
-  if (!Number.isFinite(number) || !Number.isInteger(number) || number < min || number > max) return undefined;
-  return number;
 }
 
 function validOptionalBoolean(value: unknown): boolean | undefined {
