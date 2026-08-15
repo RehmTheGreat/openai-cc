@@ -59,15 +59,15 @@ if (mode === "seed") {
   await accounts.disable(disabledId);
   await accounts.prefer(preferredId);
 
-  // Route model ids are persisted user selections. The Admin obtains new ids
-  // from the provider's /models API; there is no provider-local manual catalog.
+  // Route model ids and route-specific context are persisted user selections.
+  // The Admin obtains new ids/metadata from the provider's /models API.
   await models.update({
-    contextWindow: 850000,
     routes: {
       default: {
         provider: provider.id,
         model: modelId,
         credentialId: preferredId,
+        contextWindow: 850000,
         maxOutputTokens: 8192,
         tools: true,
       },
@@ -101,9 +101,10 @@ if (mode === "seed") {
   assert.equal(modelConfig.routes.default.provider, provider.id);
   assert.equal(modelConfig.routes.default.model, modelId);
   assert.equal(modelConfig.routes.default.credentialId, preferredId);
+  assert.equal(modelConfig.routes.default.contextWindow, 850000);
   assert.equal(modelConfig.routes.default.maxOutputTokens, 8192);
   assert.equal(modelConfig.routes.default.tools, true);
-  assert.equal(modelConfig.contextWindow, 850000);
+  assert.equal(modelConfig.contextWindow, undefined, "legacy global context setting must be removed");
 
   console.log("Session 6A persistence fixture verified.");
 }
