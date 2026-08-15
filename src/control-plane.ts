@@ -107,17 +107,6 @@ export class ControlPlaneDispatcher {
         await this.providers.deleteCustom(id);
         return void json(res, 200, { ok: true });
       }
-      if (req.method === "POST" && /^\/admin\/providers\/[^/]+\/models$/.test(url.pathname)) {
-        const id = providerIdFromPath(url.pathname);
-        const body = await readJson<any>(req, ADMIN_BODY_LIMIT, true);
-        return void json(res, 200, await this.providers.upsertManualModel(id, body));
-      }
-      if (req.method === "DELETE" && /^\/admin\/providers\/[^/]+\/models$/.test(url.pathname)) {
-        const id = providerIdFromPath(url.pathname);
-        const body = await readJson<any>(req, ADMIN_BODY_LIMIT, true);
-        await this.providers.deleteManualModel(id, String(body.id ?? ""));
-        return void json(res, 200, { ok: true });
-      }
       if (req.method === "GET" && /^\/admin\/credentials\/[^/]+\/models$/.test(url.pathname)) {
         const id = credentialIdFromPath(url.pathname);
         const account = this.store.get(id);
