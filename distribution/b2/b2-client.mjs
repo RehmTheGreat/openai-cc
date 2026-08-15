@@ -28,7 +28,10 @@ async function checkedJson(response, action) {
   try { body = text ? JSON.parse(text) : null; } catch { }
   if (!response.ok) {
     const detail = body?.message || body?.code || text || `HTTP ${response.status}`;
-    throw new Error(`${action} failed: ${detail}`);
+    const error = new Error(`${action} failed: ${detail}`);
+    error.status = response.status;
+    error.code = body?.code;
+    throw error;
   }
   if (!body || typeof body !== "object") throw new Error(`${action} returned invalid JSON.`);
   return body;
@@ -89,6 +92,47 @@ export async function uploadFile(uploadUrl, uploadAuthorizationToken, fileName, 
     throw new Error(`B2 upload SHA-1 verification failed for ${fileName}.`);
   }
   return body;
+}
+
+export function isRetryableB2ServerError(error) {
+  const status = Number(error?.status);
+  return Number.isInteger(status) && status >= 500 && status <= 599;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function uploadFileWithRetry(auth, bucketId, fileName, path, options = {}) {
+  const maxAttempts = options.maxAttempts ?? 5;
+  const baseDelayMs = options.baseDelayMs ?? 500;
+  const onRetry = typeof options.onRetry === "function" ? options.onRetry : null;
+
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 10) {
+    throw new Error("B2 upload maxAttempts must be an integer from 1 to 10.");
+  }
+  if (!Number.isFinite(baseDelayMs) || baseDelayMs < 0) {
+    throw new Error("B2 upload baseDelayMs must be a non-negative number.");
+  }
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      // Upload URLs are disposable. Acquire a fresh one for every attempt so a
+      // transient 5xx from a single B2 storage tome is never reused.
+      const upload = await apiJson(auth, "b2_get_upload_url", { bucketId });
+      if (!upload.uploadUrl || !upload.authorizationToken) {
+        throw new Error("b2_get_upload_url returned incomplete upload metadata.");
+      }
+      return await uploadFile(upload.uploadUrl, upload.authorizationToken, fileName, path);
+    } catch (error) {
+      if (!isRetryableB2ServerError(error) || attempt === maxAttempts) throw error;
+      const delayMs = baseDelayMs * (2 ** (attempt - 1));
+      onRetry?.({ attempt, nextAttempt: attempt + 1, maxAttempts, delayMs, error });
+      await sleep(delayMs);
+    }
+  }
+
+  throw new Error(`B2 upload ${fileName} exhausted retry attempts.`);
 }
 
 export function requireExactCapabilities(allowed, expected) {
