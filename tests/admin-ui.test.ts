@@ -96,7 +96,7 @@ async function mutate(base: string, csrf: string, pathname: string, body: unknow
   });
 }
 
-test("Admin UI is lean, responsive, and does not expose manual credential/model ID fields", async () => {
+test("Admin UI keeps one context target, edits route capabilities, and has no manual model adder", async () => {
   const f = await fixture();
   try {
     assert.match(f.html, /class="claude-mark"/);
@@ -111,17 +111,22 @@ test("Admin UI is lean, responsive, and does not expose manual credential/model 
     assert.match(f.html, /id="key-name"/);
     assert.doesNotMatch(f.html, /id="key-id"/);
     assert.doesNotMatch(f.html, /id="oauth-name"/);
-    assert.doesNotMatch(f.html, /<input[^>]+id="m-/);
     assert.match(f.html, /<select class="route-model"/);
 
-    assert.match(f.html, /Context: <strong>/);
-    assert.match(f.html, /Vision: <strong>/);
-    assert.match(f.html, /Tools: <strong>/);
-    assert.match(f.html, /Reasoning: <strong>/);
+    assert.match(f.html, /<label for="context-window">Model Context Window<\/label>/);
+    assert.match(f.html, /Single Claude context target for all routes/);
+    assert.match(f.html, /data-capability="vision"/);
+    assert.match(f.html, /data-capability="tools"/);
+    assert.match(f.html, /data-capability="reasoning"/);
+    assert.match(f.html, /Auto — not reported/);
+    assert.match(f.html, /Supported<\/option>/);
+    assert.match(f.html, /Not supported<\/option>/);
+
+    assert.doesNotMatch(f.html, /Manual model ID/i);
+    assert.doesNotMatch(f.html, /data-manual-model/);
+    assert.doesNotMatch(f.html, /saveManualModel/);
+    assert.match(f.html, /Models are discovered automatically from credentials/);
     assert.match(f.html, /id="provider-tier"/);
-    assert.match(f.html, /name="tools"/);
-    assert.match(f.html, /name="reasoning"/);
-    assert.match(f.html, /defaults 1000000/);
     assert.match(f.html, /@media\(max-width:900px\)/);
     assert.match(f.html, /@media\(max-width:620px\)/);
 
@@ -159,20 +164,37 @@ test("simplified Admin credential creation generates internal IDs and does not r
   }
 });
 
-test("Admin exposes technical upstream routing while Claude-facing names remain clean", async () => {
+test("Admin route capability overrides persist while Claude-facing names remain clean", async () => {
   const f = await fixture();
   try {
-    const stateResponse = await fetch(`${f.base}/admin/state`);
+    let stateResponse = await fetch(`${f.base}/admin/state`);
     assert.equal(stateResponse.status, 200);
-    const state = await stateResponse.json() as any;
+    let state = await stateResponse.json() as any;
     assert.equal(state.modelConfig.routes.fable.provider, "chatgpt");
     assert.equal(state.modelConfig.routes.fable.model, "gpt-5.6-luna");
     assert.equal(state.modelConfig.routes.sonnet.provider, "google");
     assert.equal(state.modelConfig.routes.sonnet.model, "gemini-3.5-flash-lite");
     assert.equal(typeof state.routeHealth.fable.contextWindow, "number");
 
+    const next = structuredClone(state.modelConfig);
+    next.routes.sonnet.vision = false;
+    next.routes.sonnet.tools = false;
+    next.routes.sonnet.reasoning = false;
+    const saved = await mutate(f.base, f.csrf, "/admin/model-config", next);
+    assert.equal(saved.status, 200);
+
+    stateResponse = await fetch(`${f.base}/admin/state`);
+    state = await stateResponse.json() as any;
+    assert.equal(state.modelConfig.contextWindow, 1_000_000);
+    assert.equal(state.modelConfig.routes.sonnet.vision, false);
+    assert.equal(state.modelConfig.routes.sonnet.tools, false);
+    assert.equal(state.modelConfig.routes.sonnet.reasoning, false);
+
     const publicModels = await (await fetch(`${f.base}/v1/models`)).json() as any;
     assert.deepEqual(publicModels.data.map((model: any) => model.display_name), ["Default", "Fable", "Opus", "Sonnet", "Haiku"]);
+    const sonnet = publicModels.data.find((model: any) => model.display_name === "Sonnet");
+    assert.equal(sonnet.capabilities.image_input.supported, false);
+    assert.equal(sonnet.capabilities.thinking.supported, false);
     const publicJson = JSON.stringify(publicModels);
     assert.equal(publicJson.includes("gpt-5.6-luna"), false);
     assert.equal(publicJson.includes("gemini-3.5-flash-lite"), false);
