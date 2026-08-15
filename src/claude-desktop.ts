@@ -9,7 +9,6 @@ import {
   capabilitiesForRoute,
   claudeCodeModelAlias,
   contextWindowForRoute,
-  slotForClaudeCodeModel,
 } from "./model-config.js";
 import { ProviderRegistry } from "./provider-registry.js";
 
@@ -54,7 +53,10 @@ export function claudeDesktopModel(config: ModelConfig, modelId: string, provide
   const exact = claudeDesktopModels(config, providers).find((model) => model.id.toLowerCase() === normalized);
   if (exact) return exact;
 
-  const slot = slotForClaudeCodeModel(config, normalized, providers) ?? desktopSlotForModel(normalized);
+  // openai-cc-* ids are private Claude Code transport carriers. They must never
+  // become public model-discovery aliases or additional picker rows.
+  if (normalized.startsWith("openai-cc-")) return undefined;
+  const slot = desktopSlotForModel(normalized);
   return slot ? modelInfo(slot, config, providers) : undefined;
 }
 
