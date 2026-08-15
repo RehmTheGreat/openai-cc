@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
-import { authorize, apiJson, requireBucketScope, requireExactCapabilities, uploadFile } from "./b2-client.mjs";
+import { authorize, requireBucketScope, requireExactCapabilities, uploadFileWithRetry } from "./b2-client.mjs";
 
 function fail(message) { throw new Error(message); }
 function option(name, fallback) {
@@ -52,9 +52,6 @@ if (actualCapabilities.includes("writeFiles") && (actualCapabilities.length !== 
 requireExactCapabilities(auth.storage.allowed, ["writeFiles"]);
 requireBucketScope(auth.storage.allowed, bucketId, "releases/");
 
-const upload = await apiJson(auth, "b2_get_upload_url", { bucketId });
-if (!upload.uploadUrl || !upload.authorizationToken) fail("b2_get_upload_url returned incomplete upload metadata.");
-
 const files = platform === "darwin-arm64"
   ? [
       ["install.sh", installerPath],
@@ -71,7 +68,17 @@ const files = platform === "darwin-arm64"
 
 for (const [name, path] of files) {
   console.log(`Publishing ${name}`);
-  await uploadFile(upload.uploadUrl, upload.authorizationToken, `${releasePrefix}${name}`, path);
+  await uploadFileWithRetry(auth, bucketId, `${releasePrefix}${name}`, path, {
+    maxAttempts: 5,
+    baseDelayMs: 500,
+    onRetry: ({ nextAttempt, maxAttempts, delayMs, error }) => {
+      console.warn(
+        `Transient Backblaze upload failure (${error?.status || "5xx"}: ${error?.message || "server error"}). ` +
+        `Discarding the upload URL and retrying with a fresh one in ${delayMs}ms ` +
+        `(attempt ${nextAttempt}/${maxAttempts}).`
+      );
+    },
+  });
 }
 
 console.log("");
