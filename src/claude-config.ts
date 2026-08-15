@@ -2,10 +2,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
-  FALLBACK_CONTEXT_WINDOW,
   MODEL_SLOTS,
   ModelConfig,
-  claudeCodeTransportAlias,
+  claudeCodeModelAlias,
   contextWindowForRoute,
 } from "./model-config.js";
 import { ProviderRegistry } from "./provider-registry.js";
@@ -31,15 +30,15 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig, 
   if (oldContextValues.has(String(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? ""))) delete env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
 
   // OpenAI-CC supplies the four named aliases itself. Gateway discovery would
-  // add another set of rows to /model, while Default is always provided by Claude.
+  // add another discovered copy of the same logical routes to /model. Default
+  // remains available automatically in Claude Code.
   delete env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY;
   settings.availableModels = ["fable", "opus", "sonnet", "haiku"];
 
-  // PR #35 briefly used modelOverrides to hide long-context Fable/Sonnet rows.
-  // Claude Code 2.1.226 then budgeted those aliases at the third-party 200K
-  // fallback. Family pins are the supported mechanism for applying [1m] on a
-  // gateway. Remove only the obsolete OpenAI-CC overrides and preserve any
-  // unrelated user overrides.
+  // PR #35 briefly used modelOverrides for Fable/Sonnet. Claude Code 2.1.226
+  // then budgeted those aliases at the third-party 200K fallback. Direct family
+  // pins are required for the long-context carrier behavior. Remove only the
+  // obsolete OpenAI-CC-owned overrides and preserve unrelated user overrides.
   const modelOverrides = isObject(settings.modelOverrides)
     ? { ...settings.modelOverrides as Record<string, unknown> }
     : {};
@@ -52,24 +51,22 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig, 
     ...env,
     ANTHROPIC_BASE_URL: normalizeBaseUrl(baseUrl),
     ANTHROPIC_AUTH_TOKEN: "local-not-used",
-    // Sonnet 5 is a clean native long-context carrier on gateway deployments,
-    // so Default does not need a visible [1m] model variant.
-    ANTHROPIC_MODEL: claudeCodeTransportAlias(config, "default", providers),
-    // Family pins control alias context on third-party/gateway deployments. The
-    // suffix is client-only and is stripped before the request reaches OpenAI-CC.
-    // The companion _NAME values keep the picker labels clean.
-    ANTHROPIC_DEFAULT_FABLE_MODEL: clientFamilyPin(config, "fable", providers),
+    // Use the same Claude-facing route IDs advertised by /v1/models. The model
+    // config chooses a [1m] carrier only where the route needs one, and Claude
+    // strips that client-only suffix before dispatch when applicable.
+    ANTHROPIC_MODEL: claudeCodeModelAlias(config, "default", providers),
+    ANTHROPIC_DEFAULT_FABLE_MODEL: claudeCodeModelAlias(config, "fable", providers),
     ANTHROPIC_DEFAULT_FABLE_MODEL_NAME: "Fable",
-    ANTHROPIC_DEFAULT_OPUS_MODEL: clientFamilyPin(config, "opus", providers),
+    ANTHROPIC_DEFAULT_OPUS_MODEL: claudeCodeModelAlias(config, "opus", providers),
     ANTHROPIC_DEFAULT_OPUS_MODEL_NAME: "Opus",
-    ANTHROPIC_DEFAULT_SONNET_MODEL: clientFamilyPin(config, "sonnet", providers),
+    ANTHROPIC_DEFAULT_SONNET_MODEL: claudeCodeModelAlias(config, "sonnet", providers),
     ANTHROPIC_DEFAULT_SONNET_MODEL_NAME: "Sonnet",
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: clientFamilyPin(config, "haiku", providers),
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeCodeModelAlias(config, "haiku", providers),
     ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME: "Haiku",
     CLAUDE_CODE_USE_GATEWAY: "1",
-    // Claude Code has one process-level compaction ceiling. Keep it at the
-    // largest route window; each route's authoritative limit remains in Admin,
-    // gateway enforcement, and /v1/models metadata.
+    // Claude Code exposes one process-level auto-compact ceiling. Keep it at
+    // the largest route window; each route remains independently authoritative
+    // in Admin, /v1/models metadata, and gateway request enforcement.
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(maxContextWindow),
     CLAUDE_CODE_PLUGIN_PREFER_HTTPS: "1",
   };
@@ -82,13 +79,6 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig, 
   await writeFile(stateFile, `${JSON.stringify(state, null, 2)}\n`, "utf8");
 
   return { settingsFile, stateFile };
-}
-
-function clientFamilyPin(config: ModelConfig, slot: "fable" | "opus" | "sonnet" | "haiku", providers?: ProviderRegistry): string {
-  const transport = claudeCodeTransportAlias(config, slot, providers).replace(/\[1m\]$/i, "");
-  return contextWindowForRoute(config, slot, providers) > FALLBACK_CONTEXT_WINDOW
-    ? `${transport}[1m]`
-    : transport;
 }
 
 async function readJson(file: string): Promise<Record<string, any>> {
