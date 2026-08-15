@@ -27,7 +27,7 @@ test("Claude model discovery exposes route-specific context caps and client capa
   const response = claudeDesktopModelList(config);
   const aliases = Object.fromEntries(MODEL_SLOTS.map((slot) => [slot, claudeCodeModelAlias(config, slot)])) as Record<string, string>;
   assert.deepEqual(response.data.map((model) => model.id), MODEL_SLOTS.map((slot) => aliases[slot]));
-  assert.equal(response.data.some((model) => model.id.includes("gemini") || model.id.includes("deepseek") || model.id.includes("gpt")), false);
+  assert.equal(response.data.some((model) => model.id.includes("gemini") || model.id.includes("deepseek") || model.id.includes("gpt") || model.id.includes("openai-cc")), false);
   assert.equal(response.data.find((model) => model.id === aliases.default)?.max_input_tokens, 850000);
   assert.equal(response.data.find((model) => model.id === aliases.fable)?.max_input_tokens, 850000);
   assert.equal(response.data.find((model) => model.id === aliases.opus)?.max_input_tokens, 200000);
@@ -54,6 +54,7 @@ test("model retrieval accepts Claude-family version aliases without exposing ups
   assert.equal(claudeDesktopModel(config, "claude-opus-5")?.max_tokens, 96000);
   assert.equal(claudeDesktopModel(config, "claude-opus-5-20260724")?.id, "claude-opus-5");
   assert.equal(claudeDesktopModel(config, "deepseek-v4-flash-free"), undefined);
+  assert.equal(claudeDesktopModel(config, "openai-cc-sonnet"), undefined);
 });
 
 test("Claude Desktop 3P configuration is merged and idempotent", async () => {
@@ -66,15 +67,12 @@ test("Claude Desktop 3P configuration is merged and idempotent", async () => {
   };
   await writeJson(paths.normalConfigFile, { keepMe: true, deploymentMode: "1p" });
   await writeJson(paths.metaFile, { entries: [{ id: "other", name: "Other" }], appliedId: "other" });
-
   await configureClaudeDesktopAtPaths(paths, "http://127.0.0.1:8082/", config);
   await configureClaudeDesktopAtPaths(paths, "http://127.0.0.1:8082/", config);
-
   const normal = JSON.parse(await readFile(paths.normalConfigFile, "utf8"));
   const threep = JSON.parse(await readFile(paths.threepConfigFile, "utf8"));
   const profile = JSON.parse(await readFile(paths.profileFile, "utf8"));
   const meta = JSON.parse(await readFile(paths.metaFile, "utf8"));
-
   assert.equal(normal.keepMe, true);
   assert.equal(normal.deploymentMode, "3p");
   assert.equal(threep.deploymentMode, "3p");
@@ -92,7 +90,6 @@ test("Claude Desktop 3P configuration is merged and idempotent", async () => {
 test("bare-PC installer only requires the cleaned runtime dependency and never revives Git or VS Code CLI automation", async () => {
   const install = await readFile(path.join(process.cwd(), "install.ps1"), "utf8");
   const setup = await readFile(path.join(process.cwd(), "setup.ps1"), "utf8");
-
   assert.match(install, /MinimumNodeVersion = \[Version\]"20\.0\.0"/);
   assert.match(install, /OpenJS\.NodeJS\.LTS/);
   assert.match(install, /Test-ClaudeCodeInstalled/);
@@ -106,20 +103,23 @@ test("bare-PC installer only requires the cleaned runtime dependency and never r
   assert.doesNotMatch(install, /--install-extension|--list-extensions/);
   assert.doesNotMatch(install, /Get-Command code(?:\.cmd)?/);
   assert.doesNotMatch(install, /typescript-language-server|context-mode@|rtk-x86_64/);
-
   assert.match(setup, /compatibility entrypoint/);
   assert.match(setup, /does not require Git/);
   assert.match(setup, /-ManifestUrl/);
   assert.doesNotMatch(setup, /git\s+(clone|pull|fetch|reset|clean)/i);
 });
 
-test("shared Claude settings retain gateway-aware aliases, clean route names, five-route picker policy, and onboarding repair", async () => {
+test("shared Claude settings retain gateway context, clean route names, picker policy, and transport overrides", async () => {
   const source = await readFile(path.join(process.cwd(), "src", "claude-config.ts"), "utf8");
   const clients = await readFile(path.join(process.cwd(), "scripts", "configure-clients.ts"), "utf8");
-  assert.match(source, /claudeCodeModelAlias\(config, "fable", providers\)/);
+  assert.match(source, /claudeCodeTransportAlias\(config, "fable", providers\)/);
   assert.match(source, /delete env\.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY/);
   assert.doesNotMatch(source, /CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY:\s*"1"/);
   assert.match(source, /settings\.availableModels = \["fable", "opus", "sonnet", "haiku"\]/);
+  assert.match(source, /modelOverrides\["claude-fable-5"\]/);
+  assert.match(source, /modelOverrides\["claude-sonnet-5"\]/);
+  assert.match(source, /delete env\.ANTHROPIC_DEFAULT_FABLE_MODEL/);
+  assert.match(source, /delete env\.ANTHROPIC_DEFAULT_SONNET_MODEL/);
   assert.match(source, /ANTHROPIC_DEFAULT_FABLE_MODEL_NAME:\s*"Fable"/);
   assert.match(source, /ANTHROPIC_DEFAULT_OPUS_MODEL_NAME:\s*"Opus"/);
   assert.match(source, /ANTHROPIC_DEFAULT_SONNET_MODEL_NAME:\s*"Sonnet"/);
@@ -130,7 +130,6 @@ test("shared Claude settings retain gateway-aware aliases, clean route names, fi
   assert.match(source, /hasSeenOnboarding = true/);
   assert.doesNotMatch(source, /DISABLE_COMPACT\s*[=:]/);
   assert.doesNotMatch(source, /CLAUDE_CODE_DISABLE_1M_CONTEXT/);
-
   assert.match(clients, /const config = models\.snapshot\(\)/);
   assert.doesNotMatch(clients, /models\.update\(/);
   assert.doesNotMatch(clients, /OPENAI_CC_CONTEXT_WINDOW/);
