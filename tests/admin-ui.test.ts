@@ -115,9 +115,10 @@ test("Admin UI keeps one context target, edits route capabilities, and has no ma
 
     assert.match(f.html, /<label for="context-window">Model Context Window<\/label>/);
     assert.match(f.html, /Single Claude context target for all routes/);
-    assert.match(f.html, /data-capability="vision"/);
-    assert.match(f.html, /data-capability="tools"/);
-    assert.match(f.html, /data-capability="reasoning"/);
+    assert.match(f.html, /capabilityField\(slot,'vision','Vision'/);
+    assert.match(f.html, /capabilityField\(slot,'tools','Tools'/);
+    assert.match(f.html, /capabilityField\(slot,'reasoning','Reasoning'/);
+    assert.match(f.html, /data-capability=/);
     assert.match(f.html, /Auto — not reported/);
     assert.match(f.html, /Supported<\/option>/);
     assert.match(f.html, /Not supported<\/option>/);
