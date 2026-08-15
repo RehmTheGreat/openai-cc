@@ -6,11 +6,12 @@ import {
   ModelConfig,
   ModelRoute,
   ModelSlot,
+  capabilitiesForRoute,
   claudeCodeModelAlias,
   contextWindowForRoute,
   slotForClaudeCodeModel,
 } from "./model-config.js";
-import { ProviderRegistry, modelCapabilities } from "./provider-registry.js";
+import { ProviderRegistry } from "./provider-registry.js";
 
 export type ClaudeDesktopSlot = ModelSlot;
 
@@ -170,7 +171,7 @@ function desktopSlotForModel(model: string): ClaudeDesktopSlot | undefined {
 }
 
 function routeCapabilities(route: ModelRoute, providers?: ProviderRegistry): Record<string, unknown> {
-  const capabilities = modelCapabilities(route.provider, route.model, providers);
+  const capabilities = capabilitiesForRoute(route, providers);
   const unsupported = { supported: false };
   return {
     batch: unsupported,
