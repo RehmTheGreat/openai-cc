@@ -13,7 +13,7 @@ async function routeFixture(clientFactory: (id: string) => any) {
   await accounts.createApiKey({ id: "n1", name: "N1", provider: "nvidia", apiKey: "one", model: "unused" });
   await accounts.createApiKey({ id: "n2", name: "N2", provider: "nvidia", apiKey: "two", model: "unused" });
   const models = new ModelConfigStore(root, accounts); await models.init();
-  const config = models.snapshot(); config.routes.sonnet = { provider: "nvidia", model: "nim-model", maxOutputTokens: 64000 };
+  const config = models.snapshot(); config.routes.sonnet = { provider: "nvidia", model: "nim-model", contextWindow: 200000, maxOutputTokens: 64000 };
   await models.update(config);
   const server = createServer(accounts, models, { bindHost: "127.0.0.1", clientFactory: (account) => clientFactory(account.id) });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -22,7 +22,9 @@ async function routeFixture(clientFactory: (id: string) => any) {
 }
 
 function requestBody(stream = false) {
-  return { model: "claude-sonnet-5", max_tokens: 32, stream, messages: [{ role: "user", content: "hello" }] };
+  // claude-sonnet-5 is the clean long-context carrier for Default. Sonnet's
+  // private transport id is distinct so the two logical routes cannot collide.
+  return { model: "openai-cc-sonnet", max_tokens: 32, stream, messages: [{ role: "user", content: "hello" }] };
 }
 
 test("pre-output 429 transparently retries the next same-provider credential", async () => {
