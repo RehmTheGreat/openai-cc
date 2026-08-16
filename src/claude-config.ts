@@ -5,7 +5,6 @@ import {
   MODEL_SLOTS,
   ModelConfig,
   claudeCodeModelAlias,
-  contextWindowForRoute,
 } from "./model-config.js";
 import { ProviderRegistry } from "./provider-registry.js";
 
@@ -22,20 +21,17 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig, 
 
   const settings = await readJson(settingsFile);
   const env = isObject(settings.env) ? { ...settings.env as Record<string, unknown> } : {};
-
-  const routeContextWindows = MODEL_SLOTS.map((slot) => contextWindowForRoute(config, slot, providers));
-  const maxContextWindow = Math.max(...routeContextWindows);
-  const oldContextValues = new Set(["700000", "850000", "1000000", ...routeContextWindows.map(String)]);
+  const contextWindow = config.contextWindow;
+  const oldContextValues = new Set(["700000", "850000", "1000000", "1050000", String(contextWindow)]);
   if (oldContextValues.has(String(env.CLAUDE_CODE_CONTEXT_WINDOW ?? ""))) delete env.CLAUDE_CODE_CONTEXT_WINDOW;
 
-  // Keep discovery constrained to OpenAI-CC's five logical routes. The gateway
-  // catalog reports each route's Admin-configured context and never exposes
-  // provider/carrier model IDs.
+  // Discovery is restricted to OpenAI-CC's five logical routes. Upstream model
+  // IDs never become Claude picker rows.
   env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
   settings.availableModels = [...MODEL_SLOTS];
 
-  // Remove obsolete OpenAI-CC carrier overrides left by older releases while
-  // preserving any unrelated user-owned model overrides.
+  // Remove only obsolete OpenAI-CC carrier overrides and preserve unrelated
+  // user-owned Claude settings.
   const modelOverrides = isObject(settings.modelOverrides)
     ? { ...settings.modelOverrides as Record<string, unknown> }
     : {};
@@ -58,12 +54,12 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig, 
     ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeCodeModelAlias(config, "haiku", providers),
     ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME: "Haiku",
     CLAUDE_CODE_USE_GATEWAY: "1",
-    CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(maxContextWindow),
-    // Anthropic documents MAX_CONTEXT_TOKENS as gated by DISABLE_COMPACT. Use
-    // the explicit false value here: it is intentionally tested against the
-    // real Claude client so we never trade correct context for lost compaction.
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(contextWindow),
+    // Presence unlocks Claude's custom-model context override; the false value
+    // keeps Claude's own compaction enabled. This is verified against the real
+    // Claude Code client in CI.
     DISABLE_COMPACT: "0",
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(maxContextWindow),
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(contextWindow),
     CLAUDE_CODE_PLUGIN_PREFER_HTTPS: "1",
   };
   await writeFile(settingsFile, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
