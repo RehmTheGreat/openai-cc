@@ -25,6 +25,9 @@ test("Codex 429 uses the later reset when both primary and secondary windows are
   const primaryReset = Math.floor((now + 5 * 60 * 60 * 1000) / 1000);
   const secondaryReset = Math.floor((now + 7 * 24 * 60 * 60 * 1000) / 1000);
   const error = await upstream429({
+    // Even if the single reached-type label names the short window, a weekly
+    // window already at 100% must keep the credential exhausted until later.
+    "x-codex-rate-limit-reached-type": "primary",
     "x-codex-primary-used-percent": "100",
     "x-codex-primary-window-minutes": "300",
     "x-codex-primary-reset-at": String(primaryReset),
@@ -38,7 +41,7 @@ test("Codex 429 uses the later reset when both primary and secondary windows are
   assert.equal(reset?.cooldownMs, secondaryReset * 1000 - now);
 });
 
-test("Codex 429 honors the reached-type header when it identifies the primary window", async () => {
+test("Codex 429 honors the reached-type header when it identifies the only exhausted primary window", async () => {
   const now = Date.UTC(2026, 7, 16, 9, 0, 0);
   const primaryReset = Math.floor((now + 90 * 60 * 1000) / 1000);
   const secondaryReset = Math.floor((now + 5 * 24 * 60 * 60 * 1000) / 1000);
