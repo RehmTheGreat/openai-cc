@@ -152,28 +152,29 @@ export function chatGptRateLimitReset(error: unknown, nowMs = Date.now()): ChatG
   const reached = String(info.reachedType ?? "").trim().toLowerCase();
   const primary = validReset(info.primary, nowMs);
   const secondary = validReset(info.secondary, nowMs);
+  const primaryFull = Number(info.primary?.usedPercent ?? 0) >= 100;
+  const secondaryFull = Number(info.secondary?.usedPercent ?? 0) >= 100;
   let resetMs: number | undefined;
   let window: ChatGptRateLimitReset["window"] | undefined;
 
-  if (/secondary|weekly|week/.test(reached) && secondary) {
+  // Exhaustion percentages are stronger evidence than the single reached-type
+  // label. If both windows are at 100%, returning at the primary reset would
+  // immediately hit the still-exhausted secondary (often weekly) window again.
+  if (primaryFull && secondaryFull && (primary || secondary)) {
+    resetMs = Math.max(primary ?? 0, secondary ?? 0);
+    window = primary && secondary ? "both" : secondary ? "secondary" : "primary";
+  } else if (secondaryFull && secondary) {
+    resetMs = secondary;
+    window = "secondary";
+  } else if (primaryFull && primary) {
+    resetMs = primary;
+    window = "primary";
+  } else if (/secondary|weekly|week/.test(reached) && secondary) {
     resetMs = secondary;
     window = "secondary";
   } else if (/primary/.test(reached) && primary) {
     resetMs = primary;
     window = "primary";
-  } else {
-    const primaryFull = Number(info.primary?.usedPercent ?? 0) >= 100;
-    const secondaryFull = Number(info.secondary?.usedPercent ?? 0) >= 100;
-    if (primaryFull && secondaryFull && (primary || secondary)) {
-      resetMs = Math.max(primary ?? 0, secondary ?? 0);
-      window = primary && secondary ? "both" : secondary ? "secondary" : "primary";
-    } else if (secondaryFull && secondary) {
-      resetMs = secondary;
-      window = "secondary";
-    } else if (primaryFull && primary) {
-      resetMs = primary;
-      window = "primary";
-    }
   }
 
   if (!resetMs && info.retryAfterMs && info.retryAfterMs > 0) {
