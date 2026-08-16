@@ -31,16 +31,22 @@ function runClaude(args) {
 
 function parseContextBudget(output) {
   const match = output.match(/\*\*Tokens:\*\*[^\n]*\/\s*([0-9]+(?:\.[0-9]+)?)\s*([kKmM])\b/);
-  if (!match) throw new Error("Could not parse /context token budget:\n" + output);
+  if (!match) return undefined;
   const value = Number(match[1]);
   return Math.round(value * (match[2].toLowerCase() === "m" ? 1000000 : 1000));
 }
 
-function probe(label, model) {
+function probe(label, model, target) {
   const output = runClaude(["--model", model, "-p", "/context"]);
   const budget = parseContextBudget(output);
-  console.log(label + ": model=" + model + " client_context=" + budget);
-  return budget;
+  console.log(label + ": model=" + model + " client_context=" + (budget ?? "not displayed"));
+  if (budget !== undefined) {
+    // Claude may round million-scale UI values (for example 1.05M -> 1.0M).
+    const tolerance = Math.max(1000, Math.round(target * 0.05));
+    if (Math.abs(budget - target) > tolerance) {
+      throw new Error(label + " displays context " + budget + " instead of the Admin-configured " + target);
+    }
+  }
 }
 
 const version = runClaude(["--version"]);
@@ -49,22 +55,32 @@ if (!version.includes(CLAUDE_VERSION)) {
 }
 
 if (String(configured.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY ?? "") === "1") {
-  throw new Error("Gateway model discovery must stay disabled: the picker is supplied by Default plus the four named aliases.");
+  throw new Error("Gateway model discovery must stay disabled so the five logical routes are not duplicated in the picker.");
 }
 if (String(configured.CLAUDE_CODE_USE_GATEWAY ?? "") !== "1") {
-  throw new Error("CLAUDE_CODE_USE_GATEWAY must be enabled for third-party context capability handling.");
+  throw new Error("CLAUDE_CODE_USE_GATEWAY must be enabled.");
 }
 
 const expectedAvailableModels = ["fable", "opus", "sonnet", "haiku"];
 if (JSON.stringify(settings.availableModels) !== JSON.stringify(expectedAvailableModels)) {
-  throw new Error("Claude availableModels must expose only the four named OpenAI-CC aliases; Default is always present. Got: " + JSON.stringify(settings.availableModels));
+  throw new Error("Claude availableModels must expose only the four named routes; Default is supplied by ANTHROPIC_MODEL. Got: " + JSON.stringify(settings.availableModels));
 }
 
 const target = Number(configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
-if (!Number.isFinite(target) || target < 200000 || target > 1000000) {
+if (!Number.isSafeInteger(target) || target < 1) {
   throw new Error("Invalid CLAUDE_CODE_AUTO_COMPACT_WINDOW: " + configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
 }
 
+const expectedPins = {
+  ANTHROPIC_MODEL: "default",
+  ANTHROPIC_DEFAULT_FABLE_MODEL: "fable",
+  ANTHROPIC_DEFAULT_OPUS_MODEL: "opus",
+  ANTHROPIC_DEFAULT_SONNET_MODEL: "sonnet",
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: "haiku",
+};
+for (const [key, expected] of Object.entries(expectedPins)) {
+  if (configured[key] !== expected) throw new Error(key + " must be " + expected + "; got " + configured[key]);
+}
 const expectedNames = {
   ANTHROPIC_DEFAULT_FABLE_MODEL_NAME: "Fable",
   ANTHROPIC_DEFAULT_OPUS_MODEL_NAME: "Opus",
@@ -75,46 +91,18 @@ for (const [key, expected] of Object.entries(expectedNames)) {
   if (configured[key] !== expected) throw new Error(key + " must be " + expected + "; got " + configured[key]);
 }
 
-// The current public carrier selection uses explicit [1m] for Fable and Haiku,
-// while Sonnet 5 can carry the configured long budget without a suffixed ID.
-// The live /context probes below remain the source of truth for client budget.
-for (const key of ["ANTHROPIC_DEFAULT_FABLE_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"]) {
-  if (!String(configured[key] ?? "").endsWith("[1m]")) {
-    throw new Error(key + " must carry [1m] for the fresh 1M route; got " + configured[key]);
-  }
-}
-if (String(configured.ANTHROPIC_DEFAULT_OPUS_MODEL ?? "").endsWith("[1m]")) {
-  throw new Error("Fresh Opus/DeepSeek route is 200K and must not carry [1m].");
-}
-if (settings.modelOverrides?.["claude-fable-5"] === "openai-cc-fable" || settings.modelOverrides?.["claude-sonnet-5"] === "openai-cc-sonnet") {
-  throw new Error("Stale OpenAI-CC modelOverrides must be removed because they regress gateway aliases to 200K: " + JSON.stringify(settings.modelOverrides));
+const serializedSettings = JSON.stringify(settings);
+if (/\[1m\]|openai-cc-(?:fable|sonnet)/i.test(serializedSettings)) {
+  throw new Error("Stale long-context carrier aliases remain in Claude settings: " + serializedSettings);
 }
 
 console.log("Claude Code version:", version.split("\n")[0]);
-console.log("CLAUDE_CODE_USE_GATEWAY=" + configured.CLAUDE_CODE_USE_GATEWAY);
-console.log("CLAUDE_CODE_AUTO_COMPACT_WINDOW=" + configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
-console.log("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=" + String(configured.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY ?? "<unset>"));
-console.log("ANTHROPIC_MODEL=" + configured.ANTHROPIC_MODEL);
-console.log("FABLE_PIN=" + configured.ANTHROPIC_DEFAULT_FABLE_MODEL);
-console.log("OPUS_PIN=" + configured.ANTHROPIC_DEFAULT_OPUS_MODEL);
-console.log("SONNET_PIN=" + configured.ANTHROPIC_DEFAULT_SONNET_MODEL);
-console.log("HAIKU_PIN=" + configured.ANTHROPIC_DEFAULT_HAIKU_MODEL);
+console.log("CLAUDE_CODE_AUTO_COMPACT_WINDOW=" + target);
 console.log("availableModels=" + JSON.stringify(settings.availableModels));
 
-// Probe aliases, not just backing IDs. This is the path users, Auto mode,
-// compaction, and subagents actually exercise.
-const probes = [
-  ["default/luna", configured.ANTHROPIC_MODEL, target, target],
-  ["fable/luna", "fable", target, target],
-  ["opus/deepseek-free", "opus", 0, 250000],
-  ["sonnet/gemini-flash-lite", "sonnet", target, target],
-  ["haiku/gemini-flash-lite", "haiku", target, target],
-];
-
-for (const [label, model, min, max] of probes) {
-  if (!model) throw new Error("Missing configured model for " + label);
-  const budget = probe(label, String(model));
-  if (budget < min || budget > max) {
-    throw new Error(label + " context " + budget + " outside expected range " + min + ".." + max);
-  }
+// If Claude displays a numeric context ceiling, it must track the Admin-set
+// route rather than a fabricated 200K fallback. A client that omits the limit
+// entirely is acceptable; OpenAI-CC does not invent a second client-side cap.
+for (const model of ["default", "fable", "opus", "sonnet", "haiku"]) {
+  probe(model, model, target);
 }
