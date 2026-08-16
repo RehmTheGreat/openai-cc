@@ -29,11 +29,11 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig, 
   if (oldContextValues.has(String(env.CLAUDE_CODE_CONTEXT_WINDOW ?? ""))) delete env.CLAUDE_CODE_CONTEXT_WINDOW;
   if (oldContextValues.has(String(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? ""))) delete env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
 
-  // Default is selected by ANTHROPIC_MODEL; the four named family choices are
-  // the rest of the five logical OpenAI-CC routes. Gateway discovery remains
-  // off so the same routes are not duplicated in Claude's model picker.
-  delete env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY;
-  settings.availableModels = ["fable", "opus", "sonnet", "haiku"];
+  // Claude Code must learn each route's Admin-configured context from our
+  // Anthropic-compatible /v1/models response. Keep the allowlist equal to the
+  // five logical routes so discovery cannot add provider/carrier duplicates.
+  env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
+  settings.availableModels = [...MODEL_SLOTS];
 
   // Remove obsolete OpenAI-CC carrier overrides left by older releases while
   // preserving any unrelated user-owned model overrides.
