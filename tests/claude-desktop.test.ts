@@ -10,7 +10,7 @@ import {
   claudeDesktopModelList,
   configureClaudeDesktopAtPaths,
 } from "../src/claude-desktop.js";
-import { MODEL_SLOTS, ModelConfig, claudeCodeModelAlias } from "../src/model-config.js";
+import { ModelConfig } from "../src/model-config.js";
 
 const config: ModelConfig = {
   contextWindow: 850000,
@@ -55,7 +55,7 @@ test("model retrieval accepts only public logical route ids", () => {
   assert.equal(claudeDesktopModel(config, "claude-opus-5[1m]"), undefined);
 });
 
-test("Claude Desktop 3P configuration is merged, idempotent, and creates no supports1m variants", async () => {
+test("Claude Desktop 3P profile exposes exactly four validated Claude carriers and no Default", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-desktop-"));
   const paths: ClaudeDesktopPaths = {
     normalConfigFile: path.join(root, "Claude", "claude_desktop_config.json"),
@@ -77,7 +77,14 @@ test("Claude Desktop 3P configuration is merged, idempotent, and creates no supp
   assert.equal(profile.inferenceProvider, "gateway");
   assert.equal(profile.inferenceGatewayBaseUrl, "http://127.0.0.1:8082");
   assert.equal(profile.inferenceGatewayAuthScheme, "bearer");
-  assert.deepEqual(profile.inferenceModels.map((model: any) => model.name), MODEL_SLOTS.map((slot) => claudeCodeModelAlias(config, slot)));
+  assert.deepEqual(profile.inferenceModels.map((model: any) => model.name), [
+    "claude-fable-5",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+    "claude-haiku-4-5",
+  ]);
+  assert.deepEqual(profile.inferenceModels.map((model: any) => model.labelOverride), ["Fable", "Opus", "Sonnet", "Haiku"]);
+  assert.equal(profile.inferenceModels.some((model: any) => model.name === "default" || model.labelOverride === "Default"), false);
   assert.equal(profile.inferenceModels.some((model: any) => "supports1m" in model), false);
   assert.equal(meta.appliedId, CLAUDE_DESKTOP_PROFILE_ID);
   assert.equal(meta.entries.filter((entry: any) => entry.id === CLAUDE_DESKTOP_PROFILE_ID).length, 1);

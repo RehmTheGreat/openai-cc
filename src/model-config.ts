@@ -155,8 +155,13 @@ export class ModelConfigStore extends EventEmitter {
     const id = String(model || "").trim().toLowerCase();
     const explicit = slotForClaudeCodeModel(this.state, id, this.providers);
     if (explicit) return explicit;
-    // Old carrier IDs are accepted only so already-open sessions survive upgrade.
-    if (id === "claude-opus-4-8" || id === "claude-opus-4-8[1m]" || id === "claude-sonnet-5") return "default";
+    // Claude Desktop managed-3P profiles must use real Anthropic catalog names.
+    // Treat those names only as transport carriers for the corresponding
+    // OpenAI-CC logical route; the configured upstream model remains unchanged.
+    if (id === "claude-fable-5") return "fable";
+    if (id === "claude-opus-4-8" || id === "claude-opus-4-8[1m]") return "opus";
+    if (id === "claude-sonnet-5") return "sonnet";
+    if (id === "claude-haiku-4-5" || id === "claude-haiku-4-5-20251001") return "haiku";
     if (id === "fable" || id.includes("fable")) return "fable";
     if (id === "opus" || id.includes("opus")) return "opus";
     if (id === "sonnet" || id.includes("sonnet")) return "sonnet";

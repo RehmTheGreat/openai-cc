@@ -90,7 +90,7 @@ test("validation is structural and imposes no model-specific context ceiling", a
   accounts.close();
 });
 
-test("one Admin context is authoritative for every route and Claude exposes five logical aliases", async () => {
+test("one Admin context is authoritative and Claude carrier names resolve to their logical routes", async () => {
   const { accounts, models } = await fixture();
   const config = await models.update({ contextWindow: 1_234_567 });
 
@@ -102,7 +102,10 @@ test("one Admin context is authoritative for every route and Claude exposes five
   }
   assert.equal(config.contextWindow, 1_234_567);
   assert.equal(models.slotForRequestedModel("openai-cc-fable"), "fable", "old sessions remain routable");
-  assert.equal(models.slotForRequestedModel("claude-sonnet-5"), "default", "old default carrier remains routable");
+  assert.equal(models.slotForRequestedModel("claude-fable-5"), "fable");
+  assert.equal(models.slotForRequestedModel("claude-opus-4-8"), "opus");
+  assert.equal(models.slotForRequestedModel("claude-sonnet-5"), "sonnet");
+  assert.equal(models.slotForRequestedModel("claude-haiku-4-5"), "haiku");
   accounts.close();
 });
 
