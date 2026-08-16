@@ -15,12 +15,9 @@ export interface ModelRoute {
   provider: ProviderKind;
   model: string;
   credentialId?: string;
-  maxOutputTokens: number;
-  /**
-   * Deprecated write-compatibility only. New state never persists or returns
-   * this field; Admin uses ModelConfig.contextWindow exclusively.
-   */
+  /** Authoritative Claude/gateway context window for this route. */
   contextWindow?: number;
+  maxOutputTokens: number;
   /** Optional capability overrides. Undefined means use provider defaults/discovery. */
   vision?: boolean;
   tools?: boolean;
@@ -28,12 +25,13 @@ export interface ModelRoute {
 }
 
 export interface ModelConfig {
-  /** Single authoritative Claude/gateway context window configured by the user. */
+  /** Derived compatibility ceiling only: the largest route context window. */
   contextWindow: number;
   routes: Record<ModelSlot, ModelRoute>;
 }
 
 export type ModelConfigUpdate = {
+  /** Deprecated compatibility input. New callers should set routes.<slot>.contextWindow. */
   contextWindow?: unknown;
   routes?: Partial<Record<ModelSlot, Partial<ModelRoute>>>;
 };
@@ -59,33 +57,57 @@ export const DEFAULT_MAX_OUTPUT_TOKENS: Record<ModelSlot, number> = {
   haiku: 65536,
 };
 
-export const DEFAULT_CONTEXT_WINDOW = 1_050_000;
+export const DEFAULT_CONTEXT_WINDOW = 1_000_000;
+export const FALLBACK_CONTEXT_WINDOW = 200_000;
 export const GEMINI_FLASH_LITE_MODEL = "gemini-3.5-flash-lite";
 
-/** Public Claude-facing ids are exactly the five logical OpenAI-CC routes. */
-const CLAUDE_ROUTE_IDS: Record<ModelSlot, string> = {
+export const DEFAULT_CONTEXT_WINDOWS: Record<ModelSlot, number> = {
+  default: 1_000_000,
+  fable: 1_000_000,
+  opus: 200_000,
+  sonnet: 1_000_000,
+  haiku: 1_000_000,
+};
+
+// Claude Code decides its own usable context/auto-compact budget partly from the
+// Claude family id. Unknown logical ids such as "fable" fall back near 200K even
+// when the gateway advertises a larger max_input_tokens. Use recognized carrier
+// ids for the four user-facing routes, with [1m] only when that route is >200K.
+const CLAUDE_STANDARD_MODEL_IDS: Record<ModelSlot, string> = {
   default: "default",
-  fable: "fable",
-  opus: "opus",
-  sonnet: "sonnet",
-  haiku: "haiku",
+  fable: "claude-fable-5",
+  opus: "claude-opus-4-8",
+  sonnet: "claude-sonnet-5",
+  haiku: "claude-haiku-4-5",
+};
+
+const CLAUDE_EXTENDED_MODEL_IDS: Record<ModelSlot, string> = {
+  default: "default",
+  fable: "claude-fable-5[1m]",
+  opus: "claude-opus-4-8[1m]",
+  sonnet: "claude-sonnet-5[1m]",
+  // Haiku itself is a 200K family in Claude Code. For a non-Anthropic upstream
+  // configured above 200K, use the previously verified 1M carrier while the
+  // visible route name remains Haiku.
+  haiku: "claude-opus-4-7[1m]",
 };
 
 const DEFAULT_ROUTES: Record<ModelSlot, ModelRoute> = {
-  default: { provider: "chatgpt", model: "gpt-5.6-luna", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.default },
-  fable: { provider: "chatgpt", model: "gpt-5.6-luna", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.fable },
-  opus: { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.opus },
-  sonnet: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.sonnet },
-  haiku: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.haiku },
+  default: { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: DEFAULT_CONTEXT_WINDOWS.default, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.default },
+  fable: { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: DEFAULT_CONTEXT_WINDOWS.fable, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.fable },
+  opus: { provider: "zen", model: "deepseek-v4-flash-free", contextWindow: DEFAULT_CONTEXT_WINDOWS.opus, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.opus },
+  sonnet: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, contextWindow: DEFAULT_CONTEXT_WINDOWS.sonnet, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.sonnet },
+  haiku: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, contextWindow: DEFAULT_CONTEXT_WINDOWS.haiku, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.haiku },
 };
 
 const DEFAULTS: ModelConfig = {
-  contextWindow: DEFAULT_CONTEXT_WINDOW,
+  contextWindow: Math.max(...Object.values(DEFAULT_CONTEXT_WINDOWS)),
   routes: DEFAULT_ROUTES,
 };
 
 type StoredRoute = Partial<ModelRoute> & { contextWindow?: unknown };
 type StoredModelConfig = {
+  /** Legacy/global compatibility value. Per-route values are authoritative. */
   contextWindow?: unknown;
   routes?: Partial<Record<ModelSlot, StoredRoute>>;
 };
@@ -126,24 +148,19 @@ export class ModelConfigStore extends EventEmitter {
   }
 
   async update(input: ModelConfigUpdate): Promise<ModelConfig> {
+    const legacyContext = positiveSafeInteger(input.contextWindow);
+    const hasExplicitRouteContext = MODEL_SLOTS.some((slot) => input.routes?.[slot]?.contextWindow !== undefined);
     const candidateRoutes = Object.fromEntries(MODEL_SLOTS.map((slot) => {
       const previous = this.state.routes[slot];
       const patch = input.routes?.[slot] ?? {};
-      const { contextWindow: _legacyContext, ...cleanPatch } = patch;
-      return [slot, { ...previous, ...cleanPatch } as ModelRoute];
+      const merged = { ...previous, ...patch } as ModelRoute;
+      // Old clients may still POST only the former top-level field. Preserve
+      // that write contract without collapsing new per-route edits.
+      if (legacyContext !== undefined && !hasExplicitRouteContext) merged.contextWindow = legacyContext;
+      return [slot, merged];
     })) as Record<ModelSlot, ModelRoute>;
-    const legacyRouteContexts = MODEL_SLOTS
-      .map((slot) => positiveSafeInteger(input.routes?.[slot]?.contextWindow))
-      .filter((value): value is number => value !== undefined);
-    const explicitContext = positiveSafeInteger(input.contextWindow);
-    const useLegacyContext = legacyRouteContexts.length > 0
-      && (input.contextWindow === undefined || explicitContext === this.state.contextWindow);
-    const candidate = normalizeStrict({
-      contextWindow: useLegacyContext
-        ? Math.max(...legacyRouteContexts)
-        : (input.contextWindow ?? this.state.contextWindow),
-      routes: candidateRoutes,
-    }, this.providers);
+
+    const candidate = normalizeStrict({ routes: candidateRoutes }, this.providers);
     this.validatePins(candidate);
     this.state = candidate;
     await this.persist();
@@ -155,13 +172,13 @@ export class ModelConfigStore extends EventEmitter {
     const id = String(model || "").trim().toLowerCase();
     const explicit = slotForClaudeCodeModel(this.state, id, this.providers);
     if (explicit) return explicit;
-    // Claude Desktop managed-3P profiles must use real Anthropic catalog names.
-    // Treat those names only as transport carriers for the corresponding
-    // OpenAI-CC logical route; the configured upstream model remains unchanged.
-    if (id === "claude-fable-5") return "fable";
-    if (id === "claude-opus-4-8" || id === "claude-opus-4-8[1m]") return "opus";
-    if (id === "claude-sonnet-5") return "sonnet";
-    if (id === "claude-haiku-4-5" || id === "claude-haiku-4-5-20251001") return "haiku";
+
+    // Legacy/current carrier ids remain routable so existing sessions survive
+    // an update and Claude Desktop's managed profile can use validated names.
+    if (id === "openai-cc-fable" || id === "claude-fable-5" || id === "claude-fable-5[1m]") return "fable";
+    if (id === "claude-opus-4-8" || id === "claude-opus-4-8[1m]" || id === "claude-opus-5" || id === "claude-opus-5[1m]") return "opus";
+    if (id === "openai-cc-sonnet" || id === "claude-sonnet-5" || id === "claude-sonnet-5[1m]" || id === "claude-sonnet-4-6" || id === "claude-sonnet-4-6[1m]") return "sonnet";
+    if (id === "claude-haiku-4-5" || id === "claude-haiku-4-5-20251001" || id === "claude-opus-4-7[1m]") return "haiku";
     if (id === "fable" || id.includes("fable")) return "fable";
     if (id === "opus" || id.includes("opus")) return "opus";
     if (id === "sonnet" || id.includes("sonnet")) return "sonnet";
@@ -173,8 +190,8 @@ export class ModelConfigStore extends EventEmitter {
     return { ...this.state.routes[this.slotForRequestedModel(model)] };
   }
 
-  contextWindowForRequestedModel(_model: string): number {
-    return this.state.contextWindow;
+  contextWindowForRequestedModel(model: string): number {
+    return contextWindowForRoute(this.state, this.slotForRequestedModel(model), this.providers);
   }
 
   credentialForRequestedModel(model: string, attempted = new Set<string>()): AccountRecord | undefined {
@@ -215,7 +232,7 @@ export class ModelConfigStore extends EventEmitter {
 
   healthFor(slot: ModelSlot): RouteHealth {
     const route = this.state.routes[slot];
-    const contextWindow = this.state.contextWindow;
+    const contextWindow = contextWindowForRoute(this.state, slot, this.providers);
     const sameProvider = this.accounts.list().filter((credential) => credential.provider === route.provider);
     const ready = sameProvider.filter((credential) => credential.status === "ready");
     if (route.credentialId) {
@@ -267,8 +284,11 @@ export class ModelConfigStore extends EventEmitter {
 
 export const MODEL_SLOTS: ModelSlot[] = ["default", "fable", "opus", "sonnet", "haiku"];
 
-export function contextWindowForRoute(config: ModelConfig, _slot: ModelSlot, _providers?: ProviderRegistry): number {
-  return config.contextWindow;
+export function contextWindowForRoute(config: ModelConfig, slot: ModelSlot, _providers?: ProviderRegistry): number {
+  const explicit = positiveSafeInteger(config.routes[slot]?.contextWindow);
+  if (explicit !== undefined) return explicit;
+  const legacy = positiveSafeInteger(config.contextWindow);
+  return legacy ?? DEFAULT_CONTEXT_WINDOWS[slot];
 }
 
 export function capabilitiesForRoute(route: ModelRoute, providers?: ProviderRegistry): ModelCapabilities {
@@ -281,21 +301,31 @@ export function capabilitiesForRoute(route: ModelRoute, providers?: ProviderRegi
   };
 }
 
-export function claudeCodeModelAlias(_config: ModelConfig, slot: ModelSlot, _providers?: ProviderRegistry): string {
-  return CLAUDE_ROUTE_IDS[slot];
+export function claudeCodeModelAlias(config: ModelConfig, slot: ModelSlot, providers?: ProviderRegistry): string {
+  return contextWindowForRoute(config, slot, providers) > FALLBACK_CONTEXT_WINDOW
+    ? CLAUDE_EXTENDED_MODEL_IDS[slot]
+    : CLAUDE_STANDARD_MODEL_IDS[slot];
 }
 
 export function claudeCodeTransportAlias(config: ModelConfig, slot: ModelSlot, providers?: ProviderRegistry): string {
   return claudeCodeModelAlias(config, slot, providers);
 }
 
-export function slotForClaudeCodeModel(_config: ModelConfig, model: string, _providers?: ProviderRegistry): ModelSlot | undefined {
+export function slotForClaudeCodeModel(config: ModelConfig, model: string, providers?: ProviderRegistry): ModelSlot | undefined {
   const id = String(model || "").trim().toLowerCase();
-  return MODEL_SLOTS.find((slot) => CLAUDE_ROUTE_IDS[slot] === id);
+  if (id === "default") return "default";
+  for (const slot of MODEL_SLOTS) {
+    if (slot === "default") continue;
+    if (id === CLAUDE_STANDARD_MODEL_IDS[slot].toLowerCase() || id === CLAUDE_EXTENDED_MODEL_IDS[slot].toLowerCase()) return slot;
+  }
+  // Direct logical names stay routable for old sessions/API callers.
+  if (MODEL_SLOTS.includes(id as ModelSlot)) return id as ModelSlot;
+  // The providers parameter is intentionally accepted for signature stability.
+  void config; void providers;
+  return undefined;
 }
 
-function normalizeStrict(input: { contextWindow?: unknown; routes?: Partial<Record<ModelSlot, Partial<ModelRoute>>> }, providers?: ProviderRegistry): ModelConfig {
-  const contextWindow = requirePositiveSafeInteger(input.contextWindow, "contextWindow");
+function normalizeStrict(input: { routes?: Partial<Record<ModelSlot, Partial<ModelRoute>>> }, providers?: ProviderRegistry): ModelConfig {
   const routes = {} as Record<ModelSlot, ModelRoute>;
   for (const slot of MODEL_SLOTS) {
     const candidate = input.routes?.[slot];
@@ -304,6 +334,7 @@ function normalizeStrict(input: { contextWindow?: unknown; routes?: Partial<Reco
     const model = String(candidate.model ?? "").trim();
     if (!model) throw new OpenAICCError(`Model id is required for ${slot}.`, 400, "model_required", { slot });
     if (model.length > 256) throw new OpenAICCError(`Model id is too long for ${slot}.`, 400, "model_too_long", { slot });
+    const contextWindow = requirePositiveSafeInteger(candidate.contextWindow, `${slot}.contextWindow`);
     const maxOutputTokens = requirePositiveSafeInteger(candidate.maxOutputTokens, `${slot}.maxOutputTokens`);
     const vision = optionalBoolean(candidate.vision, `${slot}.vision`);
     const tools = optionalBoolean(candidate.tools, `${slot}.tools`);
@@ -313,25 +344,20 @@ function normalizeStrict(input: { contextWindow?: unknown; routes?: Partial<Reco
       provider: candidate.provider,
       model,
       credentialId,
+      contextWindow,
       maxOutputTokens,
       ...(vision !== undefined ? { vision } : {}),
       ...(tools !== undefined ? { tools } : {}),
       ...(reasoning !== undefined ? { reasoning } : {}),
     };
   }
-  return { contextWindow, routes };
+  return { contextWindow: Math.max(...MODEL_SLOTS.map((slot) => Number(routes[slot].contextWindow))), routes };
 }
 
 function normalizeForLoad(input: StoredModelConfig, providers?: ProviderRegistry): { config: ModelConfig; changed: boolean } {
   const topLevelContext = positiveSafeInteger(input.contextWindow);
-  const oldRouteContexts = MODEL_SLOTS
-    .map((slot) => positiveSafeInteger(input.routes?.[slot]?.contextWindow))
-    .filter((value): value is number => value !== undefined);
-  // Older builds persisted context per route. When collapsing to one setting,
-  // preserve the largest user-selected window rather than silently reducing it.
-  const contextWindow = topLevelContext ?? (oldRouteContexts.length ? Math.max(...oldRouteContexts) : DEFAULT_CONTEXT_WINDOW);
   const routes = {} as Record<ModelSlot, ModelRoute>;
-  let changed = topLevelContext === undefined || oldRouteContexts.length > 0;
+  let changed = false;
 
   for (const slot of MODEL_SLOTS) {
     const fallback = DEFAULT_ROUTES[slot];
@@ -340,6 +366,15 @@ function normalizeForLoad(input: StoredModelConfig, providers?: ProviderRegistry
     const provider = isProvider(candidate.provider, providers) ? candidate.provider : fallback.provider;
     if (original && provider !== candidate.provider) changed = true;
     const model = String(candidate.model ?? fallback.model).trim() || fallback.model;
+    const parsedContext = positiveSafeInteger(candidate.contextWindow);
+    // The build immediately before this one collapsed route contexts into one
+    // global value. Expand that value back out, restoring the previous 200K
+    // Opus default while preserving the user's long-context setting elsewhere.
+    const migratedGlobal = topLevelContext === undefined
+      ? DEFAULT_CONTEXT_WINDOWS[slot]
+      : Math.min(topLevelContext, DEFAULT_CONTEXT_WINDOWS[slot]);
+    const contextWindow = parsedContext ?? migratedGlobal;
+    if (!original || parsedContext === undefined) changed = true;
     const parsedMax = positiveSafeInteger(candidate.maxOutputTokens);
     const maxOutputTokens = parsedMax ?? DEFAULT_MAX_OUTPUT_TOKENS[slot];
     if (candidate.maxOutputTokens !== undefined && parsedMax === undefined) changed = true;
@@ -354,12 +389,16 @@ function normalizeForLoad(input: StoredModelConfig, providers?: ProviderRegistry
       provider,
       model,
       credentialId,
+      contextWindow,
       maxOutputTokens,
       ...(vision !== undefined ? { vision } : {}),
       ...(tools !== undefined ? { tools } : {}),
       ...(reasoning !== undefined ? { reasoning } : {}),
     };
   }
+
+  const contextWindow = Math.max(...MODEL_SLOTS.map((slot) => Number(routes[slot].contextWindow)));
+  if (topLevelContext !== contextWindow) changed = true;
   return { config: { contextWindow, routes }, changed };
 }
 
