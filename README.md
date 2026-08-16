@@ -18,15 +18,17 @@ The Admin UI at `http://127.0.0.1:8082/admin` is the normal configuration surfac
 OpenAI-CC deliberately keeps model policy simple:
 
 - Claude sees exactly five logical routes: `default`, `fable`, `opus`, `sonnet`, `haiku`.
-- A route's context window and output limit are the values configured in Admin.
-- `/v1/models`, Claude client configuration, and Claude auto-compaction use those route values.
-- OpenAI-CC does not maintain a hardcoded per-model context/output capability catalog.
+- Admin has one Claude context-window number. The same value drives Claude's displayed context, `/v1/models`, and auto-compaction.
+- The fresh context default is 1,050,000 tokens, with no arbitrary OpenAI-CC 1M ceiling.
+- If a selected upstream supports less than the configured request, that upstream returns its own error; OpenAI-CC does not maintain a per-model clamp database.
+- Per-route output limits remain configurable.
+- OpenAI-CC does not maintain a hardcoded per-model friendly-name/context/output capability catalog.
 - Provider model discovery returns the model IDs exposed by the provider.
-- Inference is not blocked by a local character/token heuristic; the upstream provider is authoritative if a configured request exceeds its real capability.
+- Inference is not blocked by a local character/token heuristic or local context estimator.
 - Responses tool-result images remain structured multimodal content rather than being converted to base64 text.
 - Auto routes use the preferred ready credential for that provider and can rotate only within that provider. Pinned routes never silently fall back.
 
-Fresh defaults are:
+Fresh routing defaults are:
 
 | Route | Provider | Model |
 | --- | --- | --- |
@@ -36,7 +38,19 @@ Fresh defaults are:
 | Sonnet | Google AI Studio | `gemini-3.5-flash-lite` |
 | Haiku | Google AI Studio | `gemini-3.5-flash-lite` |
 
-Fresh route context defaults are currently 1,050,000 tokens, but they are configuration—not a claim by OpenAI-CC about a model's upstream capability. Existing user routing and limits survive upgrades.
+The 1,050,000-token fresh context value is configuration, not a claim by OpenAI-CC about any model's upstream capability. Existing user routing and context configuration survive upgrades.
+
+## Claude context and compaction
+
+Claude Code is configured from the same Admin value through its supported gateway environment:
+
+- `CLAUDE_CODE_MAX_CONTEXT_TOKENS=<Admin context>`
+- `CLAUDE_CODE_AUTO_COMPACT_WINDOW=<Admin context>`
+- `DISABLE_COMPACT=0`
+
+This keeps Claude's own compaction enabled while avoiding the generic 200K fallback for the five logical gateway routes. CI verifies the behavior against the pinned real Claude Code client rather than relying only on metadata tests.
+
+OpenAI-CC does not create `[1m]` duplicate models, `supports1m` variants, or extra carrier rows to manipulate the model picker.
 
 ## ChatGPT OAuth
 
