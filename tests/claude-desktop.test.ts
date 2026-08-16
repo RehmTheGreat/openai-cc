@@ -15,28 +15,25 @@ import { MODEL_SLOTS, ModelConfig, claudeCodeModelAlias } from "../src/model-con
 const config: ModelConfig = {
   contextWindow: 850000,
   routes: {
-    default: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
-    fable: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
-    opus: { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: 96000 },
-    sonnet: { provider: "google", model: "gemini-3.6-flash", maxOutputTokens: 64000 },
-    haiku: { provider: "nvidia", model: "test-haiku-upstream", maxOutputTokens: 32000 },
+    default: { provider: "chatgpt", model: "provider-default", maxOutputTokens: 128000 },
+    fable: { provider: "chatgpt", model: "provider-fable", maxOutputTokens: 128000 },
+    opus: { provider: "zen", model: "provider-opus", maxOutputTokens: 96000 },
+    sonnet: { provider: "google", model: "provider-sonnet", maxOutputTokens: 64000 },
+    haiku: { provider: "nvidia", model: "provider-haiku", maxOutputTokens: 32000 },
   },
 };
 
-test("Claude model discovery exposes route-specific context caps and client capability ids", () => {
+test("Claude model discovery exposes exactly five logical route ids and the Admin context", () => {
   const response = claudeDesktopModelList(config);
-  const aliases = Object.fromEntries(MODEL_SLOTS.map((slot) => [slot, claudeCodeModelAlias(config, slot)])) as Record<string, string>;
-  assert.deepEqual(response.data.map((model) => model.id), MODEL_SLOTS.map((slot) => aliases[slot]));
-  assert.equal(response.data.some((model) => model.id.includes("gemini") || model.id.includes("deepseek") || model.id.includes("gpt") || model.id.includes("openai-cc")), false);
-  assert.equal(response.data.find((model) => model.id === aliases.default)?.max_input_tokens, 850000);
-  assert.equal(response.data.find((model) => model.id === aliases.fable)?.max_input_tokens, 850000);
-  assert.equal(response.data.find((model) => model.id === aliases.opus)?.max_input_tokens, 200000);
-  assert.equal(response.data.find((model) => model.id === aliases.sonnet)?.max_input_tokens, 850000);
-  assert.equal(response.data.find((model) => model.id === aliases.haiku)?.max_input_tokens, 200000);
-  assert.equal(response.data.find((model) => model.id === aliases.opus)?.max_tokens, 96000);
-  assert.equal((response.data.find((model) => model.id === aliases.sonnet)?.capabilities.image_input as any).supported, true);
-  assert.equal((response.data.find((model) => model.id === aliases.haiku)?.capabilities.image_input as any).supported, false);
+  assert.deepEqual(response.data.map((model) => model.id), ["default", "fable", "opus", "sonnet", "haiku"]);
+  assert.deepEqual(response.data.map((model) => model.display_name), ["Default", "Fable", "Opus", "Sonnet", "Haiku"]);
+  for (const model of response.data) assert.equal(model.max_input_tokens, 850000);
+  assert.equal(response.data.find((model) => model.id === "opus")?.max_tokens, 96000);
+  assert.equal((response.data.find((model) => model.id === "sonnet")?.capabilities.image_input as any).supported, true);
+  assert.equal((response.data.find((model) => model.id === "haiku")?.capabilities.image_input as any).supported, false);
   assert.equal(response.has_more, false);
+  const publicJson = JSON.stringify(response.data);
+  assert.doesNotMatch(publicJson, /provider-default|provider-opus|provider-sonnet|\[1m\]|openai-cc-/i);
 });
 
 test("route capability overrides change Claude-facing metadata without changing upstream model selection", () => {
@@ -47,17 +44,18 @@ test("route capability overrides change Claude-facing metadata without changing 
   const sonnet = claudeDesktopModelList(overridden).data.find((model) => model.display_name === "Sonnet")!;
   assert.equal((sonnet.capabilities.image_input as any).supported, false);
   assert.equal((sonnet.capabilities.thinking as any).supported, false);
-  assert.equal(overridden.routes.sonnet.model, "gemini-3.6-flash");
+  assert.equal(overridden.routes.sonnet.model, "provider-sonnet");
 });
 
-test("model retrieval accepts Claude-family version aliases without exposing upstream ids", () => {
-  assert.equal(claudeDesktopModel(config, "claude-opus-5")?.max_tokens, 96000);
-  assert.equal(claudeDesktopModel(config, "claude-opus-5-20260724")?.id, "claude-opus-5");
-  assert.equal(claudeDesktopModel(config, "deepseek-v4-flash-free"), undefined);
+test("model retrieval accepts only public logical route ids", () => {
+  assert.equal(claudeDesktopModel(config, "opus")?.max_tokens, 96000);
+  assert.equal(claudeDesktopModel(config, "sonnet")?.id, "sonnet");
+  assert.equal(claudeDesktopModel(config, "provider-opus"), undefined);
   assert.equal(claudeDesktopModel(config, "openai-cc-sonnet"), undefined);
+  assert.equal(claudeDesktopModel(config, "claude-opus-5[1m]"), undefined);
 });
 
-test("Claude Desktop 3P configuration is merged and idempotent", async () => {
+test("Claude Desktop 3P configuration is merged, idempotent, and creates no supports1m variants", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-desktop-"));
   const paths: ClaudeDesktopPaths = {
     normalConfigFile: path.join(root, "Claude", "claude_desktop_config.json"),
@@ -80,8 +78,7 @@ test("Claude Desktop 3P configuration is merged and idempotent", async () => {
   assert.equal(profile.inferenceGatewayBaseUrl, "http://127.0.0.1:8082");
   assert.equal(profile.inferenceGatewayAuthScheme, "bearer");
   assert.deepEqual(profile.inferenceModels.map((model: any) => model.name), MODEL_SLOTS.map((slot) => claudeCodeModelAlias(config, slot)));
-  assert.equal(profile.inferenceModels.some((model: any) => model.supports1m === true), true);
-  assert.equal(profile.inferenceModels.find((model: any) => model.name === claudeCodeModelAlias(config, "default"))?.supports1m, true);
+  assert.equal(profile.inferenceModels.some((model: any) => "supports1m" in model), false);
   assert.equal(meta.appliedId, CLAUDE_DESKTOP_PROFILE_ID);
   assert.equal(meta.entries.filter((entry: any) => entry.id === CLAUDE_DESKTOP_PROFILE_ID).length, 1);
   assert.equal(meta.entries.some((entry: any) => entry.id === "other"), true);
@@ -109,7 +106,7 @@ test("bare-PC installer only requires the cleaned runtime dependency and never r
   assert.doesNotMatch(setup, /git\s+(clone|pull|fetch|reset|clean)/i);
 });
 
-test("shared Claude settings retain gateway context, clean route names, picker policy, and public family pins", async () => {
+test("shared Claude settings retain gateway context, clean route names, and no duplicate carrier policy", async () => {
   const source = await readFile(path.join(process.cwd(), "src", "claude-config.ts"), "utf8");
   const clients = await readFile(path.join(process.cwd(), "scripts", "configure-clients.ts"), "utf8");
   assert.match(source, /claudeCodeModelAlias\(config, "default", providers\)/);
@@ -122,12 +119,10 @@ test("shared Claude settings retain gateway context, clean route names, picker p
   assert.match(source, /ANTHROPIC_DEFAULT_HAIKU_MODEL:\s*claudeCodeModelAlias\(config, "haiku", providers\)/);
   assert.match(source, /delete modelOverrides\["claude-fable-5"\]/);
   assert.match(source, /delete modelOverrides\["claude-sonnet-5"\]/);
-  assert.match(source, /ANTHROPIC_DEFAULT_FABLE_MODEL_NAME:\s*"Fable"/);
-  assert.match(source, /ANTHROPIC_DEFAULT_OPUS_MODEL_NAME:\s*"Opus"/);
-  assert.match(source, /ANTHROPIC_DEFAULT_SONNET_MODEL_NAME:\s*"Sonnet"/);
-  assert.match(source, /ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME:\s*"Haiku"/);
   assert.match(source, /CLAUDE_CODE_USE_GATEWAY/);
   assert.match(source, /CLAUDE_CODE_AUTO_COMPACT_WINDOW/);
+  assert.match(source, /String\(maxContextWindow\)/);
+  assert.doesNotMatch(source, /supports1m|\[1m\]/);
   assert.match(source, /hasCompletedOnboarding = true/);
   assert.match(source, /hasSeenOnboarding = true/);
   assert.doesNotMatch(source, /DISABLE_COMPACT\s*[=:]/);
