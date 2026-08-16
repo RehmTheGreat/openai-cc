@@ -71,15 +71,15 @@ test("provider discovery returns provider model ids without OpenAI-CC model deco
   store.close();
 });
 
-test("Claude-facing discovery exposes five routes with the one Admin context", async () => {
+test("Claude Desktop-facing discovery exposes four routes with the one Admin context", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-labels-"));
   const store = new AccountStore(root); await store.init();
   const configs = new ModelConfigStore(root, store); await configs.init();
   await configs.update({ contextWindow: 1_234_567 });
   const list = claudeDesktopModelList(configs.snapshot());
-  assert.deepEqual(list.data.map((model) => model.id), ["default", "fable", "opus", "sonnet", "haiku"]);
-  assert.deepEqual(list.data.map((model) => model.display_name), ["Default", "Fable", "Opus", "Sonnet", "Haiku"]);
-  assert.deepEqual(list.data.map((model) => model.max_input_tokens), [1_234_567, 1_234_567, 1_234_567, 1_234_567, 1_234_567]);
+  assert.deepEqual(list.data.map((model) => model.id), ["fable", "opus", "sonnet", "haiku"]);
+  assert.deepEqual(list.data.map((model) => model.display_name), ["Fable", "Opus", "Sonnet", "Haiku"]);
+  assert.deepEqual(list.data.map((model) => model.max_input_tokens), [1_234_567, 1_234_567, 1_234_567, 1_234_567]);
   const visible = JSON.stringify(list.data.map(({ id, display_name }) => ({ id, display_name })));
   assert.doesNotMatch(visible, /gpt-|deepseek|gemini|cloudflare|\[1m\]|openai-cc-/i);
   store.close();

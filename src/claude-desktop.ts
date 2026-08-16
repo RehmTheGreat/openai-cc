@@ -2,7 +2,6 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
-  MODEL_SLOTS,
   ModelConfig,
   ModelRoute,
   ModelSlot,
@@ -12,14 +11,16 @@ import {
 } from "./model-config.js";
 import { ProviderRegistry } from "./provider-registry.js";
 
-export type ClaudeDesktopSlot = ModelSlot;
-type ClaudeDesktopProfileSlot = Exclude<ModelSlot, "default">;
+export type ClaudeDesktopSlot = Exclude<ModelSlot, "default">;
+type ClaudeDesktopProfileSlot = ClaudeDesktopSlot;
 
 export const CLAUDE_DESKTOP_PROFILE_ID = "00000000-0000-4000-8000-000000008082";
 export const CLAUDE_DESKTOP_PROFILE_NAME = "OpenAI-CC";
 
-const DESKTOP_SLOTS: ClaudeDesktopSlot[] = [...MODEL_SLOTS];
-const DESKTOP_PROFILE_SLOTS: ClaudeDesktopProfileSlot[] = ["fable", "opus", "sonnet", "haiku"];
+// Default is an internal Claude Code fallback only. It must never appear in
+// Claude Desktop managed config or model discovery.
+const DESKTOP_SLOTS: ClaudeDesktopSlot[] = ["fable", "opus", "sonnet", "haiku"];
+const DESKTOP_PROFILE_SLOTS: ClaudeDesktopProfileSlot[] = [...DESKTOP_SLOTS];
 // Claude Desktop validates managed 3P gateway model names against Anthropic's
 // provider catalog. These are current real Claude API model aliases used only as
 // transport carriers; labelOverride keeps the OpenAI-CC route names visible.
@@ -65,8 +66,10 @@ export function claudeDesktopModel(config: ModelConfig, modelId: string, provide
   if (direct) return direct;
   for (const slot of DESKTOP_SLOTS) {
     if (normalized === claudeCodeModelAlias(config, slot, providers).toLowerCase()) return modelInfo(slot, config, providers);
-    if (slot !== "default" && normalized === DESKTOP_PROFILE_MODEL_IDS[slot].toLowerCase()) return modelInfo(slot, config, providers);
+    if (normalized === DESKTOP_PROFILE_MODEL_IDS[slot].toLowerCase()) return modelInfo(slot, config, providers);
   }
+  // Internal Default remains addressable for Claude Code metadata lookups, but is never advertised.
+  if (normalized === "default") return modelInfo("default", config, providers);
   return undefined;
 }
 
@@ -155,7 +158,7 @@ export async function currentPlatformPaths(): Promise<ClaudeDesktopPaths | undef
   return undefined;
 }
 
-function modelInfo(slot: ClaudeDesktopSlot, config: ModelConfig, providers?: ProviderRegistry): ClaudeModelInfo {
+function modelInfo(slot: ModelSlot, config: ModelConfig, providers?: ProviderRegistry): ClaudeModelInfo {
   const route = config.routes[slot];
   return {
     id: slot,
