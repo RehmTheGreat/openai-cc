@@ -2,6 +2,11 @@ name: Publish Gated Runtime
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/PUBLISH_NOW"
 
 permissions:
   contents: read
@@ -19,7 +24,7 @@ jobs:
         shell: powershell
         run: |
           if (-not $env:B2_PUBLISH_KEY_ID) { throw "Missing repository secret B2_PUBLISH_KEY_ID" }
-          if (-not $env:B2_PUBLISH_KEY) { throw "Missing repository secret B2_PUBLISH_KEY" }
+          if (-not $env:B2_PUBLISH_KEY) { throw "Missing B2_PUBLISH_KEY" }
           if (-not $env:B2_BUCKET_ID) { throw "Missing repository variable B2_BUCKET_ID" }
 
       - name: Checkout exact selected source commit
