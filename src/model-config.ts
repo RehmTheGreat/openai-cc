@@ -16,6 +16,11 @@ export interface ModelRoute {
   model: string;
   credentialId?: string;
   maxOutputTokens: number;
+  /**
+   * Deprecated write-compatibility only. New state never persists or returns
+   * this field; Admin uses ModelConfig.contextWindow exclusively.
+   */
+  contextWindow?: number;
   /** Optional capability overrides. Undefined means use provider defaults/discovery. */
   vision?: boolean;
   tools?: boolean;
@@ -124,10 +129,14 @@ export class ModelConfigStore extends EventEmitter {
     const candidateRoutes = Object.fromEntries(MODEL_SLOTS.map((slot) => {
       const previous = this.state.routes[slot];
       const patch = input.routes?.[slot] ?? {};
-      return [slot, { ...previous, ...patch } as ModelRoute];
+      const { contextWindow: _legacyContext, ...cleanPatch } = patch;
+      return [slot, { ...previous, ...cleanPatch } as ModelRoute];
     })) as Record<ModelSlot, ModelRoute>;
+    const legacyRouteContexts = MODEL_SLOTS
+      .map((slot) => positiveSafeInteger(input.routes?.[slot]?.contextWindow))
+      .filter((value): value is number => value !== undefined);
     const candidate = normalizeStrict({
-      contextWindow: input.contextWindow ?? this.state.contextWindow,
+      contextWindow: input.contextWindow ?? (legacyRouteContexts.length ? Math.max(...legacyRouteContexts) : this.state.contextWindow),
       routes: candidateRoutes,
     }, this.providers);
     this.validatePins(candidate);
