@@ -75,6 +75,12 @@ test("B2 installer layers stream child output without collapsing stderr", async 
   assert.match(fixture, /start === 0 && requestedEnd >= size - 1/);
 });
 
+test("client installer refreshes an existing Claude Desktop profile unless explicitly skipped", async () => {
+  const client = await readFile(path.join(process.cwd(), "distribution/b2/client-installer-template.ps1"), "utf8");
+
+  assert.match(client, /if \(\$env:OPENAI_CC_CLIENT_SKIP_DESKTOP_CONFIG -eq "1"\) \{ \$bootstrapArgs \+= "-SkipDesktopConfig" \}/);
+  assert.doesNotMatch(client, /-not \$wantClaudeDesktop\) \{ \$bootstrapArgs \+= "-SkipDesktopConfig" \}/);
+});
 test("fresh-install verification enforces current provider/model defaults without hardcoded model context", async () => {
   const install = await readFile(path.join(process.cwd(), "install.ps1"), "utf8");
 
