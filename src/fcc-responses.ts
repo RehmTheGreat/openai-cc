@@ -172,7 +172,7 @@ function userItems(content: string | AnthropicBlock[], _toolNames: OpenAIToolNam
       items.push({
         type: "function_call_output",
         call_id: String((block as any).tool_use_id ?? ""),
-        output: serializeToolResultContent((block as any).content),
+        output: toolResultOutput((block as any).content),
       });
     } else if (type === "document") {
       throw new ResponsesConversionError("OpenAI Responses provider does not support Anthropic document blocks.");
@@ -184,7 +184,7 @@ function userItems(content: string | AnthropicBlock[], _toolNames: OpenAIToolNam
   return items;
 }
 
-function imagePart(block: AnthropicBlock): Record<string, unknown> {
+function imagePart(block: AnthropicBlock | Record<string, unknown>): Record<string, unknown> {
   const source = (block as any).source;
   if (!isRecord(source)) throw new ResponsesConversionError("Image source is required.");
   let url: unknown;
@@ -201,16 +201,35 @@ function imagePart(block: AnthropicBlock): Record<string, unknown> {
   return { type: "input_image", image_url: url };
 }
 
-function serializeToolResultContent(content: unknown): string {
+/**
+ * OpenAI/Codex function-call output supports structured content items. Keep
+ * image blocks as input_image items instead of JSON-stringifying base64 into
+ * text, which both loses multimodal semantics and massively inflates context.
+ */
+function toolResultOutput(content: unknown): string | Record<string, unknown>[] {
   if (content === undefined || content === null) return "";
   if (typeof content === "string") return content;
-  if (Array.isArray(content)) return content.map((item) => {
-    if (isRecord(item) && item.type === "text") return String(item.text ?? "");
-    if (isRecord(item)) return JSON.stringify(item);
-    return String(item);
-  }).join("\n");
-  if (isRecord(content)) return JSON.stringify(content);
-  return String(content);
+  if (!Array.isArray(content)) return isRecord(content) ? JSON.stringify(content) : String(content);
+
+  const hasMedia = content.some((item) => isRecord(item) && item.type === "image");
+  if (!hasMedia) {
+    return content.map((item) => {
+      if (isRecord(item) && item.type === "text") return String(item.text ?? "");
+      if (isRecord(item)) return JSON.stringify(item);
+      return String(item);
+    }).join("\n");
+  }
+
+  return content.flatMap((item): Record<string, unknown>[] => {
+    if (isRecord(item) && item.type === "text") {
+      return [{ type: "input_text", text: String(item.text ?? "") }];
+    }
+    if (isRecord(item) && item.type === "image") return [imagePart(item)];
+    if (isRecord(item) && item.type === "document") {
+      throw new ResponsesConversionError("OpenAI Responses tool output does not support Anthropic document blocks.");
+    }
+    return [{ type: "input_text", text: isRecord(item) ? JSON.stringify(item) : String(item) }];
+  });
 }
 
 function systemText(system: AnthropicRequest["system"]): string {
