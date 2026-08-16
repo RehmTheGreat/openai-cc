@@ -135,8 +135,13 @@ export class ModelConfigStore extends EventEmitter {
     const legacyRouteContexts = MODEL_SLOTS
       .map((slot) => positiveSafeInteger(input.routes?.[slot]?.contextWindow))
       .filter((value): value is number => value !== undefined);
+    const explicitContext = positiveSafeInteger(input.contextWindow);
+    const useLegacyContext = legacyRouteContexts.length > 0
+      && (input.contextWindow === undefined || explicitContext === this.state.contextWindow);
     const candidate = normalizeStrict({
-      contextWindow: input.contextWindow ?? (legacyRouteContexts.length ? Math.max(...legacyRouteContexts) : this.state.contextWindow),
+      contextWindow: useLegacyContext
+        ? Math.max(...legacyRouteContexts)
+        : (input.contextWindow ?? this.state.contextWindow),
       routes: candidateRoutes,
     }, this.providers);
     this.validatePins(candidate);
