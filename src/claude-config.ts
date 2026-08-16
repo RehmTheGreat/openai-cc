@@ -27,11 +27,10 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig, 
   const maxContextWindow = Math.max(...routeContextWindows);
   const oldContextValues = new Set(["700000", "850000", "1000000", ...routeContextWindows.map(String)]);
   if (oldContextValues.has(String(env.CLAUDE_CODE_CONTEXT_WINDOW ?? ""))) delete env.CLAUDE_CODE_CONTEXT_WINDOW;
-  if (oldContextValues.has(String(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? ""))) delete env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
 
-  // Claude Code must learn each route's Admin-configured context from our
-  // Anthropic-compatible /v1/models response. Keep the allowlist equal to the
-  // five logical routes so discovery cannot add provider/carrier duplicates.
+  // Keep discovery constrained to OpenAI-CC's five logical routes. The gateway
+  // catalog reports each route's Admin-configured context and never exposes
+  // provider/carrier model IDs.
   env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
   settings.availableModels = [...MODEL_SLOTS];
 
@@ -59,9 +58,11 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig, 
     ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeCodeModelAlias(config, "haiku", providers),
     ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME: "Haiku",
     CLAUDE_CODE_USE_GATEWAY: "1",
-    // Claude exposes one process-level auto-compact setting. Keep it equal to
-    // the largest Admin-configured route context; no independent context cap is
-    // invented by OpenAI-CC.
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(maxContextWindow),
+    // Anthropic documents MAX_CONTEXT_TOKENS as gated by DISABLE_COMPACT. Use
+    // the explicit false value here: it is intentionally tested against the
+    // real Claude client so we never trade correct context for lost compaction.
+    DISABLE_COMPACT: "0",
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(maxContextWindow),
     CLAUDE_CODE_PLUGIN_PREFER_HTTPS: "1",
   };
