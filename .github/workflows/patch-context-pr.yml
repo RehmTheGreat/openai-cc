@@ -1,0 +1,83 @@
+name: One-shot context regression patch
+
+on:
+  push:
+    branches:
+      - fix/per-route-context-and-compaction
+    paths:
+      - ".github/PATCH_CONTEXT_NOW"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/per-route-context-and-compaction
+          fetch-depth: 0
+      - name: Apply exact compatibility patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show 4e14b3d19ded09fa716a4ec19385249e26b0e6b9:src/admin/page.ts > src/admin/page.ts
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              s = p.read_text()
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit(f"{path}: expected one match, found {n}: {old[:100]!r}")
+              p.write_text(s.replace(old, new, 1))
+
+          # Keep provider-reported context visible as reference, but never let discovery
+          # overwrite the per-route value the user controls.
+          replace_once(
+              "src/control-plane.ts",
+              '''  return page\n    .replace("Selecting a discovered model seeds its reported context when available.", "")\n    .replace(",reported=meta?.contextWindow", "")\n    .replace("<span>API reported: <strong>'+(reported?Number(reported).toLocaleString()+' tokens':'Not reported')+'</strong></span>", "")\n    .replace("function seedDiscoveredLimits(slot,provider,modelId,replaceContext){const meta=findModel(provider,modelId),ctx=document.querySelector('#ctx-'+slot),out=document.querySelector('#o-'+slot);if(meta?.contextWindow&&ctx&&(replaceContext||!Number(ctx.value)))ctx.value=String(meta.contextWindow);if(meta?.maxOutputTokens&&out&&Number(out.value)>meta.maxOutputTokens)out.value=String(meta.maxOutputTokens)}", "function seedDiscoveredLimits(){}");''',
+              '''  return page\n    .replace("Selecting a discovered model seeds its reported context when available.", "Provider-reported limits are shown for reference; each route remains user-controlled.")\n    .replace("function seedDiscoveredLimits(slot,provider,modelId,replaceContext){const meta=findModel(provider,modelId),ctx=document.querySelector('#ctx-'+slot),out=document.querySelector('#o-'+slot);if(meta?.contextWindow&&ctx&&(replaceContext||!Number(ctx.value)))ctx.value=String(meta.contextWindow);if(meta?.maxOutputTokens&&out&&Number(out.value)>meta.maxOutputTokens)out.value=String(meta.maxOutputTokens)}", "function seedDiscoveredLimits(){}");'''
+          )
+
+          # /v1/models stays clean and stable: logical route IDs. Claude Code's client
+          # budget comes from the recognized family pins in claude-config, not discovery.
+          replace_once(
+              "src/claude-desktop.ts",
+              '''export function claudeDesktopModel(config: ModelConfig, modelId: string, providers?: ProviderRegistry): ClaudeModelInfo | undefined {\n  const normalized = decodeURIComponent(String(modelId || "")).trim().toLowerCase();\n  return claudeDesktopModels(config, providers).find((model) => model.id.toLowerCase() === normalized);\n}''',
+              '''export function claudeDesktopModel(config: ModelConfig, modelId: string, providers?: ProviderRegistry): ClaudeModelInfo | undefined {\n  const normalized = decodeURIComponent(String(modelId || "")).trim().toLowerCase();\n  const direct = claudeDesktopModels(config, providers).find((model) => model.id.toLowerCase() === normalized);\n  if (direct) return direct;\n  for (const slot of DESKTOP_SLOTS) {\n    if (normalized === claudeCodeModelAlias(config, slot, providers).toLowerCase()) return modelInfo(slot, config, providers);\n    if (slot !== "default" && normalized === DESKTOP_PROFILE_MODEL_IDS[slot].toLowerCase()) return modelInfo(slot, config, providers);\n  }\n  return undefined;\n}'''
+          )
+          replace_once(
+              "src/claude-desktop.ts",
+              '''    id: claudeCodeModelAlias(config, slot, providers),''',
+              '''    id: slot,'''
+          )
+
+          # The route-specific defaults deliberately differ. This test was left behind
+          # by the short-lived single-global-context build.
+          replace_once(
+              "tests/session45.test.ts",
+              '''  for (const slot of ["default", "fable", "opus", "sonnet", "haiku"] as const) {\n    assert.equal(contextWindowForRoute(config, slot, f.providers), 1_050_000);\n  }''',
+              '''  assert.equal(contextWindowForRoute(config, "default", f.providers), 1_000_000);\n  assert.equal(contextWindowForRoute(config, "fable", f.providers), 1_000_000);\n  assert.equal(contextWindowForRoute(config, "opus", f.providers), 200_000);\n  assert.equal(contextWindowForRoute(config, "sonnet", f.providers), 1_000_000);\n  assert.equal(contextWindowForRoute(config, "haiku", f.providers), 1_000_000);'''
+          )
+
+          replace_once(
+              "tests/claude-desktop.test.ts",
+              '''  assert.deepEqual(response.data.map((model) => model.id), [\n    "default",\n    "claude-fable-5[1m]",\n    "claude-opus-4-8",\n    "claude-sonnet-5[1m]",\n    "claude-opus-4-7[1m]",\n  ]);''',
+              '''  assert.deepEqual(response.data.map((model) => model.id), ["default", "fable", "opus", "sonnet", "haiku"]);'''
+          )
+          PY
+          git rm .github/workflows/patch-context-pr.yml .github/PATCH_CONTEXT_NOW
+          git diff --check
+          git status --short
+      - name: Commit patched branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "OpenAI-CC CI patch"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Finish per-route context and compact regression fix"
+          git push origin HEAD:fix/per-route-context-and-compaction
