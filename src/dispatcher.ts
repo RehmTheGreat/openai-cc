@@ -4,6 +4,7 @@ import { AccountRecord, AccountStore } from "./account-store.js";
 import {
   ChatGptOAuthBoundary,
   ChatGptUpstreamError,
+  chatGptRateLimitCooldownMs,
   createChatGptOAuthBoundary,
   readJsonSse,
   requireSuccessfulChatGptResponse,
@@ -267,7 +268,7 @@ function isRateLimit(error: any): boolean {
 }
 
 function rateLimitCooldownMs(error: any, account: AccountRecord): number | undefined {
-  if (account.provider === "chatgpt") return undefined;
+  if (account.provider === "chatgpt") return chatGptRateLimitCooldownMs(error);
   const retryAfter = headerValue(error?.headers, "retry-after");
   if (retryAfter) {
     const seconds = Number(retryAfter);
