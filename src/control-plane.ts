@@ -356,9 +356,7 @@ export class ControlPlaneDispatcher {
 
 function cleanAdminPage(page: string): string {
   return page
-    .replace("Selecting a discovered model seeds its reported context when available.", "")
-    .replace(",reported=meta?.contextWindow", "")
-    .replace("<span>API reported: <strong>'+(reported?Number(reported).toLocaleString()+' tokens':'Not reported')+'</strong></span>", "")
+    .replace("Selecting a discovered model seeds its reported context when available.", "Provider-reported limits are shown for reference; each route remains user-controlled.")
     .replace("function seedDiscoveredLimits(slot,provider,modelId,replaceContext){const meta=findModel(provider,modelId),ctx=document.querySelector('#ctx-'+slot),out=document.querySelector('#o-'+slot);if(meta?.contextWindow&&ctx&&(replaceContext||!Number(ctx.value)))ctx.value=String(meta.contextWindow);if(meta?.maxOutputTokens&&out&&Number(out.value)>meta.maxOutputTokens)out.value=String(meta.maxOutputTokens)}", "function seedDiscoveredLimits(){}");
 }
 

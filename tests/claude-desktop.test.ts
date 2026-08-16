@@ -27,13 +27,7 @@ test("Claude model discovery uses recognized carriers while labels and context r
   const response = claudeDesktopModelList(config);
   assert.deepEqual(response.data.map((model) => model.display_name), ["Default", "Fable", "Opus", "Sonnet", "Haiku"]);
   assert.deepEqual(response.data.map((model) => model.max_input_tokens), [850000, 850000, 200000, 700000, 600000]);
-  assert.deepEqual(response.data.map((model) => model.id), [
-    "default",
-    "claude-fable-5[1m]",
-    "claude-opus-4-8",
-    "claude-sonnet-5[1m]",
-    "claude-opus-4-7[1m]",
-  ]);
+  assert.deepEqual(response.data.map((model) => model.id), ["default", "fable", "opus", "sonnet", "haiku"]);
   assert.equal(response.data.find((model) => model.display_name === "Opus")?.max_tokens, 96000);
   assert.equal((response.data.find((model) => model.display_name === "Sonnet")?.capabilities.image_input as any).supported, true);
   assert.equal((response.data.find((model) => model.display_name === "Haiku")?.capabilities.image_input as any).supported, false);
