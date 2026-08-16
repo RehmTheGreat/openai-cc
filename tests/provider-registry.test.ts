@@ -147,7 +147,7 @@ test("production Cloudflare route sends the configured model, output cap, tools 
     const discovery = await fetch(`${base}/v1/models`);
     const modelList = await discovery.json() as any;
     const sonnet = modelList.data.find((model: any) => model.id === "sonnet");
-    assert.equal(sonnet.max_input_tokens, 1_050_000);
+    assert.equal(sonnet.max_input_tokens, 1_000_000);
     assert.equal(sonnet.max_tokens, 16384);
 
     const response = await fetch(`${base}/v1/messages`, {
