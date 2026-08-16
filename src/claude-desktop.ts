@@ -13,11 +13,22 @@ import {
 import { ProviderRegistry } from "./provider-registry.js";
 
 export type ClaudeDesktopSlot = ModelSlot;
+type ClaudeDesktopProfileSlot = Exclude<ModelSlot, "default">;
 
 export const CLAUDE_DESKTOP_PROFILE_ID = "00000000-0000-4000-8000-000000008082";
 export const CLAUDE_DESKTOP_PROFILE_NAME = "OpenAI-CC";
 
 const DESKTOP_SLOTS: ClaudeDesktopSlot[] = [...MODEL_SLOTS];
+const DESKTOP_PROFILE_SLOTS: ClaudeDesktopProfileSlot[] = ["fable", "opus", "sonnet", "haiku"];
+// Claude Desktop validates managed 3P gateway profile model names against its
+// Anthropic-shaped catalog. Keep these profile-only transport IDs Anthropic-shaped
+// while preserving the user-facing OpenAI-CC labels and internal route names.
+const DESKTOP_PROFILE_MODEL_IDS: Record<ClaudeDesktopProfileSlot, string> = {
+  fable: "claude-openai-cc-fable",
+  opus: "claude-openai-cc-opus",
+  sonnet: "claude-openai-cc-sonnet",
+  haiku: "claude-openai-cc-haiku",
+};
 const UNKNOWN_CREATED_AT = "1970-01-01T00:00:00Z";
 
 export interface ClaudeDesktopPaths {
@@ -83,9 +94,9 @@ export function claudeDesktopModelList(
 }
 
 export function claudeDesktopProfile(baseUrl: string, config: ModelConfig, providers?: ProviderRegistry): Record<string, unknown> {
-  const inferenceModels = DESKTOP_SLOTS.map((slot) => {
+  const inferenceModels = DESKTOP_PROFILE_SLOTS.map((slot) => {
     const info = modelInfo(slot, config, providers);
-    return { name: info.id, labelOverride: info.display_name };
+    return { name: DESKTOP_PROFILE_MODEL_IDS[slot], labelOverride: info.display_name };
   });
 
   return {
