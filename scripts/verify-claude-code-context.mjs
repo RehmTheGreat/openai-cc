@@ -88,7 +88,7 @@ if (!version.includes(CLAUDE_VERSION)) {
 }
 
 if (String(configured.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY ?? "") !== "1") {
-  throw new Error("Gateway model discovery must be enabled so Claude reads Admin-configured max_input_tokens from /v1/models.");
+  throw new Error("Gateway model discovery must be enabled for the five logical route catalog.");
 }
 if (String(configured.CLAUDE_CODE_USE_GATEWAY ?? "") !== "1") {
   throw new Error("CLAUDE_CODE_USE_GATEWAY must be enabled.");
@@ -102,6 +102,15 @@ if (JSON.stringify(settings.availableModels) !== JSON.stringify(expectedAvailabl
 const target = Number(configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
 if (!Number.isSafeInteger(target) || target < 1) {
   throw new Error("Invalid CLAUDE_CODE_AUTO_COMPACT_WINDOW: " + configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
+}
+if (String(configured.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? "") !== String(target)) {
+  throw new Error("CLAUDE_CODE_MAX_CONTEXT_TOKENS must equal the Admin context: " + target);
+}
+if (String(configured.DISABLE_COMPACT ?? "") !== "0") {
+  throw new Error("DISABLE_COMPACT must remain false so Claude compaction stays enabled.");
+}
+if (String(configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW ?? "") !== String(target)) {
+  throw new Error("CLAUDE_CODE_AUTO_COMPACT_WINDOW must equal the Admin context: " + target);
 }
 
 const expectedPins = {
@@ -130,7 +139,9 @@ if (/\[1m\]|openai-cc-(?:fable|sonnet)/i.test(serializedSettings)) {
 }
 
 console.log("Claude Code version:", version.split("\n")[0]);
+console.log("CLAUDE_CODE_MAX_CONTEXT_TOKENS=" + target);
 console.log("CLAUDE_CODE_AUTO_COMPACT_WINDOW=" + target);
+console.log("DISABLE_COMPACT=0");
 console.log("availableModels=" + JSON.stringify(settings.availableModels));
 
 const gateway = await startGateway();
