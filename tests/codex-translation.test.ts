@@ -104,7 +104,7 @@ test("tool-result images remain structured multimodal content instead of base64 
     assert.equal(output[1].type, "input_image");
     assert.ok(output[1].image_url.startsWith("data:image/png;base64,"));
     assert.equal(output[1].image_url.length, imageData.length + "data:image/png;base64,".length);
-    assert.equal(typeof output, "string", false, "base64 image must not be JSON-stringified into function output text");
+    assert.notEqual(typeof output, "string", "base64 image must not be JSON-stringified into function output text");
   }
 });
 
