@@ -281,7 +281,13 @@ try {
     const route = adminState.modelConfig.routes[slot], routeHealth = adminState.routeHealth[slot];
     if (Number(model.max_input_tokens) !== Number(routeHealth.contextWindow)) fail(`Verification failed: ${title} context metadata disagrees with effective route context.`);
     if (Number(model.max_tokens) !== Number(route.maxOutputTokens)) fail(`Verification failed: ${title} output metadata disagrees with route configuration.`);
-    if (String(settings.env?.[envKey] || "") !== String(model.id)) fail(`Verification failed: Claude alias for ${title} disagrees with gateway model discovery.`);
+    const configuredAlias = String(settings.env?.[envKey] || "");
+    if (!configuredAlias) fail(`Verification failed: Claude alias for ${title} is missing.`);
+    const aliasResponse = await fetch(`${GATEWAY}/v1/models/${encodeURIComponent(configuredAlias)}`);
+    if (!aliasResponse.ok) fail(`Verification failed: Claude alias for ${title} is not accepted by the gateway.`);
+    const aliasModel = await aliasResponse.json();
+    if (String(aliasModel.display_name) !== title) fail(`Verification failed: Claude alias for ${title} does not resolve back to the expected logical route.`);
+    if (Number(aliasModel.max_input_tokens) !== Number(routeHealth.contextWindow) || Number(aliasModel.max_tokens) !== Number(route.maxOutputTokens)) fail(`Verification failed: Claude alias for ${title} resolves with inconsistent route metadata.`);
   }
 
   if (freshModelConfig) {

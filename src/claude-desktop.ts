@@ -61,7 +61,13 @@ export function claudeDesktopModels(config: ModelConfig, providers?: ProviderReg
 
 export function claudeDesktopModel(config: ModelConfig, modelId: string, providers?: ProviderRegistry): ClaudeModelInfo | undefined {
   const normalized = decodeURIComponent(String(modelId || "")).trim().toLowerCase();
-  return claudeDesktopModels(config, providers).find((model) => model.id.toLowerCase() === normalized);
+  const direct = claudeDesktopModels(config, providers).find((model) => model.id.toLowerCase() === normalized);
+  if (direct) return direct;
+  for (const slot of DESKTOP_SLOTS) {
+    if (normalized === claudeCodeModelAlias(config, slot, providers).toLowerCase()) return modelInfo(slot, config, providers);
+    if (slot !== "default" && normalized === DESKTOP_PROFILE_MODEL_IDS[slot].toLowerCase()) return modelInfo(slot, config, providers);
+  }
+  return undefined;
 }
 
 export function claudeDesktopModelList(
@@ -152,7 +158,7 @@ export async function currentPlatformPaths(): Promise<ClaudeDesktopPaths | undef
 function modelInfo(slot: ClaudeDesktopSlot, config: ModelConfig, providers?: ProviderRegistry): ClaudeModelInfo {
   const route = config.routes[slot];
   return {
-    id: claudeCodeModelAlias(config, slot, providers),
+    id: slot,
     type: "model",
     display_name: title(slot),
     created_at: UNKNOWN_CREATED_AT,

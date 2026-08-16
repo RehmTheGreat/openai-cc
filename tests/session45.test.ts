@@ -29,9 +29,11 @@ async function close(server: any) { await new Promise<void>((resolve) => server.
 test("fresh route contexts are Admin-controlled rather than provider-catalog capped", async () => {
   const f = await fixture();
   const config = f.models.snapshot();
-  for (const slot of ["default", "fable", "opus", "sonnet", "haiku"] as const) {
-    assert.equal(contextWindowForRoute(config, slot, f.providers), 1_050_000);
-  }
+  assert.equal(contextWindowForRoute(config, "default", f.providers), 1_000_000);
+  assert.equal(contextWindowForRoute(config, "fable", f.providers), 1_000_000);
+  assert.equal(contextWindowForRoute(config, "opus", f.providers), 200_000);
+  assert.equal(contextWindowForRoute(config, "sonnet", f.providers), 1_000_000);
+  assert.equal(contextWindowForRoute(config, "haiku", f.providers), 1_000_000);
   assert.equal(config.routes.default.model, "gpt-5.6-luna");
   assert.equal(config.routes.fable.model, "gpt-5.6-luna");
   f.store.close();

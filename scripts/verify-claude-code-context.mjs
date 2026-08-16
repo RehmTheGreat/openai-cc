@@ -42,14 +42,13 @@ async function probe(label, model, target) {
     const output = runClaude(["--model", model, "-p", "/context"]);
     const budget = parseContextBudget(output);
     lastBudget = budget;
-    console.log(label + ": model=" + model + " client_context=" + (budget ?? "not displayed") + " attempt=" + attempt);
+    console.log(label + ": model=" + model + " client_context=" + (budget ?? "not displayed") + " target=" + target + " attempt=" + attempt);
     if (budget === undefined) return;
-    // Claude may round million-scale UI values (for example 1.05M -> 1.0M).
-    const tolerance = Math.max(1000, Math.round(target * 0.05));
+    const tolerance = Math.max(2000, Math.round(target * 0.05));
     if (Math.abs(budget - target) <= tolerance) return;
     await delay(500);
   }
-  throw new Error(label + " displays context " + lastBudget + " instead of the Admin-configured " + target);
+  throw new Error(label + " displays context " + lastBudget + " instead of the route-configured " + target);
 }
 
 async function delay(ms) {
@@ -87,42 +86,30 @@ if (!version.includes(CLAUDE_VERSION)) {
   throw new Error("Expected Claude Code " + CLAUDE_VERSION + ", got: " + version);
 }
 
-if (String(configured.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY ?? "") !== "1") {
-  throw new Error("Gateway model discovery must be enabled for the five logical route catalog.");
+if (String(configured.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY ?? "") === "1") {
+  throw new Error("Gateway model discovery must stay disabled to avoid duplicate/logical fallback model rows.");
 }
 if (String(configured.CLAUDE_CODE_USE_GATEWAY ?? "") !== "1") {
   throw new Error("CLAUDE_CODE_USE_GATEWAY must be enabled.");
 }
+if (configured.CLAUDE_CODE_MAX_CONTEXT_TOKENS !== undefined) {
+  throw new Error("CLAUDE_CODE_MAX_CONTEXT_TOKENS must be unset; route carriers and gateway metadata own the context budget.");
+}
+if (String(configured.DISABLE_COMPACT ?? "") === "0") {
+  throw new Error("OpenAI-CC must not write DISABLE_COMPACT=0; that stale workaround is removed.");
+}
 
-const expectedAvailableModels = ["default", "fable", "opus", "sonnet", "haiku"];
+const expectedAvailableModels = ["fable", "opus", "sonnet", "haiku"];
 if (JSON.stringify(settings.availableModels) !== JSON.stringify(expectedAvailableModels)) {
-  throw new Error("Claude availableModels must expose exactly the five logical routes. Got: " + JSON.stringify(settings.availableModels));
+  throw new Error("Claude availableModels must expose exactly Fable, Opus, Sonnet, Haiku. Got: " + JSON.stringify(settings.availableModels));
 }
 
-const target = Number(configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
-if (!Number.isSafeInteger(target) || target < 1) {
-  throw new Error("Invalid CLAUDE_CODE_AUTO_COMPACT_WINDOW: " + configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
-}
-if (String(configured.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? "") !== String(target)) {
-  throw new Error("CLAUDE_CODE_MAX_CONTEXT_TOKENS must equal the Admin context: " + target);
-}
-if (String(configured.DISABLE_COMPACT ?? "") !== "0") {
-  throw new Error("DISABLE_COMPACT must remain false so Claude compaction stays enabled.");
-}
-if (String(configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW ?? "") !== String(target)) {
-  throw new Error("CLAUDE_CODE_AUTO_COMPACT_WINDOW must equal the Admin context: " + target);
-}
-
-const expectedPins = {
-  ANTHROPIC_MODEL: "default",
-  ANTHROPIC_DEFAULT_FABLE_MODEL: "fable",
-  ANTHROPIC_DEFAULT_OPUS_MODEL: "opus",
-  ANTHROPIC_DEFAULT_SONNET_MODEL: "sonnet",
-  ANTHROPIC_DEFAULT_HAIKU_MODEL: "haiku",
+const pins = {
+  fable: configured.ANTHROPIC_DEFAULT_FABLE_MODEL,
+  opus: configured.ANTHROPIC_DEFAULT_OPUS_MODEL,
+  sonnet: configured.ANTHROPIC_DEFAULT_SONNET_MODEL,
+  haiku: configured.ANTHROPIC_DEFAULT_HAIKU_MODEL,
 };
-for (const [key, expected] of Object.entries(expectedPins)) {
-  if (configured[key] !== expected) throw new Error(key + " must be " + expected + "; got " + configured[key]);
-}
 const expectedNames = {
   ANTHROPIC_DEFAULT_FABLE_MODEL_NAME: "Fable",
   ANTHROPIC_DEFAULT_OPUS_MODEL_NAME: "Opus",
@@ -132,36 +119,42 @@ const expectedNames = {
 for (const [key, expected] of Object.entries(expectedNames)) {
   if (configured[key] !== expected) throw new Error(key + " must be " + expected + "; got " + configured[key]);
 }
-
-const serializedSettings = JSON.stringify(settings);
-if (/\[1m\]|openai-cc-(?:fable|sonnet)/i.test(serializedSettings)) {
-  throw new Error("Stale long-context carrier aliases remain in Claude settings: " + serializedSettings);
+for (const [slot, pin] of Object.entries(pins)) {
+  if (!pin || !String(pin).startsWith("claude-")) throw new Error(slot + " must use a recognized Claude family carrier; got " + pin);
 }
-
-console.log("Claude Code version:", version.split("\n")[0]);
-console.log("CLAUDE_CODE_MAX_CONTEXT_TOKENS=" + target);
-console.log("CLAUDE_CODE_AUTO_COMPACT_WINDOW=" + target);
-console.log("DISABLE_COMPACT=0");
-console.log("availableModels=" + JSON.stringify(settings.availableModels));
+if (!String(pins.fable).endsWith("[1m]")) throw new Error("Fresh Fable route must carry [1m], got " + pins.fable);
+if (String(pins.opus).endsWith("[1m]")) throw new Error("Fresh Opus/DeepSeek route is 200K and must not carry [1m].");
+if (!String(pins.sonnet).endsWith("[1m]")) throw new Error("Fresh Sonnet route must carry [1m], got " + pins.sonnet);
+if (!String(pins.haiku).endsWith("[1m]")) throw new Error("Fresh Haiku route must carry a 1M-capable carrier, got " + pins.haiku);
 
 const gateway = await startGateway();
 try {
   const modelsResponse = await fetch(new URL("/v1/models?limit=1000", configured.ANTHROPIC_BASE_URL));
   if (!modelsResponse.ok) throw new Error("Gateway /v1/models failed with HTTP " + modelsResponse.status);
   const catalog = await modelsResponse.json();
-  const ids = catalog.data?.map((model) => model.id) ?? [];
-  if (JSON.stringify(ids) !== JSON.stringify(expectedAvailableModels)) {
-    throw new Error("Gateway model catalog must contain exactly the five logical routes. Got: " + JSON.stringify(ids));
-  }
-  for (const model of catalog.data ?? []) {
-    if (model.max_input_tokens !== target) {
-      throw new Error(model.id + " gateway max_input_tokens=" + model.max_input_tokens + " instead of " + target);
-    }
+  const byName = new Map((catalog.data ?? []).map((model) => [String(model.display_name || "").toLowerCase(), model]));
+  const routeTargets = {};
+  for (const slot of expectedAvailableModels) {
+    const model = byName.get(slot);
+    if (!model) throw new Error("Gateway catalog is missing display_name " + slot);
+    const target = Number(model.max_input_tokens);
+    if (!Number.isSafeInteger(target) || target < 1) throw new Error(slot + " has invalid max_input_tokens=" + model.max_input_tokens);
+    routeTargets[slot] = target;
   }
 
-  for (const model of expectedAvailableModels) {
-    await probe(model, model, target);
+  const expectedAutoCompact = Math.max(...Object.values(routeTargets).map(Number));
+  if (String(configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW ?? "") !== String(expectedAutoCompact)) {
+    throw new Error("CLAUDE_CODE_AUTO_COMPACT_WINDOW=" + configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW + " instead of largest route context " + expectedAutoCompact);
   }
+
+  for (const slot of expectedAvailableModels) {
+    await probe(slot, slot, routeTargets[slot]);
+  }
+
+  console.log("Claude Code version:", version.split("\n")[0]);
+  console.log("availableModels=" + JSON.stringify(settings.availableModels));
+  console.log("routeTargets=" + JSON.stringify(routeTargets));
+  console.log("CLAUDE_CODE_AUTO_COMPACT_WINDOW=" + configured.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
 } finally {
   gateway.kill();
 }
