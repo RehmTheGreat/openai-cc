@@ -2,6 +2,12 @@ import { randomBytes } from "node:crypto";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { AccountRecord, AccountStore, ApiProviderKind, publicCredential, validateId } from "./account-store.js";
 import { ChatGptAuthRunner, OfficialCodexAuthRunner } from "./chatgpt-auth.js";
+import {
+  ChatGptUpstreamError,
+  chatGptRateLimitReset,
+  createChatGptOAuthBoundary,
+  requireSuccessfulChatGptResponse,
+} from "./chatgpt-oauth.js";
 import { claudeDesktopModel, claudeDesktopModelList } from "./claude-desktop.js";
 import { ModelConfigStore } from "./model-config.js";
 import { OpenAICCError, conflict } from "./errors.js";
@@ -168,6 +174,11 @@ export class ControlPlaneDispatcher {
         const record = action === "prefer" ? await this.store.prefer(id) : action === "disable" ? await this.store.disable(id) : await this.store.enable(id);
         return void json(res, 200, publicCredential(record));
       }
+      if (req.method === "POST" && /^\/admin\/credentials\/[^/]+\/retry$/.test(url.pathname)) {
+        await readJson(req, ADMIN_BODY_LIMIT, true);
+        const id = credentialIdFromPath(url.pathname);
+        return void json(res, 200, await this.retryChatGptCredential(id));
+      }
       if (req.method === "POST" && /^\/admin\/credentials\/[^/]+\/reauth$/.test(url.pathname)) {
         const id = credentialIdFromPath(url.pathname);
         const body = await readJson<{ loginMode?: string; name?: string }>(req, ADMIN_BODY_LIMIT, true);
@@ -220,6 +231,65 @@ export class ControlPlaneDispatcher {
       model: input.model,
       accountId: input.accountId,
     });
+  }
+
+  private async retryChatGptCredential(id: string): Promise<Record<string, unknown>> {
+    const account = this.store.get(id);
+    if (!account) throw new OpenAICCError(`Unknown credential: ${id}`, 404, "credential_not_found");
+    if (account.provider !== "chatgpt" || !account.authFile) {
+      throw new OpenAICCError("Retry currently applies to ChatGPT OAuth credentials.", 400, "retry_not_supported");
+    }
+    if (account.status === "disabled") {
+      throw conflict(`Credential ${id} is disabled. Enable it before retrying.`, "credential_disabled");
+    }
+
+    const boundary = createChatGptOAuthBoundary(account.authFile);
+    const availableModels = await boundary.listModels();
+    const configuredModels = Object.values(this.models.snapshot().routes)
+      .filter((route) => route.provider === "chatgpt")
+      .map((route) => route.model)
+      .filter((model): model is string => Boolean(model));
+    const model = configuredModels.find((candidate) => availableModels.includes(candidate))
+      ?? availableModels.find((candidate) => candidate.startsWith("gpt-"))
+      ?? availableModels[0];
+    if (!model) throw new OpenAICCError("Codex returned no model suitable for the retry probe.", 502, "retry_model_unavailable");
+
+    const request: Record<string, unknown> = {
+      model,
+      stream: false,
+      input: "Reply with exactly: ok",
+    };
+
+    try {
+      const response = await requireSuccessfulChatGptResponse(await boundary.responses(request), request);
+      const payload = await response.json() as any;
+      if (payload?.status && payload.status !== "completed") {
+        throw new OpenAICCError(`Codex retry probe returned status ${String(payload.status)}.`, 502, "retry_incomplete");
+      }
+      const record = await this.store.markRetrySucceeded(id);
+      return { ok: true, model, credential: publicCredential(record), message: "Retry succeeded. This credential is usable now." };
+    } catch (error: unknown) {
+      if (error instanceof ChatGptUpstreamError && error.status === 429) {
+        const reset = chatGptRateLimitReset(error);
+        const record = await this.store.markRateLimited(id, error.message, reset?.cooldownMs);
+        return {
+          ok: false,
+          model,
+          credential: publicCredential(record),
+          status: "exhausted",
+          resetAt: reset?.resetAt,
+          window: reset?.window,
+          message: reset
+            ? `Still rate-limited. Codex reports reset at ${reset.resetAt}.`
+            : "Still rate-limited. Codex did not report a reset time; it will stay exhausted until you Retry again.",
+        };
+      }
+      if (error instanceof ChatGptUpstreamError && error.status === 401) {
+        const record = await this.store.markAuthError(id, error.message);
+        return { ok: false, model, credential: publicCredential(record), status: "auth_error", message: "Retry failed authentication. Re-authenticate this account." };
+      }
+      throw error;
+    }
   }
 
   private handleEventStream(req: IncomingMessage, res: ServerResponse): void {

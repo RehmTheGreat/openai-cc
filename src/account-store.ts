@@ -10,7 +10,6 @@ export type CustomProviderKind = `custom-${string}`;
 export type ProviderKind = BuiltInProviderKind | CustomProviderKind;
 export type ApiProviderKind = Exclude<BuiltInProviderKind, "chatgpt"> | CustomProviderKind;
 
-export const LIMIT_WINDOW_MS = 5 * 60 * 60 * 1000;
 export const DEFAULT_API_KEY_COOLDOWN_MS = 15 * 60 * 1000;
 export const ACCOUNT_STORE_VERSION = 2;
 
@@ -31,6 +30,7 @@ export interface AccountRecord {
   updatedAt: string;
   firstRequestAt?: string;
   limitResetsAt?: string;
+  limitResetSource?: "upstream";
   exhaustedAt?: string;
   disabledAt?: string;
   lastError?: string;
@@ -48,6 +48,7 @@ export interface PublicCredential {
   updatedAt: string;
   firstRequestAt?: string;
   limitResetsAt?: string;
+  limitResetSource?: "upstream";
   exhaustedAt?: string;
   disabledAt?: string;
   lastError?: string;
@@ -85,6 +86,7 @@ export class AccountStore extends EventEmitter {
   private readonly dbFile: string;
   private state: StoreFileV2 = { version: ACCOUNT_STORE_VERSION, preferredCredentialByProvider: {}, accounts: [] };
   private readonly resetTimers = new Map<string, NodeJS.Timeout>();
+  private persistQueue: Promise<void> = Promise.resolve();
 
   constructor(dataDir: string) {
     super();
@@ -122,6 +124,20 @@ export class AccountStore extends EventEmitter {
           changed = true;
         }
       }
+
+      // Versions before this fix synthesized a five-hour ChatGPT window from
+      // firstRequestAt. Codex actually reports plan/account-specific primary and
+      // secondary windows. Existing timestamps without the upstream marker are
+      // therefore not trustworthy: keep an exhausted credential exhausted, but
+      // make its reset unknown until Retry or a new upstream 429 proves it.
+      if (account.provider === "chatgpt" && (account.firstRequestAt || account.limitResetsAt) && account.limitResetSource !== "upstream") {
+        delete account.firstRequestAt;
+        delete account.limitResetsAt;
+        delete account.limitResetSource;
+        account.updatedAt = new Date().toISOString();
+        changed = true;
+      }
+
       if (account.limitResetsAt && Date.parse(account.limitResetsAt) <= now) {
         this.clearUsageWindow(account);
         changed = true;
@@ -231,6 +247,7 @@ export class AccountStore extends EventEmitter {
     account.status = "ready";
     delete account.firstRequestAt;
     delete account.limitResetsAt;
+    delete account.limitResetSource;
     delete account.exhaustedAt;
     delete account.lastError;
     delete account.disabledAt;
@@ -315,6 +332,7 @@ export class AccountStore extends EventEmitter {
     account.status = "ready";
     delete account.firstRequestAt;
     delete account.limitResetsAt;
+    delete account.limitResetSource;
     delete account.exhaustedAt;
     delete account.lastError;
     delete account.disabledAt;
@@ -394,17 +412,7 @@ export class AccountStore extends EventEmitter {
   async noteRequest(id: string): Promise<AccountRecord> {
     const account = this.requireAccount(id);
     if (account.status !== "ready") throw conflict(`Credential ${id} is ${account.status}.`, "credential_unavailable");
-    const nowMs = Date.now();
-    if (account.limitResetsAt && Date.parse(account.limitResetsAt) <= nowMs) this.clearUsageWindow(account);
-    if (account.provider === "chatgpt" && !account.firstRequestAt) {
-      const now = new Date(nowMs);
-      account.firstRequestAt = now.toISOString();
-      account.limitResetsAt = new Date(nowMs + LIMIT_WINDOW_MS).toISOString();
-      account.updatedAt = now.toISOString();
-      await this.persist();
-      this.scheduleReset(account);
-      this.emitEvent({ type: "credential_status_changed", credential: publicCredential(account) });
-    }
+    if (account.limitResetsAt && Date.parse(account.limitResetsAt) <= Date.now()) this.clearUsageWindow(account);
     return { ...account };
   }
 
@@ -412,20 +420,42 @@ export class AccountStore extends EventEmitter {
     const account = this.requireAccount(id);
     if (account.status === "disabled") return { ...account };
     const now = new Date();
+    account.firstRequestAt ??= now.toISOString();
+
     if (account.provider === "chatgpt") {
-      if (!account.firstRequestAt) account.firstRequestAt = now.toISOString();
-      if (!account.limitResetsAt) account.limitResetsAt = new Date(Date.parse(account.firstRequestAt) + LIMIT_WINDOW_MS).toISOString();
+      // ChatGPT/Codex can have primary and secondary plan-specific windows.
+      // Only persist a reset when the upstream 429 actually reported one.
+      delete account.firstRequestAt;
+      if (cooldownMs !== undefined && Number.isFinite(cooldownMs) && cooldownMs > 0) {
+        account.limitResetsAt = new Date(now.getTime() + Math.max(1000, cooldownMs)).toISOString();
+        account.limitResetSource = "upstream";
+      } else {
+        delete account.limitResetsAt;
+        delete account.limitResetSource;
+      }
     } else {
-      account.firstRequestAt ??= now.toISOString();
       const delay = Math.max(1000, cooldownMs ?? Number(process.env.API_KEY_RATE_LIMIT_COOLDOWN_MS || DEFAULT_API_KEY_COOLDOWN_MS));
       account.limitResetsAt = new Date(now.getTime() + delay).toISOString();
+      delete account.limitResetSource;
     }
+
     account.status = "exhausted";
     account.exhaustedAt = now.toISOString();
     account.lastError = sanitizeError(message, account.apiKey ? [account.apiKey] : []);
     account.updatedAt = now.toISOString();
     await this.persist();
     this.scheduleReset(account);
+    this.emitEvent({ type: "credential_status_changed", credential: publicCredential(account) });
+    return { ...account };
+  }
+
+  /** Mark a credential usable only after an explicit upstream Retry probe succeeded. */
+  async markRetrySucceeded(id: string): Promise<AccountRecord> {
+    const account = this.requireAccount(id);
+    if (account.status === "disabled") throw conflict(`Credential ${id} is disabled. Enable it before retrying.`, "credential_disabled");
+    this.clearUsageWindow(account);
+    account.updatedAt = new Date().toISOString();
+    await this.persist();
     this.emitEvent({ type: "credential_status_changed", credential: publicCredential(account) });
     return { ...account };
   }
@@ -437,6 +467,7 @@ export class AccountStore extends EventEmitter {
     account.status = "auth_error";
     delete account.firstRequestAt;
     delete account.limitResetsAt;
+    delete account.limitResetSource;
     delete account.exhaustedAt;
     account.lastError = sanitizeError(message || "Authentication failed.", account.apiKey ? [account.apiKey] : []);
     account.updatedAt = new Date().toISOString();
@@ -519,6 +550,7 @@ export class AccountStore extends EventEmitter {
     if (account.status !== "disabled") account.status = "ready";
     delete account.firstRequestAt;
     delete account.limitResetsAt;
+    delete account.limitResetSource;
     delete account.exhaustedAt;
     delete account.lastError;
     this.clearResetTimer(account.id);
@@ -536,7 +568,11 @@ export class AccountStore extends EventEmitter {
     this.resetTimers.delete(account.id);
     if (!account.limitResetsAt) return;
     const delay = Math.max(0, Date.parse(account.limitResetsAt) - Date.now());
-    const timer = setTimeout(() => { void this.refreshWindow(account.id); }, delay);
+    const timer = setTimeout(() => {
+      void this.refreshWindow(account.id).catch((error) => {
+        console.error(`OpenAI-CC credential reset failed for ${account.id}: ${sanitizeError(error instanceof Error ? error.message : String(error))}`);
+      });
+    }, delay);
     timer.unref();
     this.resetTimers.set(account.id, timer);
   }
@@ -566,12 +602,21 @@ export class AccountStore extends EventEmitter {
     this.emit("event", event);
   }
 
-  private async persist(): Promise<void> {
-    await mkdir(this.dataDir, { recursive: true, mode: 0o700 });
-    const tmp = `${this.dbFile}.${process.pid}.tmp`;
-    await writeFile(tmp, `${JSON.stringify(this.state, null, 2)}\n`, { mode: 0o600 });
-    await rename(tmp, this.dbFile);
-    try { await chmod(this.dbFile, 0o600); } catch { /* Windows ACLs are managed by the user profile. */ }
+  private persist(): Promise<void> {
+    const payload = `${JSON.stringify(this.state, null, 2)}\n`;
+    const operation = this.persistQueue.then(async () => {
+      await mkdir(this.dataDir, { recursive: true, mode: 0o700 });
+      const tmp = `${this.dbFile}.${process.pid}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(tmp, payload, { mode: 0o600 });
+        await rename(tmp, this.dbFile);
+        try { await chmod(this.dbFile, 0o600); } catch { /* Windows ACLs are managed by the user profile. */ }
+      } finally {
+        await rm(tmp, { force: true }).catch(() => undefined);
+      }
+    });
+    this.persistQueue = operation.catch(() => undefined);
+    return operation;
   }
 }
 
@@ -737,4 +782,3 @@ function looksLikeEmail(value: string): boolean {
 function isApiProvider(provider: string): provider is ApiProviderKind {
   return provider === "zen" || provider === "nvidia" || provider === "google" || provider === "cloudflare" || /^custom-[a-f0-9]{12}$/.test(provider);
 }
-
