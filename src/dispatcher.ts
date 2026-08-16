@@ -18,7 +18,6 @@ import {
   AnthropicRequest,
   AnthropicSseTranslator,
   OpenAIToolNameCodec,
-  estimateAnthropicTokens,
   responsesToAnthropic,
 } from "./translator.js";
 import { upstreamApiFor } from "./upstream-api.js";
@@ -84,9 +83,6 @@ export class Dispatcher {
       ...body,
       max_tokens: Math.max(1, Math.min(Math.floor(requestedMaxTokens), route.maxOutputTokens)),
     };
-    const contextWindow = this.models.contextWindowForRequestedModel(body.model);
-    const estimatedInput = estimateAnthropicTokens(body);
-    if (estimatedInput > contextWindow) return void anthropicError(res, 400, "invalid_request_error", `context_window_exceeded: estimated input ${estimatedInput} exceeds this route's ${contextWindow}-token limit.`);
     const toolNames = OpenAIToolNameCodec.fromRequest(routedBody);
     const attempted = new Set<string>();
     let account = this.models.credentialForRequestedModel(body.model, attempted);
@@ -103,7 +99,7 @@ export class Dispatcher {
 
       try {
         if (account.provider === "chatgpt") {
-          // Preserve the proven Terra path exactly: FCC translation -> raw
+          // Preserve the proven ChatGPT path exactly: FCC translation -> raw
           // Evan/openai-oauth-compatible Codex transport -> /responses.
           const boundary = this.clientFor(account) as ChatGptOAuthBoundary;
           const requestBody = {
@@ -216,8 +212,6 @@ export class Dispatcher {
 
     let client: UpstreamClient;
     if (account.provider === "chatgpt") {
-      // Never allow test/injection hooks to replace the raw ChatGPT OAuth
-      // boundary: this is the production Terra transport invariant.
       if (!account.authFile) throw new Error(`ChatGPT credential ${account.id} has no auth file.`);
       client = createChatGptOAuthBoundary(account.authFile);
     } else if (this.clientFactory) {

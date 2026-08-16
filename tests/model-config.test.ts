@@ -6,7 +6,6 @@ import test from "node:test";
 import { AccountStore } from "../src/account-store.js";
 import { OpenAICCError } from "../src/errors.js";
 import {
-  CLOUDFLARE_GEMMA_MODEL,
   ModelConfigStore,
   capabilitiesForRoute,
   claudeCodeModelAlias,
@@ -26,14 +25,15 @@ async function fixture() {
   return { root, accounts, models };
 }
 
-test("fresh routing uses model-specific context defaults", async () => {
+test("fresh routing uses Luna and one 1.05M configurable context", async () => {
   const { accounts, models } = await fixture();
   const config = models.snapshot();
-  assert.deepEqual(config.routes.default, { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: 1_000_000, maxOutputTokens: 128000 });
-  assert.deepEqual(config.routes.fable, { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: 1_000_000, maxOutputTokens: 128000 });
-  assert.deepEqual(config.routes.opus, { provider: "zen", model: "deepseek-v4-flash-free", contextWindow: 200_000, maxOutputTokens: 128000 });
-  assert.deepEqual(config.routes.sonnet, { provider: "google", model: "gemini-3.5-flash-lite", contextWindow: 1_000_000, maxOutputTokens: 65536 });
-  assert.deepEqual(config.routes.haiku, { provider: "google", model: "gemini-3.5-flash-lite", contextWindow: 1_000_000, maxOutputTokens: 65536 });
+  assert.deepEqual(config.routes.default, { provider: "chatgpt", model: "gpt-5.6-luna", maxOutputTokens: 128000 });
+  assert.deepEqual(config.routes.fable, { provider: "chatgpt", model: "gpt-5.6-luna", maxOutputTokens: 128000 });
+  assert.deepEqual(config.routes.opus, { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: 128000 });
+  assert.deepEqual(config.routes.sonnet, { provider: "google", model: "gemini-3.5-flash-lite", maxOutputTokens: 65536 });
+  assert.deepEqual(config.routes.haiku, { provider: "google", model: "gemini-3.5-flash-lite", maxOutputTokens: 65536 });
+  assert.equal(config.contextWindow, 1_050_000);
   accounts.close();
 });
 
@@ -70,53 +70,39 @@ test("route save rejects nonexistent and provider-mismatched pins", async () => 
   accounts.close();
 });
 
-test("route save rejects unsupported provider, empty model, invalid context/output, and verified output-cap violations", async () => {
+test("validation is structural and imposes no model-specific context ceiling", async () => {
   const { accounts, models } = await fixture();
   const bad: any = models.snapshot(); bad.routes.default.provider = "bogus";
   await assert.rejects(() => models.update(bad), (error: unknown) => error instanceof OpenAICCError && error.code === "invalid_provider");
   const badModel: any = models.snapshot(); badModel.routes.default.model = "";
   await assert.rejects(() => models.update(badModel), (error: unknown) => error instanceof OpenAICCError && error.code === "model_required");
-  const badContext: any = models.snapshot(); badContext.routes.default.contextWindow = 0;
+  const badContext: any = models.snapshot(); badContext.contextWindow = 0;
   await assert.rejects(() => models.update(badContext), (error: unknown) => error instanceof OpenAICCError && error.code === "invalid_number");
   const badOutput: any = models.snapshot(); badOutput.routes.default.maxOutputTokens = 0;
   await assert.rejects(() => models.update(badOutput), (error: unknown) => error instanceof OpenAICCError && error.code === "invalid_number");
-  const aboveVerified: any = models.snapshot(); aboveVerified.routes.sonnet.maxOutputTokens = 65537;
-  await assert.rejects(() => models.update(aboveVerified), (error: unknown) => error instanceof OpenAICCError && error.code === "max_output_exceeds_verified_cap");
+
+  const high = models.snapshot();
+  high.contextWindow = 2_000_000;
+  high.routes.sonnet.maxOutputTokens = 200_000;
+  const saved = await models.update(high);
+  assert.equal(saved.contextWindow, 2_000_000);
+  assert.equal(saved.routes.sonnet.maxOutputTokens, 200_000);
   accounts.close();
 });
 
-test("route context windows are independent, authoritative, and choose the correct Claude carrier", async () => {
+test("one Admin context is authoritative for every route and Claude exposes five logical aliases", async () => {
   const { accounts, models } = await fixture();
-  const changed = models.snapshot();
-  changed.routes.default.contextWindow = 360000;
-  changed.routes.fable.contextWindow = 850000;
-  changed.routes.opus.contextWindow = 131072;
-  changed.routes.sonnet.contextWindow = 1000000;
-  changed.routes.haiku.contextWindow = 200000;
-  const config = await models.update(changed);
+  const config = await models.update({ contextWindow: 1_234_567 });
 
-  assert.equal(contextWindowForRoute(config, "default"), 360000);
-  assert.equal(contextWindowForRoute(config, "fable"), 850000);
-  assert.equal(contextWindowForRoute(config, "opus"), 131072);
-  assert.equal(contextWindowForRoute(config, "sonnet"), 1000000);
-  assert.equal(contextWindowForRoute(config, "haiku"), 200000);
-  assert.equal(config.contextWindow, 1000000, "derived compatibility ceiling must be the largest route window");
-
-  assert.equal(claudeCodeModelAlias(config, "default"), "claude-opus-4-8[1m]");
-  assert.equal(claudeCodeModelAlias(config, "fable"), "claude-fable-5[1m]");
-  assert.equal(claudeCodeModelAlias(config, "opus"), "claude-opus-5");
-  assert.equal(claudeCodeModelAlias(config, "sonnet"), "claude-sonnet-4-6[1m]");
-  assert.equal(claudeCodeModelAlias(config, "haiku"), "claude-haiku-4-5");
-  assert.equal(claudeCodeTransportAlias(config, "default"), "claude-sonnet-5");
-  assert.equal(claudeCodeTransportAlias(config, "fable"), "openai-cc-fable");
-  assert.equal(claudeCodeTransportAlias(config, "opus"), "claude-opus-5");
-  assert.equal(claudeCodeTransportAlias(config, "sonnet"), "openai-cc-sonnet");
-  assert.equal(claudeCodeTransportAlias(config, "haiku"), "claude-haiku-4-5");
-  assert.equal(models.slotForRequestedModel("claude-sonnet-5"), "default");
-  assert.equal(models.slotForRequestedModel("openai-cc-fable"), "fable");
-  assert.equal(models.slotForRequestedModel("openai-cc-sonnet"), "sonnet");
-  assert.equal(models.slotForRequestedModel("claude-opus-5"), "opus");
-  assert.equal(models.slotForRequestedModel("claude-haiku-4-5"), "haiku");
+  for (const slot of ["default", "fable", "opus", "sonnet", "haiku"] as const) {
+    assert.equal(contextWindowForRoute(config, slot), 1_234_567);
+    assert.equal(claudeCodeModelAlias(config, slot), slot);
+    assert.equal(claudeCodeTransportAlias(config, slot), slot);
+    assert.equal(models.slotForRequestedModel(slot), slot);
+  }
+  assert.equal(config.contextWindow, 1_234_567);
+  assert.equal(models.slotForRequestedModel("openai-cc-fable"), "fable", "old sessions remain routable");
+  assert.equal(models.slotForRequestedModel("claude-sonnet-5"), "default", "old default carrier remains routable");
   accounts.close();
 });
 
@@ -127,9 +113,6 @@ test("route capability overrides are persisted independently of provider discove
   changed.routes.sonnet.tools = false;
   changed.routes.sonnet.reasoning = false;
   const saved = await models.update(changed);
-  assert.equal(saved.routes.sonnet.vision, false);
-  assert.equal(saved.routes.sonnet.tools, false);
-  assert.equal(saved.routes.sonnet.reasoning, false);
   const caps = capabilitiesForRoute(saved.routes.sonnet);
   assert.equal(caps.image, false);
   assert.equal(caps.tools, false);
@@ -137,54 +120,47 @@ test("route capability overrides are persisted independently of provider discove
   accounts.close();
 });
 
-test("load repair clamps stored output limits and migrates the legacy global context into each route", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-model-output-repair-"));
+test("legacy global context remains the single setting without provider-specific clamping", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-model-legacy-"));
   const accounts = new AccountStore(root); await accounts.init();
   await writeFile(path.join(root, "model-config.json"), JSON.stringify({ contextWindow: 850000, routes: {
-    default: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
-    fable: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
-    opus: { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: 128000 },
-    sonnet: { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 999999 },
-    haiku: { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 50000 },
+    default: { provider: "chatgpt", model: "some-chatgpt-model", maxOutputTokens: 128000 },
+    fable: { provider: "chatgpt", model: "another-chatgpt-model", maxOutputTokens: 128000 },
+    opus: { provider: "zen", model: "some-zen-model", maxOutputTokens: 128000 },
+    sonnet: { provider: "google", model: "some-google-model", maxOutputTokens: 999999 },
+    haiku: { provider: "cloudflare", model: "some-cloudflare-model", maxOutputTokens: 50000 },
   } }));
   const models = new ModelConfigStore(root, accounts); await models.init();
   const snapshot = models.snapshot();
-  assert.equal(snapshot.routes.default.contextWindow, 850000);
-  assert.equal(snapshot.routes.fable.contextWindow, 850000);
-  assert.equal(snapshot.routes.opus.contextWindow, 200000);
-  assert.equal(snapshot.routes.sonnet.contextWindow, 200000);
-  assert.equal(snapshot.routes.haiku.contextWindow, 200000);
-  assert.equal(snapshot.routes.sonnet.maxOutputTokens, 16384);
-  assert.equal(snapshot.routes.haiku.maxOutputTokens, 16384);
-  const persisted = JSON.parse(await readFile(path.join(root, "model-config.json"), "utf8"));
-  assert.equal(persisted.contextWindow, undefined);
-  assert.equal(persisted.routes.sonnet.contextWindow, 200000);
-  assert.equal(persisted.routes.sonnet.maxOutputTokens, 16384);
-  assert.equal(persisted.routes.haiku.maxOutputTokens, 16384);
+  assert.equal(snapshot.contextWindow, 850000);
+  for (const slot of ["default", "fable", "opus", "sonnet", "haiku"] as const) assert.equal("contextWindow" in snapshot.routes[slot], false);
+  assert.equal(snapshot.routes.sonnet.maxOutputTokens, 999999);
+  assert.equal(snapshot.routes.haiku.maxOutputTokens, 50000);
   accounts.close();
 });
 
-test("existing user-selected routes and capability overrides survive upgrade with effective legacy contexts", async () => {
+test("old per-route contexts collapse to the largest value without losing selected routes", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-model-preserve-"));
   const accounts = new AccountStore(root); await accounts.init();
-  await writeFile(path.join(root, "model-config.json"), JSON.stringify({ contextWindow: 850000, routes: {
-    default: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
-    fable: { provider: "chatgpt", model: "gpt-5.6-terra", maxOutputTokens: 128000 },
-    opus: { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: 128000 },
-    sonnet: { provider: "google", model: "gemini-3.6-flash", maxOutputTokens: 32000, vision: false, tools: true, reasoning: false },
-    haiku: { provider: "cloudflare", model: CLOUDFLARE_GEMMA_MODEL, maxOutputTokens: 16384 },
+  await writeFile(path.join(root, "model-config.json"), JSON.stringify({ routes: {
+    default: { provider: "chatgpt", model: "user-default", contextWindow: 1_050_000, maxOutputTokens: 128000 },
+    fable: { provider: "chatgpt", model: "user-fable", contextWindow: 990000, maxOutputTokens: 128000 },
+    opus: { provider: "zen", model: "user-opus", contextWindow: 777777, maxOutputTokens: 128000 },
+    sonnet: { provider: "google", model: "user-sonnet", contextWindow: 888888, maxOutputTokens: 32000, vision: false, tools: true, reasoning: false },
+    haiku: { provider: "cloudflare", model: "user-haiku", contextWindow: 666666, maxOutputTokens: 16384 },
   } }));
   const models = new ModelConfigStore(root, accounts); await models.init();
   const snapshot = models.snapshot();
-  assert.equal(snapshot.routes.default.contextWindow, 850000);
-  assert.equal(snapshot.routes.fable.contextWindow, 850000);
-  assert.equal(snapshot.routes.opus.contextWindow, 200000);
-  assert.equal(snapshot.routes.sonnet.contextWindow, 850000);
-  assert.equal(snapshot.routes.haiku.contextWindow, 200000);
-  assert.equal(snapshot.routes.sonnet.model, "gemini-3.6-flash");
+  assert.equal(snapshot.contextWindow, 1_050_000);
+  assert.equal(snapshot.routes.default.model, "user-default");
+  assert.equal(snapshot.routes.opus.model, "user-opus");
+  assert.equal(snapshot.routes.sonnet.model, "user-sonnet");
   assert.equal(snapshot.routes.sonnet.maxOutputTokens, 32000);
   assert.equal(snapshot.routes.sonnet.vision, false);
   assert.equal(snapshot.routes.sonnet.tools, true);
   assert.equal(snapshot.routes.haiku.provider, "cloudflare");
+  const persisted = JSON.parse(await readFile(path.join(root, "model-config.json"), "utf8"));
+  assert.equal(persisted.contextWindow, 1_050_000);
+  for (const slot of ["default", "fable", "opus", "sonnet", "haiku"] as const) assert.equal("contextWindow" in persisted.routes[slot], false);
   accounts.close();
 });

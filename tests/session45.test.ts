@@ -5,9 +5,11 @@ import path from "node:path";
 import test from "node:test";
 import { AccountStore } from "../src/account-store.js";
 import { ModelConfigStore, capabilitiesForRoute, contextWindowForRoute } from "../src/model-config.js";
-import { GEMINI_FLASH_LITE_MODEL, ProviderRegistry, knownModelMetadata } from "../src/provider-registry.js";
+import { ProviderRegistry } from "../src/provider-registry.js";
 import { createReplicatedServer } from "../src/replicated-dispatcher.js";
 import { upstreamApiFor } from "../src/upstream-api.js";
+
+const GEMINI_MODEL = "gemini-3.5-flash-lite";
 
 async function fixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-s45-"));
@@ -24,21 +26,18 @@ async function listen(server: any) {
 }
 async function close(server: any) { await new Promise<void>((resolve) => server.close(() => resolve())); }
 
-test("Gemini Flash-Lite metadata and fresh route contexts are capped correctly", async () => {
+test("fresh route contexts are Admin-controlled rather than provider-catalog capped", async () => {
   const f = await fixture();
-  const meta = knownModelMetadata("google", GEMINI_FLASH_LITE_MODEL);
-  assert.equal(meta?.contextWindow, 1_048_576);
-  assert.equal(meta?.maxOutputTokens, 65_536);
   const config = f.models.snapshot();
-  assert.equal(contextWindowForRoute(config, "default", f.providers), 1_000_000);
-  assert.equal(contextWindowForRoute(config, "opus", f.providers), 200_000);
-  assert.equal(contextWindowForRoute(config, "fable", f.providers), 1_000_000);
-  assert.equal(contextWindowForRoute(config, "sonnet", f.providers), 1_000_000);
-  assert.equal(contextWindowForRoute(config, "haiku", f.providers), 1_000_000);
+  for (const slot of ["default", "fable", "opus", "sonnet", "haiku"] as const) {
+    assert.equal(contextWindowForRoute(config, slot, f.providers), 1_050_000);
+  }
+  assert.equal(config.routes.default.model, "gpt-5.6-luna");
+  assert.equal(config.routes.fable.model, "gpt-5.6-luna");
   f.store.close();
 });
 
-test("custom providers persist without a manual model catalog and ignore legacy models", async () => {
+test("custom providers persist without a manual or hardcoded model catalog", async () => {
   const f = await fixture();
   const provider = await f.providers.createCustom({ displayName: "Local OpenAI", baseUrl: "https://example.invalid/v1/", apiStyle: "chat-completions" });
   assert.match(provider.id, /^custom-[a-f0-9]{12}$/);
@@ -48,8 +47,6 @@ test("custom providers persist without a manual model catalog and ignore legacy 
   const reloaded = new ProviderRegistry(f.root); await reloaded.init();
   assert.equal(reloaded.getCustom(provider.id)?.baseUrl, "https://example.invalid/v1");
   assert.equal((reloaded.getCustom(provider.id) as any)?.models, undefined);
-  assert.equal(reloaded.metadata(provider.id, "legacy/manual")?.contextWindow, 1_000_000);
-  assert.equal(reloaded.metadata(provider.id, "legacy/manual")?.maxOutputTokens, 16_384);
   const disk = await readFile(path.join(f.root, "providers.json"), "utf8");
   assert.equal(/api.?key|secret/i.test(disk), false);
   f.store.close();
@@ -67,20 +64,21 @@ test("custom /models discovery is authoritative and never returns the API key", 
   }) as typeof fetch);
   assert.equal(requestedUrl, "https://provider.invalid/v1/models");
   assert.equal(authorization, "Bearer do-not-expose");
-  assert.deepEqual(result.map((model) => model.upstreamModelId), ["m1", "m2"]);
-  assert.equal(result[0].contextWindow, 1_000_000);
-  assert.equal(result[0].maxOutputTokens, 16_384);
+  assert.deepEqual(result, [
+    { provider: provider.id, upstreamModelId: "m1", availability: "available" },
+    { provider: provider.id, upstreamModelId: "m2", availability: "available" },
+  ]);
   assert.equal(JSON.stringify(result).includes("do-not-expose"), false);
   f.store.close();
 });
 
-test("custom API style selects Chat Completions or Responses without touching ChatGPT", async () => {
+test("custom API style selects Chat Completions or Responses without special model ids", async () => {
   const f = await fixture();
   const chat = await f.providers.createCustom({ displayName: "Chat", baseUrl: "https://chat.invalid/v1", apiStyle: "chat-completions" });
   const responses = await f.providers.createCustom({ displayName: "Responses", baseUrl: "https://responses.invalid/v1", apiStyle: "responses" });
   assert.equal(upstreamApiFor(chat.id, "m", f.providers), "chat-completions");
   assert.equal(upstreamApiFor(responses.id, "m", f.providers), "responses");
-  assert.equal(upstreamApiFor("chatgpt", "gpt-5.6-terra", f.providers), "responses");
+  assert.equal(upstreamApiFor("chatgpt", "whatever-codex-listed", f.providers), "responses");
   f.store.close();
 });
 
@@ -101,7 +99,7 @@ test("production Gemini Sonnet path carries vision, tools, multi-turn tool resul
       { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "done" }] },
     ] }) });
     assert.equal(response.status, 200);
-    assert.equal(captured.model, GEMINI_FLASH_LITE_MODEL);
+    assert.equal(captured.model, GEMINI_MODEL);
     assert.equal(captured.max_tokens, 65536);
     assert.equal(captured.messages[0].content[1].type, "image_url");
     assert.equal(captured.messages[1].tool_calls[0].id, "t1");
@@ -130,29 +128,36 @@ test("custom credential rotation stays provider-local after auth failure", async
   } finally { await close(server); }
 });
 
-test("DeepSeek route enforces the recorded 200K effective context before upstream dispatch", async () => {
-  const f = await fixture(); await f.store.createApiKey({ id: "z1", provider: "zen", apiKey: "secret" });
-  const config = f.models.snapshot(); config.routes.default = { provider: "zen", model: "deepseek-v4-flash-free", maxOutputTokens: 128000 }; await f.models.update(config);
+test("large requests are not rejected by a local heuristic context estimator", async () => {
+  const f = await fixture();
+  await f.store.createApiKey({ id: "z1", provider: "zen", apiKey: "secret" });
+  const config = f.models.snapshot(); config.routes.default = { provider: "zen", model: "large-context-model", contextWindow: 1_050_000, maxOutputTokens: 128000 }; await f.models.update(config);
   let calls = 0;
-  const server = createReplicatedServer(f.store, f.models, { bindHost: "127.0.0.1", providerRegistry: f.providers, clientFactory: () => ({ chat: { completions: { create: async () => { calls++; return { id: "x", choices: [{ message: { content: "unexpected" }, finish_reason: "stop" }] }; } } } }) });
+  const server = createReplicatedServer(f.store, f.models, { bindHost: "127.0.0.1", providerRegistry: f.providers, clientFactory: () => ({ chat: { completions: { create: async () => {
+    calls++; return { id: "x", choices: [{ message: { content: "accepted upstream" }, finish_reason: "stop" }] };
+  } } } }) });
   const base = await listen(server);
   try {
     const response = await fetch(base + "/v1/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "default", max_tokens: 8, messages: [{ role: "user", content: "x".repeat(730000) }] }) });
-    assert.equal(response.status, 400); assert.match(await response.text(), /context_window_exceeded/); assert.equal(calls, 0);
+    assert.equal(response.status, 200);
+    assert.equal(calls, 1);
   } finally { await close(server); }
 });
 
-test("new private Sonnet and Haiku transports route to Gemini without confusing Default", async () => {
+test("legacy private transport ids remain routable but are not part of public discovery", async () => {
   const f = await fixture(); await f.store.createApiKey({ id: "g1", provider: "google", apiKey: "secret" });
   const seen: string[] = [];
-  const server = createReplicatedServer(f.store, f.models, { bindHost: "127.0.0.1", providerRegistry: f.providers, clientFactory: () => ({ chat: { completions: { create: async (req: any) => { seen.push(req.model); return { id: "ok", choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }; } } } }) });
+  const server = createReplicatedServer(f.store, f.models, { bindHost: "127.0.0.1", providerRegistry: f.providers, clientFactory: () => ({ chat: { completions: { create: async (req: any) => {
+    seen.push(req.model); return { id: "ok", choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+  } } } }) });
   const base = await listen(server);
   try {
-    let response = await fetch(base + "/v1/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "openai-cc-sonnet", max_tokens: 8, system: "Classify the requested task for Auto Mode.", messages: [{ role: "user", content: "x".repeat(730000) }] }) });
+    let response = await fetch(base + "/v1/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "openai-cc-sonnet", max_tokens: 8, messages: [{ role: "user", content: "legacy session" }] }) });
     assert.equal(response.status, 200);
-    response = await fetch(base + "/v1/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "claude-opus-4-7[1m]", max_tokens: 8, messages: [{ role: "user", content: "Haiku subagent continuation" }] }) });
-    assert.equal(response.status, 200);
-    assert.deepEqual(seen, [GEMINI_FLASH_LITE_MODEL, GEMINI_FLASH_LITE_MODEL]);
+    response = await fetch(base + "/v1/models");
+    const ids = (await response.json() as any).data.map((m: any) => m.id);
+    assert.deepEqual(ids, ["default", "fable", "opus", "sonnet", "haiku"]);
+    assert.deepEqual(seen, [GEMINI_MODEL]);
     assert.equal(f.models.slotForRequestedModel("claude-sonnet-5"), "default");
   } finally { await close(server); }
 });
@@ -162,13 +167,13 @@ test("custom service tier is preserved while capabilities are overridden only on
   const provider = await f.providers.createCustom({ displayName: "DeepInfra", baseUrl: "https://api.deepinfra.com/v1/openai", apiStyle: "chat-completions", serviceTier: "flex" });
   assert.deepEqual(f.providers.requestBodyDefaults(provider.id), { service_tier: "flex" });
   await f.store.createApiKey({ id: "di1", provider: provider.id, apiKey: "secret" });
-  const config = f.models.snapshot();
-  config.routes.sonnet = { provider: provider.id, model: "deepinfra/model", maxOutputTokens: 16000, vision: true, tools: true, reasoning: true };
-  await f.models.update(config);
+  const config = f.models.snapshot(); config.routes.sonnet = { provider: provider.id, model: "deepinfra/model", maxOutputTokens: 16000, vision: true, tools: true, reasoning: true }; await f.models.update(config);
   const caps = capabilitiesForRoute(f.models.snapshot().routes.sonnet, f.providers);
   assert.equal(caps.image, true); assert.equal(caps.tools, true); assert.equal(caps.reasoning, true);
   let captured: any;
-  const server = createReplicatedServer(f.store, f.models, { bindHost: "127.0.0.1", providerRegistry: f.providers, clientFactory: () => ({ chat: { completions: { create: async (req: any) => { captured = req; return { id: "ok", choices: [{ message: { content: "done" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }; } } } }) });
+  const server = createReplicatedServer(f.store, f.models, { bindHost: "127.0.0.1", providerRegistry: f.providers, clientFactory: () => ({ chat: { completions: { create: async (req: any) => {
+    captured = req; return { id: "ok", choices: [{ message: { content: "done" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+  } } } }) });
   const base = await listen(server);
   try {
     const response = await fetch(base + "/v1/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "sonnet", max_tokens: 32, tools: [{ name: "lookup", input_schema: { type: "object", properties: {} } }], messages: [{ role: "user", content: "use tool" }] }) });
@@ -176,38 +181,41 @@ test("custom service tier is preserved while capabilities are overridden only on
   } finally { await close(server); }
 });
 
-test("custom Responses provider runs through production dispatcher with discovered-id defaults", async () => {
+test("custom Responses provider runs through production dispatcher", async () => {
   const f = await fixture();
   const provider = await f.providers.createCustom({ displayName: "Responses Custom", baseUrl: "https://responses.invalid/v1", apiStyle: "responses" });
   await f.store.createApiKey({ id: "r1", provider: provider.id, apiKey: "secret" });
   const config = f.models.snapshot(); config.routes.sonnet = { provider: provider.id, model: "resp-model", maxOutputTokens: 16000 }; await f.models.update(config);
   const seen: any[] = [];
   const server = createReplicatedServer(f.store, f.models, { bindHost: "127.0.0.1", providerRegistry: f.providers, clientFactory: () => ({ responses: { create: async (req: any) => {
-    seen.push(req); if (req.stream) return (async function*() { yield { type: "response.output_text.delta", item_id: "msg", output_index: 0, delta: "streamed" }; yield { type: "response.completed", response: { id: "resp-stream", usage: { input_tokens: 1, output_tokens: 1 } } }; })();
-    return { id: "resp", output: [{ type: "message", content: [{ type: "output_text", text: "done" }] }], usage: { input_tokens: 1, output_tokens: 1 } };
+    seen.push(req);
+    if (req.stream) return (async function*() {
+      yield { type: "response.output_text.delta", item_id: "msg", output_index: 0, delta: "streamed" };
+      yield { type: "response.completed", response: { id: "resp-stream", usage: { input_tokens: 3, output_tokens: 1 } } };
+    })();
+    return { id: "resp", output: [{ type: "message", content: [{ type: "output_text", text: "done" }] }], usage: { input_tokens: 2, output_tokens: 1 } };
   } } }) });
   const base = await listen(server);
   try {
     let response = await fetch(base + "/v1/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "sonnet", max_tokens: 99999, messages: [{ role: "user", content: "use tool" }] }) });
     assert.equal(response.status, 200); assert.equal((await response.json() as any).content[0].text, "done"); assert.equal(seen[0].model, "resp-model"); assert.equal(seen[0].max_output_tokens, 16000);
     response = await fetch(base + "/v1/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "sonnet", max_tokens: 8, stream: true, messages: [{ role: "user", content: "stream" }] }) });
-    assert.equal(response.status, 200); assert.match(await response.text(), /streamed/);
+    assert.equal(response.status, 200); const stream = await response.text(); assert.match(stream, /streamed/); assert.match(stream, /"input_tokens":3/);
   } finally { await close(server); }
 });
 
-test("custom provider routes and credentials survive restart without manual model metadata", async () => {
+test("custom provider routes and credentials survive restart", async () => {
   const f = await fixture();
   const provider = await f.providers.createCustom({ displayName: "Persistent", baseUrl: "https://persist.invalid/v1", apiStyle: "chat-completions" });
   await f.store.createApiKey({ id: "persist-key", provider: provider.id, apiKey: "secret" });
-  const config = f.models.snapshot(); config.routes.opus = { provider: provider.id, model: "persist-model", maxOutputTokens: 16000, tools: true }; await f.models.update(config);
+  const config = f.models.snapshot(); config.routes.opus = { provider: provider.id, model: "persist-model", contextWindow: 1_234_567, maxOutputTokens: 16000, tools: true }; await f.models.update(config);
   f.store.close();
   const store2 = new AccountStore(f.root); await store2.init();
   const providers2 = new ProviderRegistry(f.root); await providers2.init();
   const models2 = new ModelConfigStore(f.root, store2, providers2); await models2.init();
   assert.equal(models2.snapshot().routes.opus.provider, provider.id);
   assert.equal(models2.snapshot().routes.opus.model, "persist-model");
-  assert.equal(models2.snapshot().routes.opus.tools, true);
-  assert.equal(models2.contextWindowForRequestedModel("opus"), 1_000_000);
+  assert.equal(models2.contextWindowForRequestedModel("opus"), 1_234_567);
   assert.equal(models2.credentialForRequestedModel("opus")?.id, "persist-key");
   store2.close();
 });

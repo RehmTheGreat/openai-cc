@@ -16,16 +16,8 @@ export interface ModelCapabilities {
   reasoning: boolean;
 }
 
-export interface KnownModelMetadata {
-  friendlyName: string;
-  contextWindow?: number;
-  maxOutputTokens?: number;
-  capabilities: ModelCapabilities;
-}
-
 export interface DiscoveredModel {
   provider: ProviderKind;
-  friendlyName?: string;
   upstreamModelId: string;
   availability: "available";
   capabilities?: ModelCapabilities;
@@ -66,16 +58,6 @@ export interface ProviderDefinition {
   baseUrl(account: Pick<AccountRecord, "accountId">): string | undefined;
 }
 
-const CHATGPT_CAPABILITIES: ModelCapabilities = { text: true, image: true, tools: true, streaming: true, reasoning: true };
-const GEMINI_CAPABILITIES: ModelCapabilities = { text: true, image: true, tools: true, streaming: true, reasoning: true };
-const CLOUDFLARE_GEMMA_CAPABILITIES: ModelCapabilities = { text: true, image: true, tools: true, streaming: true, reasoning: true };
-const CUSTOM_CAPABILITIES: ModelCapabilities = { text: true, image: false, tools: false, streaming: true, reasoning: false };
-
-export const DEFAULT_CUSTOM_CONTEXT_WINDOW = 1_000_000;
-export const CONSERVATIVE_CUSTOM_CONTEXT_WINDOW = DEFAULT_CUSTOM_CONTEXT_WINDOW;
-export const CONSERVATIVE_CUSTOM_MAX_OUTPUT_TOKENS = 16_384;
-export const GEMINI_FLASH_LITE_MODEL = "gemini-3.5-flash-lite";
-
 const BUILT_INS: Record<string, ProviderDefinition> = {
   chatgpt: {
     id: "chatgpt", displayName: "ChatGPT OAuth", apiStyle: "responses", credentialType: "oauth",
@@ -101,30 +83,6 @@ const BUILT_INS: Record<string, ProviderDefinition> = {
       : undefined,
   },
 };
-
-const KNOWN_MODELS = new Map<string, KnownModelMetadata>([
-  [modelKey("chatgpt", "gpt-5.6-luna"), {
-    friendlyName: "GPT-5.6 Luna", contextWindow: 1_050_000, maxOutputTokens: 128_000, capabilities: CHATGPT_CAPABILITIES,
-  }],
-  [modelKey("chatgpt", "gpt-5.6-terra"), {
-    friendlyName: "GPT-5.6 Terra", contextWindow: 1_050_000, capabilities: CHATGPT_CAPABILITIES,
-  }],
-  [modelKey("zen", "deepseek-v4-flash-free"), {
-    friendlyName: "DeepSeek V4 Flash Free", contextWindow: 200_000,
-    capabilities: { text: true, image: false, tools: true, streaming: true, reasoning: true },
-  }],
-  [modelKey("google", GEMINI_FLASH_LITE_MODEL), {
-    friendlyName: "Gemini 3.5 Flash-Lite", contextWindow: 1_048_576, maxOutputTokens: 65_536, capabilities: GEMINI_CAPABILITIES,
-  }],
-  [modelKey("google", "gemini-3.6-flash"), {
-    friendlyName: "Gemini 3.6 Flash", contextWindow: 1_048_576,
-    capabilities: { text: true, image: true, tools: true, streaming: true, reasoning: false },
-  }],
-  [modelKey("cloudflare", "@cf/google/gemma-4-26b-a4b-it"), {
-    friendlyName: "Gemma 4 26B A4B IT", contextWindow: 200_000, maxOutputTokens: 16_384,
-    capabilities: CLOUDFLARE_GEMMA_CAPABILITIES,
-  }],
-]);
 
 interface ProviderStoreFile { version: 1; providers: CustomProviderRecord[]; }
 type CustomProviderInput = { displayName?: string; baseUrl?: string; apiStyle?: string; serviceTier?: unknown; service_tier?: unknown };
@@ -169,8 +127,7 @@ export class ProviderRegistry extends EventEmitter {
       requiresAccountId: definition.requiresAccountId,
       supportsModelDiscovery: true,
     }));
-    const custom = this.customProviders.map((record) => this.publicFor(record));
-    return [...built, ...custom];
+    return [...built, ...this.customProviders.map((record) => this.publicFor(record))];
   }
 
   getCustom(id: string): CustomProviderRecord | undefined {
@@ -264,32 +221,8 @@ export class ProviderRegistry extends EventEmitter {
     return custom?.serviceTier ? { service_tier: custom.serviceTier } : {};
   }
 
-  metadata(provider: ProviderKind, model: string): KnownModelMetadata | undefined {
-    const known = KNOWN_MODELS.get(modelKey(provider, model));
-    if (known) return cloneMetadata(known);
-    const custom = this.customProviders.find((item) => item.id === provider);
-    if (!custom) return undefined;
-    // Custom model ids come only from the provider's /models API. Route-level
-    // capability overrides are the single place to correct incomplete provider
-    // metadata; there is intentionally no manual model catalog anymore.
-    return {
-      friendlyName: model,
-      contextWindow: DEFAULT_CUSTOM_CONTEXT_WINDOW,
-      maxOutputTokens: CONSERVATIVE_CUSTOM_MAX_OUTPUT_TOKENS,
-      capabilities: { ...CUSTOM_CAPABILITIES },
-    };
-  }
-
-  contextWindow(provider: ProviderKind, model: string): number | undefined {
-    return this.metadata(provider, model)?.contextWindow;
-  }
-
-  maxOutputTokens(provider: ProviderKind, model: string): number | undefined {
-    return this.metadata(provider, model)?.maxOutputTokens;
-  }
-
-  capabilities(provider: ProviderKind, model: string): ModelCapabilities {
-    return this.metadata(provider, model)?.capabilities ?? defaultCapabilities(provider);
+  capabilities(provider: ProviderKind, _model: string): ModelCapabilities {
+    return defaultCapabilities(provider);
   }
 
   apiFor(provider: ProviderKind, model: string): "responses" | "chat-completions" {
@@ -326,7 +259,7 @@ export class ProviderRegistry extends EventEmitter {
       throw new OpenAICCError(`${definition.displayName} returned invalid model discovery JSON.`, 502, "invalid_model_discovery");
     }
     const ids = definition.discovery === "cloudflare-models" ? cloudflareModelIds(body) : openAiModelIds(body);
-    return normalizeDiscovered(account.provider, ids, this);
+    return normalizeDiscovered(account.provider, ids);
   }
 
   private publicFor(record: CustomProviderRecord): PublicProviderDefinition {
@@ -387,20 +320,8 @@ export function providerBaseUrl(account: Pick<AccountRecord, "provider" | "accou
   return value;
 }
 
-export function knownModelMetadata(provider: ProviderKind, model: string, registry?: ProviderRegistry): KnownModelMetadata | undefined {
-  return registry ? registry.metadata(provider, model) : cloneKnown(provider, model);
-}
-
-export function verifiedModelContextWindow(provider: ProviderKind, model: string, registry?: ProviderRegistry): number | undefined {
-  return knownModelMetadata(provider, model, registry)?.contextWindow;
-}
-
-export function verifiedModelMaxOutputTokens(provider: ProviderKind, model: string, registry?: ProviderRegistry): number | undefined {
-  return knownModelMetadata(provider, model, registry)?.maxOutputTokens;
-}
-
 export function modelCapabilities(provider: ProviderKind, model: string, registry?: ProviderRegistry): ModelCapabilities {
-  return registry ? registry.capabilities(provider, model) : cloneKnown(provider, model)?.capabilities ?? defaultCapabilities(provider);
+  return registry ? registry.capabilities(provider, model) : defaultCapabilities(provider);
 }
 
 export async function discoverModelsForCredential(account: AccountRecord, fetchImpl: typeof fetch = fetch, registry?: ProviderRegistry): Promise<DiscoveredModel[]> {
@@ -439,19 +360,12 @@ async function discoverChatGpt(account: AccountRecord): Promise<DiscoveredModel[
   return normalizeDiscovered(account.provider, await createChatGptOAuthBoundary(account.authFile).listModels());
 }
 
-function normalizeDiscovered(provider: ProviderKind, ids: string[], registry?: ProviderRegistry): DiscoveredModel[] {
-  return [...new Set(ids.map((id) => String(id).trim()).filter(Boolean))].map((upstreamModelId) => {
-    const known = knownModelMetadata(provider, upstreamModelId, registry);
-    return {
-      provider,
-      upstreamModelId,
-      availability: "available" as const,
-      ...(known?.friendlyName ? { friendlyName: known.friendlyName } : {}),
-      ...(known?.capabilities ? { capabilities: known.capabilities } : {}),
-      ...(known?.contextWindow !== undefined ? { contextWindow: known.contextWindow } : {}),
-      ...(known?.maxOutputTokens !== undefined ? { maxOutputTokens: known.maxOutputTokens } : {}),
-    };
-  });
+function normalizeDiscovered(provider: ProviderKind, ids: string[]): DiscoveredModel[] {
+  return [...new Set(ids.map((id) => String(id).trim()).filter(Boolean))].map((upstreamModelId) => ({
+    provider,
+    upstreamModelId,
+    availability: "available" as const,
+  }));
 }
 
 function requireBuiltIn(provider: ProviderKind): ProviderDefinition {
@@ -460,18 +374,8 @@ function requireBuiltIn(provider: ProviderKind): ProviderDefinition {
   return definition;
 }
 
-function cloneKnown(provider: ProviderKind, model: string): KnownModelMetadata | undefined {
-  const value = KNOWN_MODELS.get(modelKey(provider, model));
-  return value ? cloneMetadata(value) : undefined;
-}
-
-function cloneMetadata(value: KnownModelMetadata): KnownModelMetadata {
-  return { ...value, capabilities: { ...value.capabilities } };
-}
-
 function defaultCapabilities(provider: ProviderKind): ModelCapabilities {
-  if (provider === "chatgpt") return { ...CHATGPT_CAPABILITIES };
-  if (provider === "google") return { ...GEMINI_CAPABILITIES };
+  if (provider === "chatgpt" || provider === "google") return { text: true, image: true, tools: true, streaming: true, reasoning: true };
   if (provider === "zen") return { text: true, image: false, tools: true, streaming: true, reasoning: true };
   return { text: true, image: false, tools: true, streaming: true, reasoning: false };
 }
@@ -571,14 +475,9 @@ function normalizeStoredProvider(raw: any): CustomProviderRecord {
     baseUrl: cleanBaseUrl(raw.baseUrl),
     apiStyle: cleanApiStyle(raw.apiStyle),
     ...(serviceTier ? { serviceTier } : {}),
-    // Legacy raw.models is deliberately ignored. Models are API-discovered now.
     createdAt: String(raw.createdAt || new Date(0).toISOString()),
     updatedAt: String(raw.updatedAt || raw.createdAt || new Date(0).toISOString()),
   };
-}
-
-function modelKey(provider: ProviderKind, model: string): string {
-  return `${provider}:${String(model || "").trim().toLowerCase()}`;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {

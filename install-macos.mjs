@@ -232,7 +232,7 @@ try {
 
   if (!noLaunchAgent) {
     const esc = (value) => String(value).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
-    const plist = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>com.openai-cc.gateway</string>\n<key>ProgramArguments</key><array><string>/bin/bash</string><string>${esc(join(current,"run-gateway.sh"))}</string><string>--install-root</string><string>${esc(installRoot)}</string></array>\n<key>EnvironmentVariables</key><dict><key>OPENAI_CC_NODE</key><string>${esc(process.execPath)}</string></dict>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n<key>StandardOutPath</key><string>${esc(join(logDir,"gateway.log"))}</string>\n<key>StandardErrorPath</key><string>${esc(join(logDir,"gateway.err.log"))}</string>\n</dict></plist>\n`;
+    const plist = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>com.openai-cc.gateway</string>\n<key>ProgramArguments</key><array><string>/bin/bash</string><string>${esc(join(current,"run-gateway.sh"))}</string><string>--install-root</string><string>${esc(installRoot)}</string></array>\n<key>EnvironmentVariables</key><dict><key>OPENAI_CC_NODE</key><string>${esc(process.execPath)}</string></dict>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><false/>\n<key>StandardOutPath</key><string>${esc(join(logDir,"gateway.log"))}</string>\n<key>StandardErrorPath</key><string>${esc(join(logDir,"gateway.err.log"))}</string>\n</dict></plist>\n`;
     await writeFile(launchAgent, plist, { encoding: "utf8", mode: 0o600 });
   }
 
@@ -286,15 +286,15 @@ try {
 
   if (freshModelConfig) {
     const expected = {
-      default:{provider:"chatgpt",model:"gpt-5.6-luna",context:1000000},
-      fable:{provider:"chatgpt",model:"gpt-5.6-luna",context:1000000},
-      opus:{provider:"zen",model:"deepseek-v4-flash-free",context:200000},
-      sonnet:{provider:"google",model:"gemini-3.5-flash-lite",context:1000000},
-      haiku:{provider:"google",model:"gemini-3.5-flash-lite",context:1000000},
+      default:{provider:"chatgpt",model:"gpt-5.6-luna"},
+      fable:{provider:"chatgpt",model:"gpt-5.6-luna"},
+      opus:{provider:"zen",model:"deepseek-v4-flash-free"},
+      sonnet:{provider:"google",model:"gemini-3.5-flash-lite"},
+      haiku:{provider:"google",model:"gemini-3.5-flash-lite"},
     };
     for (const [slot, contract] of Object.entries(expected)) {
-      const route = adminState.modelConfig.routes[slot], routeHealth = adminState.routeHealth[slot];
-      if (route.provider !== contract.provider || route.model !== contract.model || Number(routeHealth.contextWindow) !== contract.context) {
+      const route = adminState.modelConfig.routes[slot];
+      if (route.provider !== contract.provider || route.model !== contract.model) {
         fail(`Verification failed: fresh-install ${slot} route does not match the current default routing contract.`);
       }
     }
@@ -329,7 +329,7 @@ try {
     const failedCurrent = managedChild(installRoot, join(failedDir, `${String(distribution.sourceCommit).slice(0,12)}-${timestamp()}`));
     if (await exists(current)) await rename(current, failedCurrent);
     await rename(rollback, current);
-    console.error("Installation failed; previous runtime directory was restored. The supervisor will return to it automatically.");
+    console.error("Installation failed; previous runtime directory was restored. Restart OpenAI-CC to use the restored runtime.");
   }
   throw error;
 }

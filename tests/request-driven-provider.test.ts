@@ -7,7 +7,7 @@ import { AccountStore } from "../src/account-store.js";
 import { anthropicToChatCompletions } from "../src/chat-translator.js";
 import { RequestDrivenProviderRegistry } from "../src/request-driven-provider-registry.js";
 
-test("custom API-discovered models treat tools and reasoning as request-driven", async () => {
+test("custom API-discovered models remain provider-authoritative while route capabilities stay request-driven", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-request-driven-"));
   const accounts = new AccountStore(root);
   await accounts.init();
@@ -24,12 +24,17 @@ test("custom API-discovered models treat tools and reasoning as request-driven",
       data: [{ id: "model-a" }, { id: "model-b" }],
     }), { status: 200 })) as typeof fetch);
 
-    assert.deepEqual(models.map((model) => model.upstreamModelId), ["model-a", "model-b"]);
+    assert.deepEqual(models, [
+      { provider: provider.id, upstreamModelId: "model-a", availability: "available" },
+      { provider: provider.id, upstreamModelId: "model-b", availability: "available" },
+    ]);
     for (const model of models) {
-      assert.equal(model.capabilities?.tools, true);
-      assert.equal(model.capabilities?.reasoning, true);
-      assert.equal(model.contextWindow, 1_000_000);
-      assert.equal(model.maxOutputTokens, 16_384);
+      assert.equal(model.contextWindow, undefined);
+      assert.equal(model.maxOutputTokens, undefined);
+      assert.equal(model.capabilities, undefined);
+      const caps = providers.capabilities(provider.id, model.upstreamModelId);
+      assert.equal(caps.tools, true);
+      assert.equal(caps.reasoning, true);
     }
     assert.equal((providers.getCustom(provider.id) as any)?.models, undefined);
   } finally {

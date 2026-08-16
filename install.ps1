@@ -396,20 +396,19 @@ function Verify-Installation([object]$Distribution, [object]$InternalManifest, [
 
   if ($script:FreshModelConfig) {
     $expected = @{
-      default = @{ provider = "chatgpt"; model = "gpt-5.6-luna"; context = 1000000 }
-      fable = @{ provider = "chatgpt"; model = "gpt-5.6-luna"; context = 1000000 }
-      opus = @{ provider = "zen"; model = "deepseek-v4-flash-free"; context = 200000 }
-      sonnet = @{ provider = "google"; model = "gemini-3.5-flash-lite"; context = 1000000 }
-      haiku = @{ provider = "google"; model = "gemini-3.5-flash-lite"; context = 1000000 }
+      default = @{ provider = "chatgpt"; model = "gpt-5.6-luna" }
+      fable = @{ provider = "chatgpt"; model = "gpt-5.6-luna" }
+      opus = @{ provider = "zen"; model = "deepseek-v4-flash-free" }
+      sonnet = @{ provider = "google"; model = "gemini-3.5-flash-lite" }
+      haiku = @{ provider = "google"; model = "gemini-3.5-flash-lite" }
     }
     foreach ($slot in $expected.Keys) {
       $route = $state.modelConfig.routes.PSObject.Properties[$slot].Value
-      $routeHealth = $state.routeHealth.PSObject.Properties[$slot].Value
-      if ([string]$route.provider -ne [string]$expected[$slot].provider -or [string]$route.model -ne [string]$expected[$slot].model -or [int64]$routeHealth.contextWindow -ne [int64]$expected[$slot].context) {
+      if ([string]$route.provider -ne [string]$expected[$slot].provider -or [string]$route.model -ne [string]$expected[$slot].model) {
         throw "Verification failed: fresh-install $slot route does not match the current default routing contract."
       }
     }
-    Write-Host "[OK] Fresh defaults: Luna 1M / Luna 1M / DeepSeek 200K / Gemini 1M / Gemini 1M" -ForegroundColor Green
+    Write-Host "[OK] Fresh provider/model defaults verified without hardcoded capability limits" -ForegroundColor Green
   }
 
   if ($PreDataFingerprint) {
@@ -439,7 +438,7 @@ function Has-UsableChatGptCredential {
 }
 
 function Run-CodexDoctorIfAvailable {
-  Write-Step "GPT-5.6 Terra verification"
+  Write-Step "ChatGPT/Codex verification"
   if (-not (Has-UsableChatGptCredential)) {
     Write-Host "No usable ChatGPT OAuth credential is present. Installation succeeds without credentials." -ForegroundColor Yellow
     Write-Host "Add credentials in $GatewayBaseUrl/admin; codex:doctor will be available from the installed runtime." -ForegroundColor Yellow
@@ -449,7 +448,7 @@ function Run-CodexDoctorIfAvailable {
   $env:DATA_DIR = $script:DataDir
   Push-Location $script:ManagedRoot
   try {
-    & $script:NodeCommand @((Join-Path $script:CurrentRuntime "dist\scripts\codex-doctor.js"), "--model", "gpt-5.6-terra") | Out-Host
+    & $script:NodeCommand @((Join-Path $script:CurrentRuntime "dist\scripts\codex-doctor.js")) | Out-Host
     $doctorExitCode = $LASTEXITCODE
     if ($doctorExitCode -eq 2) {
       Write-Host "ChatGPT usage is currently exhausted or rate-limited. Local installation verification succeeded; rerun codex:doctor after quota resets." -ForegroundColor Yellow

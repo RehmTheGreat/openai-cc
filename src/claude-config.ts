@@ -5,7 +5,6 @@ import {
   MODEL_SLOTS,
   ModelConfig,
   claudeCodeModelAlias,
-  contextWindowForRoute,
 } from "./model-config.js";
 import { ProviderRegistry } from "./provider-registry.js";
 
@@ -22,23 +21,17 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig, 
 
   const settings = await readJson(settingsFile);
   const env = isObject(settings.env) ? { ...settings.env as Record<string, unknown> } : {};
-
-  const routeContextWindows = MODEL_SLOTS.map((slot) => contextWindowForRoute(config, slot, providers));
-  const maxContextWindow = Math.max(...routeContextWindows);
-  const oldContextValues = new Set(["700000", ...routeContextWindows.map(String)]);
+  const contextWindow = config.contextWindow;
+  const oldContextValues = new Set(["700000", "850000", "1000000", "1050000", String(contextWindow)]);
   if (oldContextValues.has(String(env.CLAUDE_CODE_CONTEXT_WINDOW ?? ""))) delete env.CLAUDE_CODE_CONTEXT_WINDOW;
-  if (oldContextValues.has(String(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? ""))) delete env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
 
-  // OpenAI-CC supplies the four named aliases itself. Gateway discovery would
-  // add another discovered copy of the same logical routes to /model. Default
-  // remains available automatically in Claude Code.
-  delete env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY;
-  settings.availableModels = ["fable", "opus", "sonnet", "haiku"];
+  // Discovery is restricted to OpenAI-CC's five logical routes. Upstream model
+  // IDs never become Claude picker rows.
+  env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
+  settings.availableModels = [...MODEL_SLOTS];
 
-  // PR #35 briefly used modelOverrides for Fable/Sonnet. Claude Code 2.1.226
-  // then budgeted those aliases at the third-party 200K fallback. Direct family
-  // pins are required for the long-context carrier behavior. Remove only the
-  // obsolete OpenAI-CC-owned overrides and preserve unrelated user overrides.
+  // Remove only obsolete OpenAI-CC carrier overrides and preserve unrelated
+  // user-owned Claude settings.
   const modelOverrides = isObject(settings.modelOverrides)
     ? { ...settings.modelOverrides as Record<string, unknown> }
     : {};
@@ -51,9 +44,6 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig, 
     ...env,
     ANTHROPIC_BASE_URL: normalizeBaseUrl(baseUrl),
     ANTHROPIC_AUTH_TOKEN: "local-not-used",
-    // Use the same Claude-facing route IDs advertised by /v1/models. The model
-    // config chooses a [1m] carrier only where the route needs one, and Claude
-    // strips that client-only suffix before dispatch when applicable.
     ANTHROPIC_MODEL: claudeCodeModelAlias(config, "default", providers),
     ANTHROPIC_DEFAULT_FABLE_MODEL: claudeCodeModelAlias(config, "fable", providers),
     ANTHROPIC_DEFAULT_FABLE_MODEL_NAME: "Fable",
@@ -64,10 +54,12 @@ export async function configureClaudeCode(baseUrl: string, config: ModelConfig, 
     ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeCodeModelAlias(config, "haiku", providers),
     ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME: "Haiku",
     CLAUDE_CODE_USE_GATEWAY: "1",
-    // Claude Code exposes one process-level auto-compact ceiling. Keep it at
-    // the largest route window; each route remains independently authoritative
-    // in Admin, /v1/models metadata, and gateway request enforcement.
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(maxContextWindow),
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(contextWindow),
+    // Presence unlocks Claude's custom-model context override; the false value
+    // keeps Claude's own compaction enabled. This is verified against the real
+    // Claude Code client in CI.
+    DISABLE_COMPACT: "0",
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(contextWindow),
     CLAUDE_CODE_PLUGIN_PREFER_HTTPS: "1",
   };
   await writeFile(settingsFile, `${JSON.stringify(settings, null, 2)}\n`, "utf8");

@@ -12,10 +12,8 @@ import { claudeDesktopModel, claudeDesktopModelList } from "./claude-desktop.js"
 import { ModelConfigStore } from "./model-config.js";
 import { OpenAICCError, conflict } from "./errors.js";
 import { adminPage } from "./admin/page.js";
-import { AnthropicRequest, estimateAnthropicTokens } from "./translator.js";
 import { DiscoveredModel, ProviderRegistry, discoverModelsForCredential } from "./provider-registry.js";
 
-const MESSAGE_BODY_LIMIT = 32 * 1024 * 1024;
 const ADMIN_BODY_LIMIT = 64 * 1024;
 
 export interface ControlPlaneOptions {
@@ -27,8 +25,8 @@ export interface ControlPlaneOptions {
 }
 
 /**
- * Non-inference HTTP surface: model discovery, token counting, Admin UI/API,
- * credential management, OAuth jobs, provider configuration and event streams.
+ * Non-inference HTTP surface: model discovery, Admin UI/API, credential
+ * management, OAuth jobs, provider configuration and event streams.
  * /v1/messages belongs exclusively to Dispatcher in dispatcher.ts.
  */
 export class ControlPlaneDispatcher {
@@ -86,12 +84,10 @@ export class ControlPlaneDispatcher {
         const model = claudeDesktopModel(this.models.snapshot(), modelId, this.providers);
         return void json(res, model ? 200 : 404, model ?? { error: { type: "not_found_error", message: `Model not found: ${modelId}` } });
       }
-      if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
-        const body = await readJson<AnthropicRequest>(req, MESSAGE_BODY_LIMIT, false);
-        return void json(res, 200, { input_tokens: estimateAnthropicTokens(body) });
-      }
 
-      if (req.method === "GET" && url.pathname === "/admin") return void html(res, adminPage(this.csrfToken, this.cspNonce));
+      if (req.method === "GET" && url.pathname === "/admin") {
+        return void html(res, cleanAdminPage(adminPage(this.csrfToken, this.cspNonce)));
+      }
       if (req.method === "GET" && url.pathname === "/admin/state") return void json(res, 200, this.adminState());
       if (req.method === "GET" && url.pathname === "/admin/events") return void this.handleEventStream(req, res);
       if (req.method === "POST" && url.pathname === "/admin/providers") {
@@ -356,6 +352,14 @@ export class ControlPlaneDispatcher {
     }
     json(res, 500, { error: { code: "internal_error", message: "Internal server error." } });
   }
+}
+
+function cleanAdminPage(page: string): string {
+  return page
+    .replace("Selecting a discovered model seeds its reported context when available.", "")
+    .replace(",reported=meta?.contextWindow", "")
+    .replace("<span>API reported: <strong>'+(reported?Number(reported).toLocaleString()+' tokens':'Not reported')+'</strong></span>", "")
+    .replace("function seedDiscoveredLimits(slot,provider,modelId,replaceContext){const meta=findModel(provider,modelId),ctx=document.querySelector('#ctx-'+slot),out=document.querySelector('#o-'+slot);if(meta?.contextWindow&&ctx&&(replaceContext||!Number(ctx.value)))ctx.value=String(meta.contextWindow);if(meta?.maxOutputTokens&&out&&Number(out.value)>meta.maxOutputTokens)out.value=String(meta.maxOutputTokens)}", "function seedDiscoveredLimits(){}");
 }
 
 function upstreamHttpStatus(error: unknown): number | undefined {

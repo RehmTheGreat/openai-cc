@@ -50,14 +50,7 @@ export function claudeDesktopModels(config: ModelConfig, providers?: ProviderReg
 
 export function claudeDesktopModel(config: ModelConfig, modelId: string, providers?: ProviderRegistry): ClaudeModelInfo | undefined {
   const normalized = decodeURIComponent(String(modelId || "")).trim().toLowerCase();
-  const exact = claudeDesktopModels(config, providers).find((model) => model.id.toLowerCase() === normalized);
-  if (exact) return exact;
-
-  // openai-cc-* ids are private Claude Code transport carriers. They must never
-  // become public model-discovery aliases or additional picker rows.
-  if (normalized.startsWith("openai-cc-")) return undefined;
-  const slot = desktopSlotForModel(normalized);
-  return slot ? modelInfo(slot, config, providers) : undefined;
+  return claudeDesktopModels(config, providers).find((model) => model.id.toLowerCase() === normalized);
 }
 
 export function claudeDesktopModelList(
@@ -92,11 +85,7 @@ export function claudeDesktopModelList(
 export function claudeDesktopProfile(baseUrl: string, config: ModelConfig, providers?: ProviderRegistry): Record<string, unknown> {
   const inferenceModels = DESKTOP_SLOTS.map((slot) => {
     const info = modelInfo(slot, config, providers);
-    return {
-      name: info.id,
-      labelOverride: info.display_name,
-      ...(info.max_input_tokens > 200000 ? { supports1m: true } : {}),
-    };
+    return { name: info.id, labelOverride: info.display_name };
   });
 
   return {
@@ -154,22 +143,12 @@ function modelInfo(slot: ClaudeDesktopSlot, config: ModelConfig, providers?: Pro
   return {
     id: claudeCodeModelAlias(config, slot, providers),
     type: "model",
-    // Technical provider/model details stay in Admin discovery. Claude's model
-    // picker only gets the user-facing routing alias.
     display_name: title(slot),
     created_at: UNKNOWN_CREATED_AT,
     max_input_tokens: contextWindowForRoute(config, slot, providers),
     max_tokens: route.maxOutputTokens,
     capabilities: routeCapabilities(route, providers),
   };
-}
-
-function desktopSlotForModel(model: string): ClaudeDesktopSlot | undefined {
-  if (model.includes("fable")) return "fable";
-  if (model.includes("opus")) return "opus";
-  if (model.includes("sonnet")) return "sonnet";
-  if (model.includes("haiku")) return "haiku";
-  return undefined;
 }
 
 function routeCapabilities(route: ModelRoute, providers?: ProviderRegistry): Record<string, unknown> {
