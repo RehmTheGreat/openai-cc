@@ -80,6 +80,86 @@ test("disabled state survives an exhausted timer becoming due", async () => {
   reloaded.close();
 });
 
+test("ChatGPT no longer starts a synthetic five-hour window and unknown 429 resets stay exhausted", async () => {
+  const { store } = await tempStore();
+  await store.createChatGpt({ id: "c1", name: "ChatGPT" });
+  await store.noteRequest("c1");
+  assert.equal(store.publicGet("c1")?.firstRequestAt, undefined);
+  assert.equal(store.publicGet("c1")?.limitResetsAt, undefined);
+
+  await store.markRateLimited("c1", "429 usage limit");
+  let account = store.publicGet("c1");
+  assert.equal(account?.status, "exhausted");
+  assert.equal(account?.limitResetsAt, undefined);
+  assert.equal(account?.limitResetSource, undefined);
+
+  await store.markRetrySucceeded("c1");
+  account = store.publicGet("c1");
+  assert.equal(account?.status, "ready");
+  assert.equal(account?.lastError, undefined);
+  store.close();
+});
+
+test("ChatGPT persists an upstream-reported reset and clears it after a successful Retry", async () => {
+  const { store } = await tempStore();
+  await store.createChatGpt({ id: "c1", name: "ChatGPT" });
+  const cooldown = 7 * 24 * 60 * 60 * 1000;
+  const before = Date.now();
+  await store.markRateLimited("c1", "429 weekly limit", cooldown);
+  let account = store.publicGet("c1");
+  assert.equal(account?.status, "exhausted");
+  assert.equal(account?.limitResetSource, "upstream");
+  const reset = Date.parse(account?.limitResetsAt ?? "");
+  assert.ok(reset >= before + cooldown && reset <= Date.now() + cooldown + 1000);
+
+  await store.markRetrySucceeded("c1");
+  account = store.publicGet("c1");
+  assert.equal(account?.status, "ready");
+  assert.equal(account?.limitResetsAt, undefined);
+  assert.equal(account?.limitResetSource, undefined);
+  store.close();
+});
+
+test("legacy synthetic ChatGPT five-hour timestamps are discarded without falsely re-enabling an exhausted account", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-chatgpt-limit-migrate-"));
+  const now = Date.now();
+  await writeFile(path.join(root, "accounts.json"), JSON.stringify({
+    version: 2,
+    preferredCredentialByProvider: { chatgpt: "c1" },
+    accounts: [{
+      id: "c1",
+      name: "ChatGPT",
+      provider: "chatgpt",
+      status: "exhausted",
+      createdAt: new Date(now - 60_000).toISOString(),
+      updatedAt: new Date(now - 60_000).toISOString(),
+      firstRequestAt: new Date(now - 60_000).toISOString(),
+      limitResetsAt: new Date(now + 5 * 60 * 60 * 1000).toISOString(),
+      exhaustedAt: new Date(now - 30_000).toISOString(),
+      lastError: "429 usage limit",
+    }],
+  }), "utf8");
+  const store = new AccountStore(root);
+  await store.init();
+  const account = store.publicGet("c1");
+  assert.equal(account?.status, "exhausted");
+  assert.equal(account?.firstRequestAt, undefined);
+  assert.equal(account?.limitResetsAt, undefined);
+  assert.equal(account?.lastError, "429 usage limit");
+  store.close();
+});
+
+test("serialized account-store writes remain valid when mutations overlap", async () => {
+  const { root, store } = await tempStore();
+  await store.createApiKey({ id: "g1", name: "G1", provider: "google", apiKey: "a", model: "m" });
+  await store.createApiKey({ id: "g2", name: "G2", provider: "google", apiKey: "b", model: "m" });
+  await Promise.all([store.rename("g1", "Google One"), store.rename("g2", "Google Two")]);
+  const disk = JSON.parse(await readFile(path.join(root, "accounts.json"), "utf8"));
+  assert.equal(disk.accounts.find((a: any) => a.id === "g1")?.name, "Google One");
+  assert.equal(disk.accounts.find((a: any) => a.id === "g2")?.name, "Google Two");
+  store.close();
+});
+
 test("API-key replacement cannot change provider and path traversal ids are rejected", async () => {
   const { store } = await tempStore();
   await store.createApiKey({ id: "z1", name: "Zen", provider: "zen", apiKey: "old", model: "m1" });
