@@ -169,7 +169,10 @@ function Ensure-CoreTools {
   Refresh-ProcessPath
   $rtk = Get-Command rtk -ErrorAction SilentlyContinue
   if (-not $rtk) { throw "RTK installed but rtk is not available on PATH." }
-  & $rtk.Source init -g | Out-Host
+  # Default RTK telemetry consent to No and keep client installs fully noninteractive.
+  & $rtk.Source telemetry disable | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw "RTK telemetry opt-out failed (exit code $LASTEXITCODE)." }
+  & $rtk.Source init -g --auto-patch --no-trust-filters | Out-Host
   if ($LASTEXITCODE -ne 0) { throw "RTK initialization failed (exit code $LASTEXITCODE)." }
   Write-Host "[OK] RTK initialized" -ForegroundColor Green
 }
