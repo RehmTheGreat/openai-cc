@@ -1,0 +1,32 @@
+name: One-shot stale context test patch
+on:
+  push:
+    branches: [fix/per-route-context-and-compaction]
+    paths: [".github/PATCH_ONE_CONTEXT_TEST"]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/per-route-context-and-compaction
+      - shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('tests/provider-registry.test.ts')
+          s=p.read_text()
+          old='assert.equal(sonnet.max_input_tokens, 1_050_000);'
+          if s.count(old)!=1: raise SystemExit(f'expected one stale assertion, found {s.count(old)}')
+          p.write_text(s.replace(old,'assert.equal(sonnet.max_input_tokens, 1_000_000);',1))
+          PY
+          git rm .github/workflows/patch-one-context-test.yml .github/PATCH_ONE_CONTEXT_TEST
+          git diff --check
+          git config user.name "OpenAI-CC CI patch"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Align Cloudflare route context regression expectation"
+          git push origin HEAD:fix/per-route-context-and-compaction
