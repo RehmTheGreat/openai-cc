@@ -1,0 +1,36 @@
+name: One-shot installer alias verification patch
+on:
+  push:
+    branches: [fix/per-route-context-and-compaction]
+    paths: [".github/PATCH_INSTALLER_ALIAS"]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/per-route-context-and-compaction
+      - shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p=Path(path); s=p.read_text(); n=s.count(old)
+              if n!=1: raise SystemExit(f'{path}: expected one match, found {n}')
+              p.write_text(s.replace(old,new,1))
+
+          replace_once('install.ps1', '''    $envKey = $envKeys[$slot]\n    $configuredAlias = [string]$settings.env.PSObject.Properties[$envKey].Value\n    if ($configuredAlias -ne [string]$model.id) { throw "Verification failed: Claude alias for $title disagrees with gateway model discovery." }''', '''    $envKey = $envKeys[$slot]\n    $configuredAlias = [string]$settings.env.PSObject.Properties[$envKey].Value\n    if (-not $configuredAlias) { throw "Verification failed: Claude alias for $title is missing." }\n    $encodedAlias = [Uri]::EscapeDataString($configuredAlias)\n    $aliasModel = Invoke-RestMethod -Uri "$GatewayBaseUrl/v1/models/$encodedAlias" -TimeoutSec 5\n    if ([string]$aliasModel.display_name -ne $title) { throw "Verification failed: Claude alias for $title does not resolve back to the expected logical route." }\n    if ([int64]$aliasModel.max_input_tokens -ne [int64]$routeHealth.contextWindow -or [int64]$aliasModel.max_tokens -ne [int64]$route.maxOutputTokens) { throw "Verification failed: Claude alias for $title resolves with inconsistent route metadata." }''')
+
+          replace_once('install-macos.mjs', '''    if (Number(model.max_input_tokens) !== Number(routeHealth.contextWindow)) fail(`Verification failed: ${title} context metadata disagrees with effective route context.`);\n    if (Number(model.max_tokens) !== Number(route.maxOutputTokens)) fail(`Verification failed: ${title} output metadata disagrees with route configuration.`);\n    if (String(settings.env?.[envKey] || "") !== String(model.id)) fail(`Verification failed: Claude alias for ${title} disagrees with gateway model discovery.`);''', '''    if (Number(model.max_input_tokens) !== Number(routeHealth.contextWindow)) fail(`Verification failed: ${title} context metadata disagrees with effective route context.`);\n    if (Number(model.max_tokens) !== Number(route.maxOutputTokens)) fail(`Verification failed: ${title} output metadata disagrees with route configuration.`);\n    const configuredAlias = String(settings.env?.[envKey] || "");\n    if (!configuredAlias) fail(`Verification failed: Claude alias for ${title} is missing.`);\n    const aliasResponse = await fetch(`${GATEWAY}/v1/models/${encodeURIComponent(configuredAlias)}`);\n    if (!aliasResponse.ok) fail(`Verification failed: Claude alias for ${title} is not accepted by the gateway.`);\n    const aliasModel = await aliasResponse.json();\n    if (String(aliasModel.display_name) !== title) fail(`Verification failed: Claude alias for ${title} does not resolve back to the expected logical route.`);\n    if (Number(aliasModel.max_input_tokens) !== Number(routeHealth.contextWindow) || Number(aliasModel.max_tokens) !== Number(route.maxOutputTokens)) fail(`Verification failed: Claude alias for ${title} resolves with inconsistent route metadata.`);''')
+          PY
+          git rm .github/workflows/patch-installer-alias-verification.yml .github/PATCH_INSTALLER_ALIAS
+          git diff --check
+          git config user.name "OpenAI-CC CI patch"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Verify Claude carriers against logical gateway routes"
+          git push origin HEAD:fix/per-route-context-and-compaction
