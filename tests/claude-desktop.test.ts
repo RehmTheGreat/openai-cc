@@ -119,12 +119,14 @@ test("shared Claude settings use five-route gateway metadata with no duplicate c
   assert.match(source, /delete modelOverrides\["claude-fable-5"\]/);
   assert.match(source, /delete modelOverrides\["claude-sonnet-5"\]/);
   assert.match(source, /CLAUDE_CODE_USE_GATEWAY/);
+  assert.match(source, /CLAUDE_CODE_MAX_CONTEXT_TOKENS:\s*String\(maxContextWindow\)/);
+  assert.match(source, /DISABLE_COMPACT:\s*"0"/);
   assert.match(source, /CLAUDE_CODE_AUTO_COMPACT_WINDOW/);
   assert.match(source, /String\(maxContextWindow\)/);
   assert.doesNotMatch(source, /supports1m|\[1m\]/);
   assert.match(source, /hasCompletedOnboarding = true/);
   assert.match(source, /hasSeenOnboarding = true/);
-  assert.doesNotMatch(source, /DISABLE_COMPACT\s*[=:]/);
+  assert.doesNotMatch(source, /DISABLE_COMPACT:\s*"1"/);
   assert.doesNotMatch(source, /CLAUDE_CODE_DISABLE_1M_CONTEXT/);
   assert.match(clients, /const config = models\.snapshot\(\)/);
   assert.doesNotMatch(clients, /models\.update\(/);
