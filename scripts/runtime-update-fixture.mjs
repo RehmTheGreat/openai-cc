@@ -59,7 +59,8 @@ if (mode === "seed") {
   await accounts.disable(disabledId);
   await accounts.prefer(preferredId);
 
-  // The model route and the one global Claude context are persisted user selections.
+  // Legacy/global writes are still accepted for upgrade compatibility and are
+  // expanded into authoritative per-route context values before persistence.
   await models.update({
     contextWindow: 850000,
     routes: {
@@ -101,7 +102,7 @@ if (mode === "seed") {
   assert.equal(modelConfig.routes.default.provider, provider.id);
   assert.equal(modelConfig.routes.default.model, modelId);
   assert.equal(modelConfig.routes.default.credentialId, preferredId);
-  assert.equal(modelConfig.routes.default.contextWindow, undefined, "route-specific context must not be persisted");
+  assert.equal(modelConfig.routes.default.contextWindow, 850000, "route-specific context selection did not survive update");
   assert.equal(modelConfig.routes.default.maxOutputTokens, 8192);
   assert.equal(modelConfig.routes.default.tools, true);
 
