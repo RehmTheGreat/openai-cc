@@ -75,6 +75,12 @@ test("B2 installer layers stream child output without collapsing stderr", async 
   assert.match(fixture, /start === 0 && requestedEnd >= size - 1/);
 });
 
+test("client installer refreshes an existing Claude Desktop profile unless explicitly skipped", async () => {
+  const client = await readFile(path.join(process.cwd(), "distribution/b2/client-installer-template.ps1"), "utf8");
+
+  assert.match(client, /if \(\$env:OPENAI_CC_CLIENT_SKIP_DESKTOP_CONFIG -eq "1"\) \{ \$bootstrapArgs \+= "-SkipDesktopConfig" \}/);
+  assert.doesNotMatch(client, /-not \$wantClaudeDesktop\) \{ \$bootstrapArgs \+= "-SkipDesktopConfig" \}/);
+});
 test("fresh-install verification enforces current provider/model defaults without hardcoded model context", async () => {
   const install = await readFile(path.join(process.cwd(), "install.ps1"), "utf8");
 
@@ -88,7 +94,7 @@ test("fresh-install verification enforces current provider/model defaults withou
   assert.match(install, /model\.max_tokens -ne \[int64\]\$route\.maxOutputTokens/);
   assert.match(install, /aliasModel\.display_name -ne \$title/);
   assert.match(install, /v1\/models\/\$encodedAlias/);
-  assert.match(install, /gateway did not expose exactly five Claude-facing routes/);
+  assert.match(install, /gateway did not expose exactly four Claude Desktop-facing routes/);
   assert.match(install, /Admin endpoint did not return HTTP 200/);
   assert.match(install, /codex-doctor\.js/);
   assert.match(install, /No usable ChatGPT OAuth credential is present/);

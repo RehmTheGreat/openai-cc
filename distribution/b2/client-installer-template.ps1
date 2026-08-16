@@ -287,7 +287,7 @@ try {
   $env:OPENAI_CC_DIST_BOOTSTRAP_SHA256 = $BootstrapSha256
   $bootstrapArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $BootstrapPath)
   if ($env:OPENAI_CC_CLIENT_INSTALL_ROOT) { $bootstrapArgs += @("-InstallRoot", [string]$env:OPENAI_CC_CLIENT_INSTALL_ROOT) }
-  if ($env:OPENAI_CC_CLIENT_SKIP_DESKTOP_CONFIG -eq "1" -or -not $wantClaudeDesktop) { $bootstrapArgs += "-SkipDesktopConfig" }
+  if ($env:OPENAI_CC_CLIENT_SKIP_DESKTOP_CONFIG -eq "1") { $bootstrapArgs += "-SkipDesktopConfig" }
   if ($env:OPENAI_CC_CLIENT_NO_STARTUP_SHORTCUT -eq "1") { $bootstrapArgs += "-NoStartupShortcut" }
 
   $previousErrorActionPreference = $ErrorActionPreference

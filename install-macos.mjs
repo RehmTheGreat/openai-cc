@@ -264,7 +264,7 @@ try {
   if (!admin.ok) fail("Verification failed: Admin endpoint did not return HTTP 200.");
   const adminState = await (await fetch(`${GATEWAY}/admin/state`)).json();
   const models = await (await fetch(`${GATEWAY}/v1/models`)).json();
-  if (!Array.isArray(models.data) || models.data.length !== 5) fail("Verification failed: gateway did not expose exactly five Claude-facing routes.");
+  if (!Array.isArray(models.data) || models.data.length !== 4) fail("Verification failed: gateway did not expose exactly four Claude Desktop-facing routes.");
 
   const settingsFile = join(os.homedir(), ".claude", "settings.json");
   if (!(await exists(settingsFile))) fail("Verification failed: Claude settings file is missing.");
@@ -276,11 +276,13 @@ try {
   };
   for (const [slot, envKey] of Object.entries(envKeys)) {
     const title = slot[0].toUpperCase() + slot.slice(1);
-    const model = models.data.find((item)=>item.display_name === title);
-    if (!model) fail(`Verification failed: model discovery is missing ${title}.`);
     const route = adminState.modelConfig.routes[slot], routeHealth = adminState.routeHealth[slot];
-    if (Number(model.max_input_tokens) !== Number(routeHealth.contextWindow)) fail(`Verification failed: ${title} context metadata disagrees with effective route context.`);
-    if (Number(model.max_tokens) !== Number(route.maxOutputTokens)) fail(`Verification failed: ${title} output metadata disagrees with route configuration.`);
+    if (slot !== "default") {
+      const model = models.data.find((item)=>item.display_name === title);
+      if (!model) fail(`Verification failed: model discovery is missing ${title}.`);
+      if (Number(model.max_input_tokens) !== Number(routeHealth.contextWindow)) fail(`Verification failed: ${title} context metadata disagrees with effective route context.`);
+      if (Number(model.max_tokens) !== Number(route.maxOutputTokens)) fail(`Verification failed: ${title} output metadata disagrees with route configuration.`);
+    }
     const configuredAlias = String(settings.env?.[envKey] || "");
     if (!configuredAlias) fail(`Verification failed: Claude alias for ${title} is missing.`);
     const aliasResponse = await fetch(`${GATEWAY}/v1/models/${encodeURIComponent(configuredAlias)}`);

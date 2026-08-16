@@ -366,7 +366,7 @@ function Verify-Installation([object]$Distribution, [object]$InternalManifest, [
   if ([int]$admin.StatusCode -ne 200) { throw "Verification failed: Admin endpoint did not return HTTP 200." }
   $state = Invoke-RestMethod -Uri "$GatewayBaseUrl/admin/state" -TimeoutSec 5
   $models = Invoke-RestMethod -Uri "$GatewayBaseUrl/v1/models" -TimeoutSec 5
-  if (@($models.data).Count -ne 5) { throw "Verification failed: gateway did not expose exactly five Claude-facing routes." }
+  if (@($models.data).Count -ne 4) { throw "Verification failed: gateway did not expose exactly four Claude Desktop-facing routes." }
 
   $settingsFile = Join-Path $HOME ".claude\settings.json"
   if (-not (Test-Path $settingsFile)) { throw "Verification failed: Claude settings file is missing." }
@@ -383,12 +383,14 @@ function Verify-Installation([object]$Distribution, [object]$InternalManifest, [
   }
   foreach ($slot in $envKeys.Keys) {
     $title = $slot.Substring(0, 1).ToUpperInvariant() + $slot.Substring(1)
-    $model = @($models.data | Where-Object { [string]$_.display_name -eq $title }) | Select-Object -First 1
-    if (-not $model) { throw "Verification failed: model discovery is missing $title." }
     $route = $state.modelConfig.routes.PSObject.Properties[$slot].Value
     $routeHealth = $state.routeHealth.PSObject.Properties[$slot].Value
-    if ([int64]$model.max_input_tokens -ne [int64]$routeHealth.contextWindow) { throw "Verification failed: $title context metadata disagrees with effective route context." }
-    if ([int64]$model.max_tokens -ne [int64]$route.maxOutputTokens) { throw "Verification failed: $title output metadata disagrees with route configuration." }
+    if ($slot -ne "default") {
+      $model = @($models.data | Where-Object { [string]$_.display_name -eq $title }) | Select-Object -First 1
+      if (-not $model) { throw "Verification failed: model discovery is missing $title." }
+      if ([int64]$model.max_input_tokens -ne [int64]$routeHealth.contextWindow) { throw "Verification failed: $title context metadata disagrees with effective route context." }
+      if ([int64]$model.max_tokens -ne [int64]$route.maxOutputTokens) { throw "Verification failed: $title output metadata disagrees with route configuration." }
+    }
     $envKey = $envKeys[$slot]
     $configuredAlias = [string]$settings.env.PSObject.Properties[$envKey].Value
     if (-not $configuredAlias) { throw "Verification failed: Claude alias for $title is missing." }
