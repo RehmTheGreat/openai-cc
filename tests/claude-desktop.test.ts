@@ -106,9 +106,10 @@ test("bare-PC installer only requires the cleaned runtime dependency and never r
   assert.doesNotMatch(setup, /git\s+(clone|pull|fetch|reset|clean)/i);
 });
 
-test("shared Claude settings use five-route gateway metadata with no duplicate carrier policy", async () => {
+test("shared Claude settings use one Admin context and five-route gateway metadata", async () => {
   const source = await readFile(path.join(process.cwd(), "src", "claude-config.ts"), "utf8");
   const clients = await readFile(path.join(process.cwd(), "scripts", "configure-clients.ts"), "utf8");
+  assert.match(source, /const contextWindow = config\.contextWindow/);
   assert.match(source, /claudeCodeModelAlias\(config, "default", providers\)/);
   assert.match(source, /env\.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1"/);
   assert.match(source, /settings\.availableModels = \[\.\.\.MODEL_SLOTS\]/);
@@ -119,11 +120,10 @@ test("shared Claude settings use five-route gateway metadata with no duplicate c
   assert.match(source, /delete modelOverrides\["claude-fable-5"\]/);
   assert.match(source, /delete modelOverrides\["claude-sonnet-5"\]/);
   assert.match(source, /CLAUDE_CODE_USE_GATEWAY/);
-  assert.match(source, /CLAUDE_CODE_MAX_CONTEXT_TOKENS:\s*String\(maxContextWindow\)/);
+  assert.match(source, /CLAUDE_CODE_MAX_CONTEXT_TOKENS:\s*String\(contextWindow\)/);
   assert.match(source, /DISABLE_COMPACT:\s*"0"/);
-  assert.match(source, /CLAUDE_CODE_AUTO_COMPACT_WINDOW/);
-  assert.match(source, /String\(maxContextWindow\)/);
-  assert.doesNotMatch(source, /supports1m|\[1m\]/);
+  assert.match(source, /CLAUDE_CODE_AUTO_COMPACT_WINDOW:\s*String\(contextWindow\)/);
+  assert.doesNotMatch(source, /maxContextWindow|supports1m|\[1m\]/);
   assert.match(source, /hasCompletedOnboarding = true/);
   assert.match(source, /hasSeenOnboarding = true/);
   assert.doesNotMatch(source, /DISABLE_COMPACT:\s*"1"/);
