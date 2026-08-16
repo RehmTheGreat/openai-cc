@@ -20,14 +20,14 @@ export const CLAUDE_DESKTOP_PROFILE_NAME = "OpenAI-CC";
 
 const DESKTOP_SLOTS: ClaudeDesktopSlot[] = [...MODEL_SLOTS];
 const DESKTOP_PROFILE_SLOTS: ClaudeDesktopProfileSlot[] = ["fable", "opus", "sonnet", "haiku"];
-// Claude Desktop validates managed 3P gateway profile model names against its
-// Anthropic-shaped catalog. Keep these profile-only transport IDs Anthropic-shaped
-// while preserving the user-facing OpenAI-CC labels and internal route names.
+// Claude Desktop validates managed 3P gateway model names against Anthropic's
+// provider catalog. These are current real Claude API model aliases used only as
+// transport carriers; labelOverride keeps the OpenAI-CC route names visible.
 const DESKTOP_PROFILE_MODEL_IDS: Record<ClaudeDesktopProfileSlot, string> = {
-  fable: "claude-openai-cc-fable",
-  opus: "claude-openai-cc-opus",
-  sonnet: "claude-openai-cc-sonnet",
-  haiku: "claude-openai-cc-haiku",
+  fable: "claude-fable-5",
+  opus: "claude-opus-4-8",
+  sonnet: "claude-sonnet-5",
+  haiku: "claude-haiku-4-5",
 };
 const UNKNOWN_CREATED_AT = "1970-01-01T00:00:00Z";
 
