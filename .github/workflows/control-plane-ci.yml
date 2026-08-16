@@ -40,10 +40,12 @@ jobs:
       - name: Configure fresh Claude Code gateway context
         env:
           OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP: "0"
-          ANTHROPIC_BASE_URL: "http://127.0.0.1:9"
+          ANTHROPIC_BASE_URL: "http://127.0.0.1:18082"
           DATA_DIR: ${{ runner.temp }}/openai-cc-context
         run: node dist/scripts/configure-clients.js
       - name: Verify Claude Code client context budget
+        env:
+          DATA_DIR: ${{ runner.temp }}/openai-cc-context
         run: node scripts/verify-claude-code-context.mjs
       - name: Parse Windows installers and launchers
         if: runner.os == 'Windows'
