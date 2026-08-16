@@ -71,21 +71,15 @@ test("provider discovery returns provider model ids without OpenAI-CC model deco
   store.close();
 });
 
-test("Claude-facing discovery exposes exactly five clean logical routes with Admin context", async () => {
+test("Claude-facing discovery exposes five routes with the one Admin context", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "openai-cc-labels-"));
   const store = new AccountStore(root); await store.init();
   const configs = new ModelConfigStore(root, store); await configs.init();
-  const changed = configs.snapshot();
-  changed.routes.default.contextWindow = 1_050_000;
-  changed.routes.fable.contextWindow = 900_000;
-  changed.routes.opus.contextWindow = 800_000;
-  changed.routes.sonnet.contextWindow = 700_000;
-  changed.routes.haiku.contextWindow = 600_000;
-  await configs.update(changed);
+  await configs.update({ contextWindow: 1_234_567 });
   const list = claudeDesktopModelList(configs.snapshot());
   assert.deepEqual(list.data.map((model) => model.id), ["default", "fable", "opus", "sonnet", "haiku"]);
   assert.deepEqual(list.data.map((model) => model.display_name), ["Default", "Fable", "Opus", "Sonnet", "Haiku"]);
-  assert.deepEqual(list.data.map((model) => model.max_input_tokens), [1_050_000, 900_000, 800_000, 700_000, 600_000]);
+  assert.deepEqual(list.data.map((model) => model.max_input_tokens), [1_234_567, 1_234_567, 1_234_567, 1_234_567, 1_234_567]);
   const visible = JSON.stringify(list.data.map(({ id, display_name }) => ({ id, display_name })));
   assert.doesNotMatch(visible, /gpt-|deepseek|gemini|cloudflare|\[1m\]|openai-cc-/i);
   store.close();
@@ -132,7 +126,7 @@ test("production Cloudflare route sends the configured model, output cap, tools 
   await store.createApiKey({ id: "cf1", provider: "cloudflare", apiKey: "token", accountId: "acct" });
   const models = new ModelConfigStore(root, store); await models.init();
   const routeConfig = models.snapshot();
-  routeConfig.routes.sonnet = { provider: "cloudflare", model: CF_MODEL, contextWindow: 1_050_000, maxOutputTokens: 16384 };
+  routeConfig.routes.sonnet = { provider: "cloudflare", model: CF_MODEL, maxOutputTokens: 16384 };
   await models.update(routeConfig);
   let captured: any;
   const server = createReplicatedServer(store, models, {
@@ -185,7 +179,7 @@ test("production Cloudflare route streams through the real dispatcher", async ()
   await store.createApiKey({ id: "cf1", provider: "cloudflare", apiKey: "token", accountId: "acct" });
   const models = new ModelConfigStore(root, store); await models.init();
   const routeConfig = models.snapshot();
-  routeConfig.routes.sonnet = { provider: "cloudflare", model: CF_MODEL, contextWindow: 1_050_000, maxOutputTokens: 16384 };
+  routeConfig.routes.sonnet = { provider: "cloudflare", model: CF_MODEL, maxOutputTokens: 16384 };
   await models.update(routeConfig);
   const server = createReplicatedServer(store, models, {
     bindHost: "127.0.0.1",
