@@ -86,8 +86,7 @@ export class ControlPlaneDispatcher {
       }
 
       if (req.method === "GET" && url.pathname === "/admin") {
-        const page = adminPage(this.csrfToken, this.cspNonce).replace("API reported:", "Discovered context:");
-        return void html(res, page);
+        return void html(res, cleanAdminPage(adminPage(this.csrfToken, this.cspNonce)));
       }
       if (req.method === "GET" && url.pathname === "/admin/state") return void json(res, 200, this.adminState());
       if (req.method === "GET" && url.pathname === "/admin/events") return void this.handleEventStream(req, res);
@@ -353,6 +352,14 @@ export class ControlPlaneDispatcher {
     }
     json(res, 500, { error: { code: "internal_error", message: "Internal server error." } });
   }
+}
+
+function cleanAdminPage(page: string): string {
+  return page
+    .replace("Selecting a discovered model seeds its reported context when available.", "")
+    .replace(",reported=meta?.contextWindow", "")
+    .replace("<span>API reported: <strong>'+(reported?Number(reported).toLocaleString()+' tokens':'Not reported')+'</strong></span>", "")
+    .replace("function seedDiscoveredLimits(slot,provider,modelId,replaceContext){const meta=findModel(provider,modelId),ctx=document.querySelector('#ctx-'+slot),out=document.querySelector('#o-'+slot);if(meta?.contextWindow&&ctx&&(replaceContext||!Number(ctx.value)))ctx.value=String(meta.contextWindow);if(meta?.maxOutputTokens&&out&&Number(out.value)>meta.maxOutputTokens)out.value=String(meta.maxOutputTokens)}", "function seedDiscoveredLimits(){}");
 }
 
 function upstreamHttpStatus(error: unknown): number | undefined {
