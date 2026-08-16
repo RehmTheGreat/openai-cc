@@ -106,7 +106,7 @@ export function mapModel(model: string): string {
     const match = Object.entries(explicit).find(([prefix]) => model.startsWith(prefix));
     if (match) return match[1];
   }
-  return process.env.DEFAULT_OPENAI_MODEL || "gpt-5.6-sol";
+  return process.env.DEFAULT_OPENAI_MODEL || model;
 }
 
 export function anthropicToResponses(
@@ -131,8 +131,7 @@ export function anthropicToResponses(
           text: String((block as AnthropicTextBlock).text ?? ""),
         });
       } else if (block.type === "image" && message.role === "user") {
-        const source = (block as Extract<AnthropicBlock, { type: "image" }>).source;
-        messageParts.push({ type: "input_image", image_url: `data:${source.media_type};base64,${source.data}` });
+        messageParts.push(imageToResponsesPart(block));
       } else if (block.type === "tool_use" && message.role === "assistant") {
         flushMessage(message.role, messageParts, turnItems);
         const tool = block as Extract<AnthropicBlock, { type: "tool_use" }>;
@@ -148,7 +147,7 @@ export function anthropicToResponses(
         turnItems.push({
           type: "function_call_output",
           call_id: result.tool_use_id,
-          output: toolResultToString(result.content, result.is_error),
+          output: toolResultToResponsesOutput(result.content, result.is_error),
         });
       } else if (block.type === "thinking" && message.role === "assistant") {
         const thinking = String((block as { thinking?: string }).thinking ?? "").trim();
@@ -253,6 +252,9 @@ export function responsesToAnthropic(
       }
     }
   }
+  if (!content.some((block) => block.type === "text" || block.type === "tool_use")) {
+    throw new Error("empty_upstream_response: Responses upstream completed without usable text or tool output.");
+  }
   return {
     id: response.id ?? `msg_${randomUUID()}`,
     type: "message",
@@ -283,6 +285,7 @@ export class AnthropicSseTranslator {
   private encryptedReasoning = new Map<string, string>();
   private messageId = `msg_${randomUUID()}`;
   private started = false;
+  private hasUsableOutput = false;
   private usage = { input_tokens: 0, output_tokens: 0 };
 
   constructor(
@@ -303,6 +306,7 @@ export class AnthropicSseTranslator {
       const item = event.item ?? {};
       const key = item.id ?? item.call_id ?? `item-${this.nextIndex}`;
       if (item.type === "function_call") {
+        this.hasUsableOutput = true;
         const index = this.nextIndex++;
         const name = this.toolNames.decode(item.name) || "tool";
         const block: StreamBlock = { index, kind: "tool", callId: item.call_id ?? item.id, name };
@@ -318,6 +322,8 @@ export class AnthropicSseTranslator {
     }
 
     if (event.type === "response.output_text.delta") {
+      const delta = String(event.delta ?? "");
+      if (delta) this.hasUsableOutput = true;
       const key = event.item_id ?? `message-${event.output_index ?? 0}`;
       let block = this.blocks.get(key);
       if (!block) {
@@ -325,13 +331,14 @@ export class AnthropicSseTranslator {
         this.blocks.set(key, block);
         out.push(sse("content_block_start", { type: "content_block_start", index: block.index, content_block: { type: "text", text: "" } }));
       }
-      out.push(sse("content_block_delta", { type: "content_block_delta", index: block.index, delta: { type: "text_delta", text: event.delta ?? "" } }));
+      out.push(sse("content_block_delta", { type: "content_block_delta", index: block.index, delta: { type: "text_delta", text: delta } }));
     }
 
     if (event.type === "response.function_call_arguments.delta") {
       const key = event.item_id ?? event.call_id ?? `tool-${this.nextIndex}`;
       let block = this.blocks.get(key);
       if (!block) {
+        this.hasUsableOutput = true;
         const name = this.toolNames.decode(event.name) || "tool";
         block = { index: this.nextIndex++, kind: "tool", callId: event.call_id, name };
         this.blocks.set(key, block);
@@ -365,6 +372,7 @@ export class AnthropicSseTranslator {
       let block = key ? this.blocks.get(key) : undefined;
 
       if (item.type === "function_call") {
+        this.hasUsableOutput = true;
         if (!block) {
           const name = this.toolNames.decode(item.name) || "tool";
           block = { index: this.nextIndex++, kind: "tool", callId: item.call_id ?? item.id, name };
@@ -406,14 +414,21 @@ export class AnthropicSseTranslator {
     }
 
     if (event.type === "response.completed" || event.type === "response.incomplete") {
-      this.closeOpenBlocks(out);
       this.usage = {
         input_tokens: event.response?.usage?.input_tokens ?? 0,
         output_tokens: event.response?.usage?.output_tokens ?? 0,
       };
+      if (!this.hasUsableOutput) {
+        throw new Error("empty_upstream_response: Responses upstream completed without usable text or tool output.");
+      }
+      this.closeOpenBlocks(out);
       const hasTool = [...this.blocks.values()].some((b) => b.kind === "tool");
       const stopReason = hasTool ? "tool_use" : event.type === "response.incomplete" ? "max_tokens" : "end_turn";
-      out.push(sse("message_delta", { type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: this.usage.output_tokens } }));
+      out.push(sse("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: stopReason, stop_sequence: null },
+        usage: { input_tokens: this.usage.input_tokens, output_tokens: this.usage.output_tokens },
+      }));
       out.push(sse("message_stop", { type: "message_stop" }));
     }
 
@@ -434,7 +449,7 @@ export class AnthropicSseTranslator {
         content: [],
         stop_reason: null,
         stop_sequence: null,
-        usage: { input_tokens: 0, output_tokens: 0 },
+        usage: { input_tokens: event?.response?.usage?.input_tokens ?? 0, output_tokens: 0 },
       },
     }));
   }
@@ -451,11 +466,45 @@ export class AnthropicSseTranslator {
   }
 }
 
-export function estimateAnthropicTokens(req: AnthropicRequest): number {
-  const chars = systemToString(req.system).length
-    + JSON.stringify(req.messages ?? []).length
-    + JSON.stringify(req.tools ?? []).length;
-  return Math.max(1, Math.ceil(chars / 3.6));
+export function toolResultToResponsesOutput(content: string | AnthropicBlock[] | undefined, isError = false): string | Record<string, unknown>[] {
+  if (content === undefined || content === null) return isError ? "[tool error]" : "";
+  if (typeof content === "string") return isError ? `[tool error]\n${content}` : content;
+  if (!Array.isArray(content)) return isError ? `[tool error]\n${String(content)}` : String(content);
+
+  const hasMedia = content.some((item) => isRecord(item) && item.type === "image");
+  if (!hasMedia) {
+    const text = content.map((item) => {
+      if (isRecord(item) && item.type === "text") return String(item.text ?? "");
+      if (isRecord(item)) return JSON.stringify(item);
+      return String(item);
+    }).join("\n");
+    return isError ? `[tool error]\n${text}` : text;
+  }
+
+  const out: Record<string, unknown>[] = [];
+  if (isError) out.push({ type: "input_text", text: "[tool error]" });
+  for (const item of content) {
+    if (isRecord(item) && item.type === "text") {
+      out.push({ type: "input_text", text: String(item.text ?? "") });
+    } else if (isRecord(item) && item.type === "image") {
+      out.push(imageToResponsesPart(item));
+    } else {
+      out.push({ type: "input_text", text: isRecord(item) ? JSON.stringify(item) : String(item) });
+    }
+  }
+  return out;
+}
+
+function imageToResponsesPart(block: AnthropicBlock | Record<string, unknown>): Record<string, unknown> {
+  const source = (block as any).source;
+  if (!isRecord(source)) throw new Error("Image source is required.");
+  if (source.type === "url" && typeof source.url === "string" && source.url) {
+    return { type: "input_image", image_url: source.url };
+  }
+  if (source.type === "base64" && typeof source.media_type === "string" && typeof source.data === "string") {
+    return { type: "input_image", image_url: `data:${source.media_type};base64,${source.data}` };
+  }
+  throw new Error("Unsupported image source.");
 }
 
 function flushMessage(role: "user" | "assistant", parts: unknown[], input: unknown[]): void {
@@ -467,13 +516,6 @@ function systemToString(system: AnthropicRequest["system"]): string {
   if (!system) return "";
   if (typeof system === "string") return system;
   return system.filter((x) => x.type === "text").map((x) => x.text).join("\n");
-}
-
-function toolResultToString(content: string | AnthropicBlock[] | undefined, isError?: boolean): string {
-  let text = "";
-  if (typeof content === "string") text = content;
-  else if (Array.isArray(content)) text = content.map((b) => b.type === "text" ? String((b as any).text ?? "") : JSON.stringify(b)).join("\n");
-  return isError ? `[tool error]\n${text}` : text;
 }
 
 function mapToolChoice(choice: any, toolNames: OpenAIToolNameCodec): any {
@@ -524,6 +566,10 @@ function safeJson(value?: string): unknown {
 
 function stripUndefined<T extends object>(value: T): T {
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== undefined && v !== "")) as T;
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function sse(event: string, data: unknown): string {
