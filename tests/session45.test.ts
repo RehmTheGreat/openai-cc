@@ -158,7 +158,7 @@ test("legacy private transport ids remain routable but are not part of public di
     const ids = (await response.json() as any).data.map((m: any) => m.id);
     assert.deepEqual(ids, ["default", "fable", "opus", "sonnet", "haiku"]);
     assert.deepEqual(seen, [GEMINI_MODEL]);
-    assert.equal(f.models.slotForRequestedModel("claude-sonnet-5"), "default");
+    assert.equal(f.models.slotForRequestedModel("claude-sonnet-5"), "sonnet");
   } finally { await close(server); }
 });
 
