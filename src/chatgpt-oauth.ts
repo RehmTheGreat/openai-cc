@@ -14,13 +14,38 @@ export interface ResponsesRequestSummary {
   stream: boolean;
 }
 
+export interface ChatGptRateLimitWindow {
+  usedPercent?: number;
+  windowMinutes?: number;
+  resetAt?: number;
+}
+
+export interface ChatGptRateLimitInfo {
+  primary?: ChatGptRateLimitWindow;
+  secondary?: ChatGptRateLimitWindow;
+  reachedType?: string;
+  retryAfterMs?: number;
+}
+
+export interface ChatGptRateLimitReset {
+  cooldownMs: number;
+  resetAt: string;
+  window: "primary" | "secondary" | "both" | "retry-after";
+}
+
 export class ChatGptUpstreamError extends Error {
   readonly status: number;
   readonly statusCode: number;
   readonly summary: ResponsesRequestSummary;
   readonly upstreamMessage: string;
+  readonly rateLimit?: ChatGptRateLimitInfo;
 
-  constructor(status: number, summary: ResponsesRequestSummary, upstreamMessage: string) {
+  constructor(
+    status: number,
+    summary: ResponsesRequestSummary,
+    upstreamMessage: string,
+    rateLimit?: ChatGptRateLimitInfo,
+  ) {
     const diagnostic = [
       `ChatGPT Codex upstream HTTP ${status}.`,
       summary.model ? `model=${summary.model}` : "model=<missing>",
@@ -36,6 +61,7 @@ export class ChatGptUpstreamError extends Error {
     this.statusCode = status;
     this.summary = summary;
     this.upstreamMessage = upstreamMessage;
+    this.rateLimit = rateLimit;
   }
 }
 
@@ -104,7 +130,63 @@ export async function requireSuccessfulChatGptResponse(
 ): Promise<Response> {
   if (response.ok) return response;
   const bodyText = await response.text();
-  throw new ChatGptUpstreamError(response.status, summarizeResponsesRequest(request), readSafeUpstreamMessage(bodyText));
+  throw new ChatGptUpstreamError(
+    response.status,
+    summarizeResponsesRequest(request),
+    readSafeUpstreamMessage(bodyText),
+    readChatGptRateLimitInfo(response.headers),
+  );
+}
+
+/**
+ * Return the reset OpenAI's Codex backend actually reported for this 429.
+ * There is deliberately no guessed 5-hour/weekly fallback: plan limits can
+ * change and an unknown reset must remain unknown until a manual Retry proves
+ * the credential is usable again.
+ */
+export function chatGptRateLimitReset(error: unknown, nowMs = Date.now()): ChatGptRateLimitReset | undefined {
+  if (!(error instanceof ChatGptUpstreamError) || error.status !== 429) return undefined;
+  const info = error.rateLimit;
+  if (!info) return undefined;
+
+  const reached = String(info.reachedType ?? "").trim().toLowerCase();
+  const primary = validReset(info.primary, nowMs);
+  const secondary = validReset(info.secondary, nowMs);
+  let resetMs: number | undefined;
+  let window: ChatGptRateLimitReset["window"] | undefined;
+
+  if (/secondary|weekly|week/.test(reached) && secondary) {
+    resetMs = secondary;
+    window = "secondary";
+  } else if (/primary/.test(reached) && primary) {
+    resetMs = primary;
+    window = "primary";
+  } else {
+    const primaryFull = Number(info.primary?.usedPercent ?? 0) >= 100;
+    const secondaryFull = Number(info.secondary?.usedPercent ?? 0) >= 100;
+    if (primaryFull && secondaryFull && (primary || secondary)) {
+      resetMs = Math.max(primary ?? 0, secondary ?? 0);
+      window = primary && secondary ? "both" : secondary ? "secondary" : "primary";
+    } else if (secondaryFull && secondary) {
+      resetMs = secondary;
+      window = "secondary";
+    } else if (primaryFull && primary) {
+      resetMs = primary;
+      window = "primary";
+    }
+  }
+
+  if (!resetMs && info.retryAfterMs && info.retryAfterMs > 0) {
+    resetMs = nowMs + info.retryAfterMs;
+    window = "retry-after";
+  }
+  if (!resetMs || !window) return undefined;
+  const cooldownMs = Math.max(1000, resetMs - nowMs);
+  return { cooldownMs, resetAt: new Date(nowMs + cooldownMs).toISOString(), window };
+}
+
+export function chatGptRateLimitCooldownMs(error: unknown, nowMs = Date.now()): number | undefined {
+  return chatGptRateLimitReset(error, nowMs)?.cooldownMs;
 }
 
 export function summarizeResponsesRequest(body: Record<string, unknown>): ResponsesRequestSummary {
@@ -148,6 +230,49 @@ export async function* readJsonSse(response: Response): AsyncGenerator<Record<st
 
   const trailing = parseSseEvent(buffer);
   if (trailing) yield trailing;
+}
+
+function readChatGptRateLimitInfo(headers: Headers): ChatGptRateLimitInfo | undefined {
+  const primary = readRateLimitWindow(headers, "primary");
+  const secondary = readRateLimitWindow(headers, "secondary");
+  const reachedType = cleanHeader(headers.get("x-codex-rate-limit-reached-type"));
+  const retryAfterMs = parseRetryAfter(headers.get("retry-after"));
+  if (!primary && !secondary && !reachedType && !retryAfterMs) return undefined;
+  return { primary, secondary, reachedType, retryAfterMs };
+}
+
+function readRateLimitWindow(headers: Headers, window: "primary" | "secondary"): ChatGptRateLimitWindow | undefined {
+  const prefix = `x-codex-${window}-`;
+  const usedPercent = finiteNumber(headers.get(`${prefix}used-percent`));
+  const windowMinutes = finiteNumber(headers.get(`${prefix}window-minutes`));
+  const resetAt = finiteNumber(headers.get(`${prefix}reset-at`));
+  if (usedPercent === undefined && windowMinutes === undefined && resetAt === undefined) return undefined;
+  return { usedPercent, windowMinutes, resetAt };
+}
+
+function validReset(window: ChatGptRateLimitWindow | undefined, nowMs: number): number | undefined {
+  if (!window?.resetAt || !Number.isFinite(window.resetAt)) return undefined;
+  const value = window.resetAt > 10_000_000_000 ? window.resetAt : window.resetAt * 1000;
+  return value > nowMs ? value : undefined;
+}
+
+function parseRetryAfter(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds * 1000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) && date > Date.now() ? date - Date.now() : undefined;
+}
+
+function finiteNumber(value: string | null): number | undefined {
+  if (value === null || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function cleanHeader(value: string | null): string | undefined {
+  const text = String(value ?? "").trim();
+  return text ? text.slice(0, 80) : undefined;
 }
 
 function usesServerReplayState(body: Record<string, unknown>): boolean {
