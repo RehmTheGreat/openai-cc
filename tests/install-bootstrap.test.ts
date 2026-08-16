@@ -75,17 +75,19 @@ test("B2 installer layers stream child output without collapsing stderr", async 
   assert.match(fixture, /start === 0 && requestedEnd >= size - 1/);
 });
 
-test("fresh-install verification enforces current defaults and route-specific context", async () => {
+test("fresh-install verification enforces current provider/model defaults without hardcoded model context", async () => {
   const install = await readFile(path.join(process.cwd(), "install.ps1"), "utf8");
 
-  assert.match(install, /default = @\{ provider = "chatgpt"; model = "gpt-5\.6-luna"; context = 1000000 \}/);
-  assert.match(install, /fable = @\{ provider = "chatgpt"; model = "gpt-5\.6-luna"; context = 1000000 \}/);
-  assert.match(install, /opus = @\{ provider = "zen"; model = "deepseek-v4-flash-free"; context = 200000 \}/);
-  assert.match(install, /sonnet = @\{ provider = "google"; model = "gemini-3\.5-flash-lite"; context = 1000000 \}/);
-  assert.match(install, /haiku = @\{ provider = "google"; model = "gemini-3\.5-flash-lite"; context = 1000000 \}/);
+  assert.match(install, /default = @\{ provider = "chatgpt"; model = "gpt-5\.6-luna" \}/);
+  assert.match(install, /fable = @\{ provider = "chatgpt"; model = "gpt-5\.6-luna" \}/);
+  assert.match(install, /opus = @\{ provider = "zen"; model = "deepseek-v4-flash-free" \}/);
+  assert.match(install, /sonnet = @\{ provider = "google"; model = "gemini-3\.5-flash-lite" \}/);
+  assert.match(install, /haiku = @\{ provider = "google"; model = "gemini-3\.5-flash-lite" \}/);
+  assert.doesNotMatch(install, /context = (?:200000|850000|1000000|1050000)/);
   assert.match(install, /model\.max_input_tokens -ne \[int64\]\$routeHealth\.contextWindow/);
   assert.match(install, /model\.max_tokens -ne \[int64\]\$route\.maxOutputTokens/);
   assert.match(install, /configuredAlias -ne \[string\]\$model\.id/);
+  assert.match(install, /gateway did not expose exactly five Claude-facing routes/);
   assert.match(install, /Admin endpoint did not return HTTP 200/);
   assert.match(install, /codex-doctor\.js/);
   assert.match(install, /No usable ChatGPT OAuth credential is present/);
@@ -94,6 +96,7 @@ test("fresh-install verification enforces current defaults and route-specific co
 
   const doctor = await readFile(path.join(process.cwd(), "scripts/codex-doctor.ts"), "utf8");
   assert.match(doctor, /store\.orderedReady\("chatgpt"\)/);
+  assert.doesNotMatch(doctor, /gpt-5\.6-terra/);
   assert.doesNotMatch(doctor, /store\.preferredId\("chatgpt"\)/);
   assert.match(doctor, /process\.exitCode = isUsageLimited\(message\) \? 2 : 1/);
 });
