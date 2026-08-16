@@ -391,7 +391,11 @@ function Verify-Installation([object]$Distribution, [object]$InternalManifest, [
     if ([int64]$model.max_tokens -ne [int64]$route.maxOutputTokens) { throw "Verification failed: $title output metadata disagrees with route configuration." }
     $envKey = $envKeys[$slot]
     $configuredAlias = [string]$settings.env.PSObject.Properties[$envKey].Value
-    if ($configuredAlias -ne [string]$model.id) { throw "Verification failed: Claude alias for $title disagrees with gateway model discovery." }
+    if (-not $configuredAlias) { throw "Verification failed: Claude alias for $title is missing." }
+    $encodedAlias = [Uri]::EscapeDataString($configuredAlias)
+    $aliasModel = Invoke-RestMethod -Uri "$GatewayBaseUrl/v1/models/$encodedAlias" -TimeoutSec 5
+    if ([string]$aliasModel.display_name -ne $title) { throw "Verification failed: Claude alias for $title does not resolve back to the expected logical route." }
+    if ([int64]$aliasModel.max_input_tokens -ne [int64]$routeHealth.contextWindow -or [int64]$aliasModel.max_tokens -ne [int64]$route.maxOutputTokens) { throw "Verification failed: Claude alias for $title resolves with inconsistent route metadata." }
   }
 
   if ($script:FreshModelConfig) {
