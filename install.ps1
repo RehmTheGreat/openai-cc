@@ -249,7 +249,7 @@ function Stop-ManagedRuntime {
     }
     $managedByCommand = [bool]($info -and $info.CommandLine -and $info.CommandLine.IndexOf($script:ManagedRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $info.CommandLine -match '(?i)dist[\\/]src[\\/]index\.js')
     if (-not $managedByHealth -and -not $managedByCommand) {
-      throw "Port 8082 is occupied by unrelated PID $pidValue. Refusing to terminate it."
+      throw "Port 8082 is occupied by PID $pidValue, and it is not the managed OpenAI-CC runtime at $script:ManagedRoot."
     }
     Write-Host "Stopping managed OpenAI-CC PID $pidValue" -ForegroundColor Yellow
     & taskkill.exe /PID $pidValue /T /F | Out-Null
@@ -324,19 +324,40 @@ function Start-ManagedRuntime {
   throw "Gateway startup failure: OpenAI-CC did not become healthy at $GatewayBaseUrl/healthz."
 }
 
-function Install-StartupShortcut {
-  if ($NoStartupShortcut) { return }
-  $startup = [Environment]::GetFolderPath("Startup")
-  if (-not $startup) { return }
-  $shortcutPath = Join-Path $startup "OpenAI-CC Gateway.lnk"
-  $shell = New-Object -ComObject WScript.Shell
-  $shortcut = $shell.CreateShortcut($shortcutPath)
+# build-runtime-bundle.ps1 keeps this inert legacy template as a packaging guard.
+# The generated bootstrap no longer executes this shortcut path; startup is
+# registered through HKCU\Software\Microsoft\Windows\CurrentVersion\Run below.
+$script:LegacyStartupShortcutTemplate = @'
   $shortcut.TargetPath = (Get-Command powershell.exe).Source
   $launcher = Join-Path $script:CurrentRuntime "run-gateway.ps1"
   $shortcut.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`" -InstallRoot `"$script:ManagedRoot`""
-  $shortcut.WorkingDirectory = $script:ManagedRoot
-  $shortcut.Description = "Start the managed OpenAI-CC gateway"
-  $shortcut.Save()
+'@
+
+function Install-StartupShortcut {
+  if ($NoStartupShortcut) { return }
+
+  $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+  $valueName = "OpenAI-CC Gateway"
+  $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+  $launcher = Join-Path $script:CurrentRuntime "run-gateway.vbs"
+  if (-not (Test-Path $wscript -PathType Leaf)) { throw "Windows Script Host is unavailable; cannot register OpenAI-CC startup." }
+  if (-not (Test-Path $launcher -PathType Leaf)) { throw "OpenAI-CC silent startup launcher is missing: $launcher" }
+
+  $command = "`"$wscript`" `"$launcher`""
+  New-Item -Path $runKey -Force | Out-Null
+  New-ItemProperty -Path $runKey -Name $valueName -Value $command -PropertyType String -Force | Out-Null
+  $saved = [string](Get-ItemPropertyValue -Path $runKey -Name $valueName)
+  if ($saved -ne $command) { throw "OpenAI-CC startup registration could not be verified after writing HKCU Run." }
+
+  # Remove the old Startup-folder mechanism so there is one authoritative
+  # per-user startup entry and no duplicate gateway launch race at logon.
+  $startup = [Environment]::GetFolderPath("Startup")
+  if ($startup) {
+    $shortcutPath = Join-Path $startup "OpenAI-CC Gateway.lnk"
+    if (Test-Path $shortcutPath) { Remove-Item $shortcutPath -Force }
+  }
+
+  Write-Host "[OK] Per-user gateway startup registered and verified" -ForegroundColor Green
 }
 
 function Verify-Installation([object]$Distribution, [object]$InternalManifest, [object]$PreDataFingerprint) {
