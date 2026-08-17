@@ -1,0 +1,131 @@
+name: Windows Startup CI
+
+on:
+  push:
+    paths:
+      - "install.ps1"
+      - "uninstall.ps1"
+      - "run-gateway.vbs"
+      - "scripts/build-runtime-bundle.ps1"
+      - ".github/workflows/windows-startup-ci.yml"
+  pull_request:
+    paths:
+      - "install.ps1"
+      - "uninstall.ps1"
+      - "run-gateway.vbs"
+      - "scripts/build-runtime-bundle.ps1"
+      - ".github/workflows/windows-startup-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  startup-registration:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build with deterministic source identity
+        shell: pwsh
+        run: |
+          $env:OPENAI_CC_SOURCE_SHA = (git rev-parse HEAD).Trim()
+          $env:OPENAI_CC_BUILD_TIME = (git show -s --format=%cI HEAD).Trim()
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
+
+      - name: Prune development dependencies
+        run: npm prune --omit=dev --no-audit --no-fund
+
+      - name: Build production runtime bundle
+        shell: powershell
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "openai-cc-startup-ci-bundle"
+          .\scripts\build-runtime-bundle.ps1 -OutputDirectory $out
+          $manifest = Get-Content (Join-Path $out "openai-cc-runtime-manifest.json") -Raw | ConvertFrom-Json
+          if (-not (Test-Path (Join-Path $out ([string]$manifest.bundleUrl)))) { throw "Bundle referenced by manifest is missing" }
+          "BUNDLE_DIR=$out" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install with logon startup enabled
+        shell: powershell
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "OpenAI-CC-startup-target"
+          $bootstrap = Join-Path $env:BUNDLE_DIR "install.ps1"
+          $manifest = Join-Path $env:BUNDLE_DIR "openai-cc-runtime-manifest.json"
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $bootstrap -ManifestUrl $manifest -InstallRoot $root -SkipDesktopConfig
+          if ($LASTEXITCODE -ne 0) { throw "Startup-enabled bundle install failed" }
+          "INSTALL_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify HKCU startup registration and launcher restart
+        shell: powershell
+        run: |
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          $valueName = "OpenAI-CC Gateway"
+          $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+          $launcher = Join-Path $env:INSTALL_ROOT "current\run-gateway.vbs"
+          $expected = "`"$wscript`" `"$launcher`""
+          $actual = [string](Get-ItemPropertyValue -Path $runKey -Name $valueName -ErrorAction Stop)
+          if ($actual -ne $expected) { throw "HKCU startup value mismatch. Expected '$expected', got '$actual'." }
+
+          $startup = [Environment]::GetFolderPath("Startup")
+          if ($startup -and (Test-Path (Join-Path $startup "OpenAI-CC Gateway.lnk"))) {
+            throw "Legacy Startup-folder shortcut still exists after registry startup registration."
+          }
+
+          $health = Invoke-RestMethod http://127.0.0.1:8082/healthz -TimeoutSec 5
+          if (-not $health.ok) { throw "Gateway was unhealthy before restart test." }
+          if ([IO.Path]::GetFullPath([string]$health.installRoot).TrimEnd('\') -ine [IO.Path]::GetFullPath($env:INSTALL_ROOT).TrimEnd('\')) {
+            throw "Gateway health installRoot does not match startup test root."
+          }
+          taskkill.exe /PID ([int]$health.pid) /T /F | Out-Null
+
+          Start-Process -FilePath $wscript -ArgumentList @("`"$launcher`"") -WindowStyle Hidden | Out-Null
+          $restarted = $null
+          for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep -Milliseconds 250
+            try {
+              $candidate = Invoke-RestMethod http://127.0.0.1:8082/healthz -TimeoutSec 2
+              if ($candidate.ok -and ([IO.Path]::GetFullPath([string]$candidate.installRoot).TrimEnd('\') -ieq [IO.Path]::GetFullPath($env:INSTALL_ROOT).TrimEnd('\'))) {
+                $restarted = $candidate
+                break
+              }
+            } catch { }
+          }
+          if (-not $restarted) { throw "The registered WScript launcher did not restart the gateway." }
+          Write-Host "[OK] HKCU Run entry is exact and its silent launcher restarts the gateway."
+
+      - name: Verify uninstall removes startup registration
+        shell: powershell
+        run: |
+          $uninstall = Join-Path $env:INSTALL_ROOT "current\uninstall.ps1"
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $uninstall -PurgeData -InstallRoot $env:INSTALL_ROOT
+          if ($LASTEXITCODE -ne 0) { throw "Startup test uninstall failed" }
+
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          $valueName = "OpenAI-CC Gateway"
+          $remaining = Get-ItemProperty -Path $runKey -Name $valueName -ErrorAction SilentlyContinue
+          if ($null -ne $remaining) { throw "OpenAI-CC HKCU startup entry survived uninstall." }
+          if (Test-Path (Join-Path $env:INSTALL_ROOT "current")) { throw "Runtime survived startup test uninstall." }
+          Write-Host "[OK] Uninstall removed the startup registration."
+
+      - name: Cleanup gateway if needed
+        if: always()
+        shell: powershell
+        run: |
+          try {
+            $health = Invoke-RestMethod http://127.0.0.1:8082/healthz -TimeoutSec 2
+            if ($health.pid) { taskkill.exe /PID ([int]$health.pid) /T /F | Out-Null }
+          } catch { }
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          Remove-ItemProperty -Path $runKey -Name "OpenAI-CC Gateway" -Force -ErrorAction SilentlyContinue
