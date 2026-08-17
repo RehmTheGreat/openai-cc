@@ -2,11 +2,6 @@ name: Publish Gated Runtime
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/PUBLISH_STARTUP_FIX"
 
 permissions:
   contents: read
