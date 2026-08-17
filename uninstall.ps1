@@ -61,6 +61,18 @@ function Stop-ManagedRuntime {
 }
 
 function Remove-StartupShortcut {
+  $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+  $valueName = "OpenAI-CC Gateway"
+  if (Test-Path $runKey) {
+    $existing = Get-ItemProperty -Path $runKey -Name $valueName -ErrorAction SilentlyContinue
+    if ($null -ne $existing) {
+      Remove-ItemProperty -Path $runKey -Name $valueName -Force
+      $remaining = Get-ItemProperty -Path $runKey -Name $valueName -ErrorAction SilentlyContinue
+      if ($null -ne $remaining) { throw "Failed to remove OpenAI-CC HKCU startup registration." }
+    }
+  }
+
+  # Also clean the legacy Startup-folder shortcut from older installs.
   $startup = [Environment]::GetFolderPath("Startup")
   if (-not $startup) { return }
   $shortcut = Join-Path $startup "OpenAI-CC Gateway.lnk"
