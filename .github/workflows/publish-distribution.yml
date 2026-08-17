@@ -2,6 +2,9 @@ name: Publish Gated Runtime
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - publish-runtime
 
 permissions:
   contents: read
