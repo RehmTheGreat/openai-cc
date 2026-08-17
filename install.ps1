@@ -249,7 +249,7 @@ function Stop-ManagedRuntime {
     }
     $managedByCommand = [bool]($info -and $info.CommandLine -and $info.CommandLine.IndexOf($script:ManagedRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $info.CommandLine -match '(?i)dist[\\/]src[\\/]index\.js')
     if (-not $managedByHealth -and -not $managedByCommand) {
-      throw "Port 8082 is occupied by PID $pidValue, and it is not the managed OpenAI-CC runtime at $script:ManagedRoot."
+      throw "Port 8082 is occupied by unrelated PID $pidValue. Refusing to terminate it."
     }
     Write-Host "Stopping managed OpenAI-CC PID $pidValue" -ForegroundColor Yellow
     & taskkill.exe /PID $pidValue /T /F | Out-Null
