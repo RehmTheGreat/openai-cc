@@ -14,7 +14,7 @@ The everyday client flow is intentionally two steps:
 
 The client needs 64-bit Windows, Windows PowerShell 5.1+, and internet access, but does not need Git, GitHub, a PAT, a source checkout, preinstalled Node.js, winget, or any permanent distribution credential for OpenAI-CC core. The generated file contains only a one-release `readFiles` grant, caches and verifies the private B2 bootstrap before optional tooling, verifies the complete Session 6A runtime integrity chain, installs a SHA-256-verified portable Node.js LTS fallback when winget is unavailable, opens Admin after success, clears transport credentials, writes a diagnostic install log, and deletes itself after a successful installation. If the user elects to install Claude Code, Git and Git Bash are separately health-checked and repaired because Claude Code on native Windows depends on Git Bash.
 
-The administrator helper automatically uses the newest private provisioning JSON in `%TEMP%`. Use `-CredentialFile <path>` only when selecting a different saved provisioning result intentionally. Run the helper again whenever another client needs an installer or the previous installer has expired.
+The administrator helper first looks for the durable trusted-admin credential file at `~/.openai-cc-private/b2-issuer-credentials.json`, then falls back to the newest private provisioning JSON in `%TEMP%`. Use `-CredentialFile <path>` to override either location intentionally. Run the helper again whenever another client needs an installer or the previous installer has expired.
 
 OpenAI-CC uses **Backblaze B2 Cloud Storage** as a private, card-free distribution host. Backblaze currently allows B2 account creation without a credit card and includes the first 10 GB of storage free. This design deliberately does not add a billing method and does not use Cloudflare R2, S3, Azure Blob, GitLab Packages, or another host that would require a payment card for this deployment.
 
@@ -110,7 +110,7 @@ Do **not** store this issuer credential in the runtime bundle, target `.data`, G
 - capability: `readFiles`;
 - bucket: the one distribution bucket;
 - `namePrefix`: one exact release directory;
-- expiry: 60â€“172800 seconds (up to 48 hours); the one-click Windows and macOS generators default to 172800 seconds.
+- expiry: 60Ã¢â‚¬â€œ172800 seconds (up to 48 hours); the one-click Windows and macOS generators default to 172800 seconds.
 
 Grant creation is bound to the exact checked-out Git commit. To authorize an older published release, first check out that exact source commit and use its matching manifest.
 

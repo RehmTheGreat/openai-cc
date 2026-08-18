@@ -13,8 +13,18 @@ const issuer = await authorize(issuerId, issuerKey);
 const capabilities = new Set(issuer.storage.allowed?.capabilities || []);
 if (!capabilities.has("deleteKeys")) fail("Issuer key requires deleteKeys capability.");
 
-const deleted = await apiJson(issuer, "b2_delete_key", { applicationKeyId });
-if (deleted.applicationKeyId && deleted.applicationKeyId !== applicationKeyId) {
-  fail("Backblaze deleted an unexpected application key ID.");
+let deleted = null;
+let lastError = null;
+for (let attempt = 1; attempt <= 6; attempt += 1) {
+  try { deleted = await apiJson(issuer, "b2_delete_key", { applicationKeyId }); break; }
+  catch (error) {
+    lastError = error;
+    const status = Number(error?.status);
+    const retryable = status === 400 || status === 404 || status === 408 || status === 429 || (status >= 500 && status <= 599);
+    if (!retryable || attempt === 6) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 500 * (2 ** (attempt - 1))));
+  }
 }
+if (!deleted) throw lastError || new Error("Backblaze grant revocation returned no result.");
+if (deleted.applicationKeyId && deleted.applicationKeyId !== applicationKeyId) fail("Backblaze deleted an unexpected application key ID.");
 console.log(`Revoked distribution grant ${applicationKeyId}.`);

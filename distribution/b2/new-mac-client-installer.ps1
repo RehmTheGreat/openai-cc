@@ -19,6 +19,10 @@ function Encode-Text([string]$Value) { [Convert]::ToBase64String([Text.Encoding]
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw "Git is required on the trusted administrator PC." }
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw "Node.js is required on the trusted administrator PC." }
 if (-not $CredentialFile) {
+  $stableCredentialFile = Join-Path $HOME ".openai-cc-private\b2-issuer-credentials.json"
+  if (Test-Path $stableCredentialFile -PathType Leaf) { $CredentialFile = $stableCredentialFile }
+}
+if (-not $CredentialFile) {
   $CredentialFile = Get-ChildItem ([IO.Path]::GetTempPath()) -Filter "openai-cc-b2-credentials-*.json" -File |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
 }
@@ -130,7 +134,10 @@ if [[ "${OPENAI_CC_CLIENT_NO_OPEN_ADMIN:-0}" != "1" ]]; then /usr/bin/open "http
   Write-Host "Client runs: bash `"$OutputPath`""
 } catch {
   if ($Created -and $Grant -and $Grant.applicationKeyId) {
-    try { Push-Location $RepoRoot; try { node .\distribution\b2\revoke-grant.mjs --key-id ([string]$Grant.applicationKeyId) | Out-Null } finally { Pop-Location } } catch { }
+    try { Push-Location $RepoRoot; try {
+      node .\distribution\b2\revoke-grant.mjs --key-id ([string]$Grant.applicationKeyId) | Out-Null
+      if ($LASTEXITCODE -ne 0) { Write-Warning "Automatic cleanup could not revoke failed client grant $($Grant.applicationKeyId). Revoke it manually before reissuing." }
+    } finally { Pop-Location } } catch { Write-Warning "Automatic cleanup could not revoke failed client grant $($Grant.applicationKeyId): $($_.Exception.Message)" }
   }
   throw
 } finally {

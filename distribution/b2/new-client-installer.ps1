@@ -50,6 +50,10 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw "Node.js is r
 if (-not (Test-Path $TemplatePath -PathType Leaf)) { throw "Client installer template is missing: $TemplatePath" }
 
 if (-not $CredentialFile) {
+  $stableCredentialFile = Join-Path $HOME ".openai-cc-private\b2-issuer-credentials.json"
+  if (Test-Path $stableCredentialFile -PathType Leaf) { $CredentialFile = $stableCredentialFile }
+}
+if (-not $CredentialFile) {
   $CredentialFile = Get-ChildItem ([IO.Path]::GetTempPath()) -Filter "openai-cc-b2-credentials-*.json" -File |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1 -ExpandProperty FullName
@@ -194,8 +198,11 @@ exit $LASTEXITCODE
   if ($Created -and $Grant -and $Grant.applicationKeyId) {
     try {
       Push-Location $RepoRoot
-      try { node .\distribution\b2\revoke-grant.mjs --key-id ([string]$Grant.applicationKeyId) | Out-Null } finally { Pop-Location }
-    } catch { }
+      try {
+        node .\distribution\b2\revoke-grant.mjs --key-id ([string]$Grant.applicationKeyId) | Out-Null
+        if ($LASTEXITCODE -ne 0) { Write-Warning "Automatic cleanup could not revoke failed client grant $($Grant.applicationKeyId). Revoke it manually before reissuing." }
+      } finally { Pop-Location }
+    } catch { Write-Warning "Automatic cleanup could not revoke failed client grant $($Grant.applicationKeyId): $($_.Exception.Message)" }
   }
   throw
 } finally {

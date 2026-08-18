@@ -90,13 +90,19 @@ test("client distribution is 48-hour, link-first, bare-PC resilient, and optiona
   const bootstrap = await readFile(path.join(process.cwd(), "distribution/b2/bootstrap.ps1"), "utf8");
   const generator = await readFile(path.join(process.cwd(), "distribution/b2/new-client-installer.ps1"), "utf8");
   const grant = await readFile(path.join(process.cwd(), "distribution/b2/grant-release.mjs"), "utf8");
+  const revoke = await readFile(path.join(process.cwd(), "distribution/b2/revoke-grant.mjs"), "utf8");
   const install = await readFile(path.join(process.cwd(), "install.ps1"), "utf8");
 
   assert.match(generator, /ValidateRange\(300, 172800\)/);
   assert.match(generator, /TtlSeconds = 172800/);
   assert.match(generator, /Google Drive recommended/);
   assert.match(generator, /do not email \.cmd attachments/);
+  assert.match(generator, /\.openai-cc-private\\b2-issuer-credentials\.json/);
+  assert.match(generator, /Automatic cleanup could not revoke failed client grant/);
   assert.match(grant, /ttlSeconds > 172800/);
+  assert.match(revoke, /attempt <= 6/);
+  assert.match(revoke, /status === 400 \|\| status === 404/);
+  assert.match(revoke, /status === 429/);
   assert.match(bootstrap, /AddSeconds\(172860\)/);
   assert.match(client, /MaxGrantLifetimeSeconds = 172800/);
   assert.match(client, /Start-Transcript/);
