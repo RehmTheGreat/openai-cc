@@ -129,6 +129,18 @@ test("client distribution is 48-hour, link-first, bare-PC resilient, and optiona
   assert.doesNotMatch(install, /uv\s+tool\s+uninstall\s+free-claude-code/i);
 });
 
+test("B2 bootstrap bytes are canonical across Windows and Unix working-tree line endings", async () => {
+  const grant = await readFile(path.join(process.cwd(), "distribution/b2/grant-release.mjs"), "utf8");
+  const publish = await readFile(path.join(process.cwd(), "distribution/b2/publish-release.mjs"), "utf8");
+
+  assert.match(grant, /canonicalBootstrap/);
+  assert.match(grant, /replace\(\/\\r\\n\/g, "\\n"\)/);
+  assert.match(grant, /createHash\("sha256"\)\.update\(canonicalBootstrap, "utf8"\)/);
+  assert.match(publish, /bootstrapPublishPath/);
+  assert.match(publish, /replace\(\/\\r\\n\/g, "\\n"\)/);
+  assert.match(publish, /writeFile\(bootstrapPublishPath, canonicalBootstrap, "utf8"\)/);
+});
+
 test("fresh-install verification enforces current provider/model defaults without hardcoded model context", async () => {
   const install = await readFile(path.join(process.cwd(), "install.ps1"), "utf8");
 

@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { authorize, requireBucketScope, requireExactCapabilities, uploadFileWithRetry } from "./b2-client.mjs";
@@ -26,7 +26,12 @@ const bootstrapName = "bootstrap.ps1";
 const manifestPath = join(artifactRoot, manifestName);
 const installerPath = join(artifactRoot, installName);
 const bootstrapPath = resolve("distribution/b2", bootstrapName);
+const bootstrapPublishPath = join(artifactRoot, bootstrapName);
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+if (platform === "win32-x64") {
+  const canonicalBootstrap = (await readFile(bootstrapPath, "utf8")).replace(/\r\n/g, "\n");
+  await writeFile(bootstrapPublishPath, canonicalBootstrap, "utf8");
+}
 
 if (String(manifest.platform || "") !== platform) fail(`Manifest platform '${manifest.platform}' does not match requested publish platform '${platform}'.`);
 if (!/^[0-9a-f]{40}$/i.test(String(manifest.sourceCommit || ""))) fail("Manifest sourceCommit must be a 40-character Git SHA.");
@@ -60,7 +65,7 @@ const files = platform === "darwin-arm64"
       [bundleName, bundlePath],
     ]
   : [
-      [bootstrapName, bootstrapPath],
+      [bootstrapName, bootstrapPublishPath],
       [installName, installerPath],
       [manifestName, manifestPath],
       [bundleName, bundlePath],

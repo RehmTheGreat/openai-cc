@@ -1,8 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { authorize, apiJson, sha256File } from "./b2-client.mjs";
+import { authorize, apiJson } from "./b2-client.mjs";
 
 function fail(message) { throw new Error(message); }
 function arg(name) {
@@ -50,7 +50,9 @@ if (!created.applicationKeyId || !created.applicationKey || !created.expirationT
   fail("b2_create_key returned incomplete grant data.");
 }
 
-const bootstrapSha256 = await sha256File(resolve("distribution/b2/bootstrap.ps1"));
+const bootstrapText = await readFile(resolve("distribution/b2/bootstrap.ps1"), "utf8");
+const canonicalBootstrap = bootstrapText.replace(/\r\n/g, "\n");
+const bootstrapSha256 = createHash("sha256").update(canonicalBootstrap, "utf8").digest("hex");
 const output = {
   schemaVersion: 1,
   applicationKeyId: created.applicationKeyId,
