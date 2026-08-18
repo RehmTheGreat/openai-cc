@@ -161,7 +161,7 @@ const server = createServer(async (req, res) => {
       if (req.headers.authorization !== "account-issuer") return json(res, 401, { code: "unauthorized" });
       const body = await jsonBody(req);
       const ttl = Number(body.validDurationInSeconds);
-      if (body.accountId !== "account-ci" || JSON.stringify(body.capabilities) !== JSON.stringify(["readFiles"]) || JSON.stringify(body.bucketIds) !== JSON.stringify([bucketId]) || body.namePrefix !== releasePrefix || !Number.isInteger(ttl) || ttl < 60 || ttl > 3600) {
+      if (body.accountId !== "account-ci" || JSON.stringify(body.capabilities) !== JSON.stringify(["readFiles"]) || JSON.stringify(body.bucketIds) !== JSON.stringify([bucketId]) || body.namePrefix !== releasePrefix || !Number.isInteger(ttl) || ttl < 60 || ttl > 172800) {
         return json(res, 400, { code: "bad_request", message: "unexpected grant scope" });
       }
       generatedCounter += 1;

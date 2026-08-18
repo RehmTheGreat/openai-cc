@@ -2,8 +2,8 @@
 param(
   [string]$CredentialFile,
   [string]$OutputPath,
-  [ValidateRange(60, 3600)]
-  [int]$TtlSeconds = 3600
+  [ValidateRange(300, 172800)]
+  [int]$TtlSeconds = 172800
 )
 
 $ErrorActionPreference = "Stop"
@@ -75,7 +75,7 @@ const { tmpdir } = require("node:os");
 const dec=(n)=>Buffer.from(process.env[n],"base64").toString("utf8");
 const keyId=dec("OPENAI_CC_MAC_KEY_ID_B64"), key=dec("OPENAI_CC_MAC_KEY_B64"), bucketId=dec("OPENAI_CC_MAC_BUCKET_ID_B64"), prefix=dec("OPENAI_CC_MAC_PREFIX_B64");
 const expiry=Number(process.env.OPENAI_CC_MAC_EXPIRY), now=Date.now();
-if(!expiry||expiry<=now||expiry>now+3660000) throw new Error("This client installer is expired or has an invalid lifetime.");
+if(!expiry||expiry<=now||expiry>now+172860000) throw new Error("This client installer is expired or has an invalid lifetime.");
 const authorizeUrl=process.env.OPENAI_CC_B2_AUTHORIZE_URL||"https://api.backblazeb2.com/b2api/v4/b2_authorize_account";
 const authorize=new URL(authorizeUrl), local=["localhost","127.0.0.1","::1"].includes(authorize.hostname)||authorize.hostname.startsWith("127.");
 if(authorizeUrl!=="https://api.backblazeb2.com/b2api/v4/b2_authorize_account" && (!local||!["http:","https:"].includes(authorize.protocol))) throw new Error("Invalid B2 authorize URL override.");

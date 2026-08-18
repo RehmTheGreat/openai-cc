@@ -142,8 +142,12 @@ try {
   $launcher = Join-Path $script:CurrentRuntime "run-gateway.vbs"
   $shortcut.Arguments = "`"$launcher`""
 '@
-  if (-not $bootstrap.Contains($oldShortcut)) { throw "Bootstrap startup-shortcut template changed unexpectedly; refusing to emit a partially patched installer." }
-  $bootstrap = $bootstrap.Replace($oldShortcut, $newShortcut)
+  # Keep deterministic packaging independent of Git/PowerShell working-tree line endings.
+  $bootstrapNormalized = $bootstrap.Replace("`r`n", "`n")
+  $oldShortcutNormalized = $oldShortcut.Replace("`r`n", "`n")
+  $newShortcutNormalized = $newShortcut.Replace("`r`n", "`n")
+  if (-not $bootstrapNormalized.Contains($oldShortcutNormalized)) { throw "Bootstrap startup-shortcut template changed unexpectedly; refusing to emit a partially patched installer." }
+  $bootstrap = $bootstrapNormalized.Replace($oldShortcutNormalized, $newShortcutNormalized)
 
   $oldRequired = '@("dist\src\index.js", "dist\scripts\configure-clients.js", "dist\scripts\codex-doctor.js", "node_modules", "run-gateway.ps1", "run-claude.ps1", "uninstall.ps1")'
   $newRequired = '@("dist\src\index.js", "dist\scripts\configure-clients.js", "dist\scripts\codex-doctor.js", "node_modules", "run-gateway.ps1", "run-gateway.vbs", "run-claude.ps1", "uninstall.ps1")'

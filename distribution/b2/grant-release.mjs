@@ -16,7 +16,7 @@ const ttlRaw = arg("--ttl-seconds") || "900";
 if (!manifestPath || !outputPath) fail("Usage: node distribution/b2/grant-release.mjs --manifest <manifest.json> --output <private-grant.json> [--ttl-seconds 900]");
 
 const ttlSeconds = Number(ttlRaw);
-if (!Number.isInteger(ttlSeconds) || ttlSeconds < 60 || ttlSeconds > 3600) fail("Grant TTL must be an integer from 60 to 3600 seconds.");
+if (!Number.isInteger(ttlSeconds) || ttlSeconds < 60 || ttlSeconds > 172800) fail("Grant TTL must be an integer from 60 to 172800 seconds (48 hours).");
 
 const issuerId = process.env.B2_ISSUER_KEY_ID;
 const issuerKey = process.env.B2_ISSUER_KEY;

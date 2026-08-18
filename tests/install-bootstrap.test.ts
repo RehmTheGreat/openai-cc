@@ -84,6 +84,51 @@ test("client installer refreshes an existing Claude Desktop profile unless expli
   assert.match(client, /& \$rtk\.Source init -g --auto-patch --no-trust-filters \| Out-Host/);
   assert.doesNotMatch(client, /& \$rtk\.Source init -g \| Out-Host/);
 });
+
+test("client distribution is 48-hour, link-first, bare-PC resilient, and optional tooling cannot fail core", async () => {
+  const client = await readFile(path.join(process.cwd(), "distribution/b2/client-installer-template.ps1"), "utf8");
+  const bootstrap = await readFile(path.join(process.cwd(), "distribution/b2/bootstrap.ps1"), "utf8");
+  const generator = await readFile(path.join(process.cwd(), "distribution/b2/new-client-installer.ps1"), "utf8");
+  const grant = await readFile(path.join(process.cwd(), "distribution/b2/grant-release.mjs"), "utf8");
+  const install = await readFile(path.join(process.cwd(), "install.ps1"), "utf8");
+
+  assert.match(generator, /ValidateRange\(300, 172800\)/);
+  assert.match(generator, /TtlSeconds = 172800/);
+  assert.match(generator, /Google Drive recommended/);
+  assert.match(generator, /do not email \.cmd attachments/);
+  assert.match(grant, /ttlSeconds > 172800/);
+  assert.match(bootstrap, /AddSeconds\(172860\)/);
+  assert.match(client, /MaxGrantLifetimeSeconds = 172800/);
+  assert.match(client, /Start-Transcript/);
+
+  const bootstrapDownload = client.indexOf("Invoke-WebRequest -Uri $bootstrapUrl");
+  const optionalClaude = client.indexOf("Install-ClaudeCodeBestEffort | Out-Null");
+  assert.ok(bootstrapDownload >= 0 && optionalClaude > bootstrapDownload);
+
+  assert.match(client, /Invoke-ProbeCommand \$git\.Source @\("--version"\)/);
+  assert.match(client, /Invoke-ProbeCommand \$bash @\("--version"\)/);
+  assert.match(client, /bad image\|0xc0e90002\|application control\|blocked\|msys-2\\\.0\\\.dll/i);
+  assert.match(client, /CLAUDE_CODE_GIT_BASH_PATH/);
+  assert.match(client, /api\.github\.com\/repos\/git-for-windows\/git\/releases\/latest/);
+  assert.match(client, /Get-AuthenticodeSignature/);
+  assert.match(client, /@anthropic-ai\/claude-code/);
+  assert.match(client, /Optional RTK optimization skipped; OpenAI-CC remains installed/);
+  assert.match(client, /Refresh-InstalledClientConfigBestEffort/);
+  assert.match(client, /configure-clients\.js/);
+
+  assert.match(install, /Install-PortableNodeLts/);
+  assert.match(install, /https:\/\/nodejs\.org\/dist\/latest-v20\.x/);
+  assert.match(install, /SHASUMS256\.txt/);
+  assert.match(install, /Portable Node\.js download failed SHA-256 verification/);
+  assert.match(install, /SetEnvironmentVariable\("Path", \$next, "User"\)/);
+
+  assert.match(install, /Test-LegacyFccProcess/);
+  assert.match(install, /FCC Server\.lnk/);
+  assert.match(install, /Free Claude Code\.lnk/);
+  assert.match(install, /never prevent the new OpenAI-CC runtime from installing/);
+  assert.doesNotMatch(install, /uv\s+tool\s+uninstall\s+free-claude-code/i);
+});
+
 test("fresh-install verification enforces current provider/model defaults without hardcoded model context", async () => {
   const install = await readFile(path.join(process.cwd(), "install.ps1"), "utf8");
 
@@ -130,6 +175,8 @@ test("runtime bundle builder is production-only, manifest-driven, and independen
   assert.match(builder, /buildTimestamp/);
   assert.match(builder, /forbidden in @\("\.data", "\.git", "src", "tests", "setup\.ps1", "install\.ps1", "package-lock\.json"\)/);
   assert.match(builder, /Source maps leaked into the runtime bundle/);
+  assert.match(builder, /bootstrapNormalized/);
+  assert.match(builder, /Replace\(\"`r`n\", \"`n\"\)/);
   assert.doesNotMatch(builder, /Copy-RuntimeItem "\.data/);
   assert.doesNotMatch(builder, /Copy-RuntimeItem "package-lock\.json"/);
 });

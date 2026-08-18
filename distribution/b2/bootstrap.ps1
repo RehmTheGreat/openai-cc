@@ -184,7 +184,7 @@ try {
   $expiration = [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$expirationRaw)
   $now = [DateTimeOffset]::UtcNow
   if ($expiration -le $now) { throw "Distribution key is expired." }
-  if ($expiration -gt $now.AddSeconds(3660)) { throw "Distribution key lifetime exceeds the one-hour maximum." }
+  if ($expiration -gt $now.AddSeconds(172860)) { throw "Distribution key lifetime exceeds the 48-hour maximum." }
 
   Assert-ProductionDownloadUrl ([string]$storage.downloadUrl) $localFixture
 

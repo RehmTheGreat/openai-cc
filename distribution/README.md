@@ -10,9 +10,9 @@ The everyday client flow is intentionally two steps:
    .\distribution\b2\new-client-installer.ps1
    ```
 
-2. Send the generated `OpenAI-CC-Client-Installer-*.cmd` file privately to the client. The client double-clicks it before the displayed one-hour expiry.
+2. Upload the generated `OpenAI-CC-Client-Installer-*.cmd` to a private/shared download location (Google Drive is the recommended default) and send the client the link. Do **not** attach `.cmd` files directly to Gmail. The client double-clicks it before the displayed expiry (48 hours by default).
 
-The client needs Windows PowerShell and internet access, but does not need Git, GitHub, a PAT, a source checkout, Node.js setup, or any permanent distribution credential. The generated file contains only a one-release `readFiles` grant, verifies the private B2 bootstrap and the complete Session 6A runtime integrity chain, opens Admin after success, clears transport credentials, and deletes itself after a successful installation.
+The client needs 64-bit Windows, Windows PowerShell 5.1+, and internet access, but does not need Git, GitHub, a PAT, a source checkout, preinstalled Node.js, winget, or any permanent distribution credential for OpenAI-CC core. The generated file contains only a one-release `readFiles` grant, caches and verifies the private B2 bootstrap before optional tooling, verifies the complete Session 6A runtime integrity chain, installs a SHA-256-verified portable Node.js LTS fallback when winget is unavailable, opens Admin after success, clears transport credentials, writes a diagnostic install log, and deletes itself after a successful installation. If the user elects to install Claude Code, Git and Git Bash are separately health-checked and repaired because Claude Code on native Windows depends on Git Bash.
 
 The administrator helper automatically uses the newest private provisioning JSON in `%TEMP%`. Use `-CredentialFile <path>` only when selecting a different saved provisioning result intentionally. Run the helper again whenever another client needs an installer or the previous installer has expired.
 
@@ -24,7 +24,7 @@ private GitHub source repo
   -> private Backblaze B2 bucket
   -> short-lived readFiles-only application key
   -> target bootstrap
-  -> unchanged Session 6A deterministic installer
+  -> hardened deterministic installer
   -> %LOCALAPPDATA%\OpenAI-CC\.data remains target-local
 ```
 
@@ -110,7 +110,7 @@ Do **not** store this issuer credential in the runtime bundle, target `.data`, G
 - capability: `readFiles`;
 - bucket: the one distribution bucket;
 - `namePrefix`: one exact release directory;
-- expiry: 60–3600 seconds, default 900 seconds.
+- expiry: 60â€“172800 seconds (up to 48 hours); the one-click Windows and macOS generators default to 172800 seconds.
 
 Grant creation is bound to the exact checked-out Git commit. To authorize an older published release, first check out that exact source commit and use its matching manifest.
 
@@ -178,7 +178,7 @@ The first line authorizes directly with Backblaze, downloads only `bootstrap.ps1
 - key capability is exactly `readFiles`;
 - exactly one bucket is authorized;
 - the prefix matches one source-SHA-scoped OpenAI-CC release;
-- key expiry exists, is still in the future, and is no more than one hour away;
+- key expiry exists, is still in the future, and is no more than 48 hours away;
 - production download URL is HTTPS on a Backblaze domain;
 - B2 download SHA-1 headers are checked when present;
 - downloaded `install.ps1` SHA-256 equals the Session 6A manifest's `bootstrapSha256`;
@@ -211,7 +211,7 @@ node distribution/b2/revoke-grant.mjs --key-id '<temporary applicationKeyId>'
 
 Backblaze also stops accepting the application key for new authorization after its seconds-level expiry. Deleting the key prevents it from being used to mint another B2 account authorization token.
 
-Backblaze documents account authorization tokens as valid for **at most 24 hours**. Its public key-deletion documentation says that a deleted key is no longer valid for authorization, but does not promise that every authorization token already minted from that key is synchronously invalidated. Therefore this design does **not** claim instant revocation of a token an attacker obtained before key deletion. The mitigation is a very short application-key lifetime, one-release read-only scope, immediate credential clearing on the target, and deleting the key as soon as the install completes.
+Backblaze documents account authorization tokens as valid for **at most 24 hours**. Its public key-deletion documentation says that a deleted key is no longer valid for authorization, but does not promise that every authorization token already minted from that key is synchronously invalidated. Therefore this design does **not** claim instant revocation of a token an attacker obtained before key deletion. The mitigation is a maximum 48-hour application-key lifetime, one-release read-only scope, immediate credential clearing on the target, and deleting the key as soon as practical after the install completes.
 
 ## Security contract
 
@@ -219,13 +219,13 @@ Backblaze documents account authorization tokens as valid for **at most 24 hours
 
 **Where authorization is validated:** Backblaze validates the application key during `b2_authorize_account` and enforces its bucket/prefix/capability restriction on private file downloads. The local bootstrap independently rejects overbroad or expired application keys before installing anything.
 
-**Application-key lifetime:** 15 minutes by default; repository helper allows 60 seconds to one hour.
+**Application-key lifetime:** one-click client generators default to 48 hours; the grant helper allows 60 seconds to 48 hours. The key is still restricted to one immutable release prefix and `readFiles` only.
 
 **Authorization-token lifetime:** Backblaze documents `b2_authorize_account` tokens as valid for at most 24 hours. The bootstrap does not persist the token and clears it before launching OpenAI-CC.
 
 **Revocation:** `b2_delete_key` prevents the deleted application key from creating new authorization tokens. Expiry provides the automatic equivalent for new authorization. Already-issued B2 authorization tokens are treated conservatively as potentially usable until their own expiry because Backblaze does not document synchronous invalidation on key deletion.
 
-**Leaked credential effect:** before authorization, the leaked application key is limited to one bucket, one exact release prefix, `readFiles`, and its short expiry. If an attacker already exchanged it for an authorization token, that token remains restricted to the same read-only release scope but may remain usable until the B2 token itself expires. Neither credential is a GitHub credential or an inference credential.
+**Leaked credential effect:** before authorization, the leaked application key is limited to one bucket, one exact release prefix, `readFiles`, and its bounded expiry. If an attacker already exchanged it for an authorization token, that token remains restricted to the same read-only release scope but may remain usable until the B2 token itself expires. Neither credential is a GitHub credential or an inference credential.
 
 **Encryption:** the runtime bundle is access-controlled, not DRM-encrypted. HTTPS protects transport. A user who can execute the runtime can inspect its compiled files.
 

@@ -13,6 +13,13 @@ $BootstrapPath = Join-Path ([IO.Path]::GetTempPath()) ("openai-cc-bootstrap-" + 
 $BackupRoot = Join-Path ([IO.Path]::GetTempPath()) ("openai-cc-claude-backup-" + [Guid]::NewGuid().ToString("N"))
 $BackupCreated = $false
 $InstallSucceeded = $false
+$MaxGrantLifetimeSeconds = 172800
+$InstallLogPath = Join-Path ([IO.Path]::GetTempPath()) ("OpenAI-CC-Install-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".log")
+$TranscriptStarted = $false
+try {
+  Start-Transcript -Path $InstallLogPath -Force | Out-Null
+  $TranscriptStarted = $true
+} catch { }
 
 function Get-AuthorizeUrl {
   $candidate = [string]$env:OPENAI_CC_B2_AUTHORIZE_URL
@@ -68,14 +75,25 @@ function Refresh-ProcessPath {
 function Get-Winget {
   Refresh-ProcessPath
   $winget = Get-Command winget -ErrorAction SilentlyContinue
-  if (-not $winget) { throw "Windows Package Manager (winget) is required for client/tool setup." }
-  return $winget.Source
+  if ($winget) { return $winget.Source }
+
+  # A fresh Windows profile can have App Installer present but not registered yet.
+  try {
+    Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe -ErrorAction Stop
+  } catch { }
+  Refresh-ProcessPath
+  $winget = Get-Command winget -ErrorAction SilentlyContinue
+  if ($winget) { return $winget.Source }
+  return $null
 }
 
-function Install-WingetPackage([string]$Id, [string]$Label) {
+function Install-WingetPackage([string]$Id, [string]$Label, [switch]$Force) {
   $winget = Get-Winget
+  if (-not $winget) { throw "Windows Package Manager (winget) is unavailable." }
   Write-Host "Installing $Label..." -ForegroundColor Cyan
-  & $winget install --id $Id --exact --source winget --accept-package-agreements --accept-source-agreements --silent --disable-interactivity | Out-Host
+  $args = @("install", "--id", $Id, "--exact", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements", "--silent", "--disable-interactivity")
+  if ($Force) { $args += "--force" }
+  & $winget @args | Out-Host
   if ($LASTEXITCODE -ne 0) { throw "$Label installation failed (winget exit code $LASTEXITCODE)." }
   Refresh-ProcessPath
 }
@@ -109,22 +127,30 @@ function Find-CodeCli {
   return $null
 }
 
-function Invoke-CodeCommand([string]$CodePath, [string[]]$Arguments, [int]$TimeoutSeconds) {
-  $stdout = Join-Path ([IO.Path]::GetTempPath()) ("openai-cc-code-" + [Guid]::NewGuid().ToString("N") + ".out")
+function Invoke-ProbeCommand([string]$FilePath, [string[]]$Arguments, [int]$TimeoutSeconds = 10) {
+  $stdout = Join-Path ([IO.Path]::GetTempPath()) ("openai-cc-probe-" + [Guid]::NewGuid().ToString("N") + ".out")
   $stderr = "$stdout.err"
   $process = $null
   try {
-    $process = Start-Process -FilePath $CodePath -ArgumentList $Arguments -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    try {
+      $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    } catch {
+      return [pscustomobject]@{ timedOut = $false; exitCode = -1; output = $_.Exception.Message }
+    }
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
       Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-      return [pscustomobject]@{ timedOut = $true; exitCode = $null; output = "" }
+      return [pscustomobject]@{ timedOut = $true; exitCode = $null; output = "Timed out after $TimeoutSeconds seconds." }
     }
-    $text = ((Get-Content $stdout -Raw -ErrorAction SilentlyContinue) + "`n" + (Get-Content $stderr -Raw -ErrorAction SilentlyContinue)).Trim()
-    return [pscustomobject]@{ timedOut = $false; exitCode = $process.ExitCode; output = $text }
+    $combined = ((Get-Content $stdout -Raw -ErrorAction SilentlyContinue) + "`n" + (Get-Content $stderr -Raw -ErrorAction SilentlyContinue)).Trim()
+    return [pscustomobject]@{ timedOut = $false; exitCode = $process.ExitCode; output = $combined }
   } finally {
     Remove-Item $stdout, $stderr -Force -ErrorAction SilentlyContinue
     if ($process) { $process.Dispose() }
   }
+}
+
+function Invoke-CodeCommand([string]$CodePath, [string[]]$Arguments, [int]$TimeoutSeconds) {
+  return Invoke-ProbeCommand $CodePath $Arguments $TimeoutSeconds
 }
 
 function Install-ClaudeVsCode {
@@ -154,27 +180,216 @@ function Install-ClaudeVsCode {
   Write-Host "[OK] VS Code + Claude Code extension ready" -ForegroundColor Green
 }
 
+function Assert-ClientPreflight {
+  if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw "This installer requires native Windows." }
+  if (-not [Environment]::Is64BitOperatingSystem) { throw "This OpenAI-CC release requires 64-bit Windows." }
+  if ($PSVersionTable.PSVersion.Major -lt 5) { throw "Windows PowerShell 5.1 or newer is required." }
+  try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
+  try {
+    $driveName = ([IO.Path]::GetPathRoot([IO.Path]::GetTempPath())).TrimEnd('\').TrimEnd(':')
+    $drive = Get-PSDrive -Name $driveName -ErrorAction Stop
+    if ($drive.Free -lt 750MB) { throw "At least 750 MB of free disk space is required." }
+  } catch {
+    if ($_.Exception.Message -like "*750 MB*") { throw }
+    Write-Warning "Could not preflight free disk space; continuing."
+  }
+  Write-Host "Installer log: $InstallLogPath" -ForegroundColor DarkGray
+}
+
+function Find-GitBash {
+  Refresh-ProcessPath
+  $candidates = New-Object System.Collections.Generic.List[string]
+  foreach ($value in @(
+    [string]$env:CLAUDE_CODE_GIT_BASH_PATH,
+    [string][Environment]::GetEnvironmentVariable("CLAUDE_CODE_GIT_BASH_PATH", "User")
+  )) { if ($value) { $candidates.Add($value) } }
+
+  $git = Get-Command git -ErrorAction SilentlyContinue
+  if ($git) {
+    $root = Split-Path (Split-Path $git.Source -Parent) -Parent
+    $candidates.Add((Join-Path $root "bin\bash.exe"))
+    $candidates.Add((Join-Path $root "usr\bin\bash.exe"))
+  }
+  foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA)) {
+    if ($root) {
+      $candidates.Add((Join-Path $root "Git\bin\bash.exe"))
+      $candidates.Add((Join-Path $root "Programs\Git\bin\bash.exe"))
+    }
+  }
+  return $candidates | Where-Object { $_ -and (Test-Path $_ -PathType Leaf) } | Select-Object -First 1
+}
+
+function Get-GitHealth {
+  Refresh-ProcessPath
+  $git = Get-Command git -ErrorAction SilentlyContinue
+  if (-not $git) { return [pscustomobject]@{ healthy = $false; bashPath = $null; detail = "git.exe is missing." } }
+  $gitProbe = Invoke-ProbeCommand $git.Source @("--version") 10
+  if ($gitProbe.timedOut -or $gitProbe.exitCode -ne 0) {
+    return [pscustomobject]@{ healthy = $false; bashPath = $null; detail = "git.exe failed: $($gitProbe.output)" }
+  }
+
+  $bash = Find-GitBash
+  if (-not $bash) { return [pscustomobject]@{ healthy = $false; bashPath = $null; detail = "Git Bash is missing." } }
+  $bashProbe = Invoke-ProbeCommand $bash @("--version") 10
+  $bad = $bashProbe.output -match '(?i)bad image|0xc0e90002|application control|blocked|msys-2\.0\.dll'
+  if ($bashProbe.timedOut -or $bashProbe.exitCode -ne 0 -or $bad) {
+    return [pscustomobject]@{ healthy = $false; bashPath = $bash; detail = "Git Bash failed: $($bashProbe.output)" }
+  }
+  return [pscustomobject]@{ healthy = $true; bashPath = $bash; detail = ($gitProbe.output + "; " + $bashProbe.output) }
+}
+
+function Install-GitFromOfficialRelease {
+  Write-Host "winget repair was unavailable/unsuccessful; downloading the official Git for Windows installer..." -ForegroundColor Yellow
+  $release = Invoke-RestMethod -Uri "https://api.github.com/repos/git-for-windows/git/releases/latest" -Headers @{ "User-Agent" = "OpenAI-CC-Installer" } -TimeoutSec 60
+  $asset = @($release.assets | Where-Object { $_.name -match '^Git-[0-9].*-64-bit\.exe$' }) | Select-Object -First 1
+  if (-not $asset -or -not $asset.browser_download_url) { throw "Could not resolve the latest official Git for Windows x64 installer." }
+  $installer = Join-Path ([IO.Path]::GetTempPath()) ("openai-cc-git-" + [Guid]::NewGuid().ToString("N") + ".exe")
+  try {
+    Invoke-WebRequest -Uri ([string]$asset.browser_download_url) -OutFile $installer -UseBasicParsing -TimeoutSec 300
+    $signature = Get-AuthenticodeSignature -FilePath $installer
+    if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
+      throw "Downloaded Git for Windows installer does not have a valid Authenticode signature ($($signature.Status))."
+    }
+    $process = Start-Process -FilePath $installer -ArgumentList @("/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES", "/SP-", "/CLOSEAPPLICATIONS") -Wait -PassThru
+    if ($process.ExitCode -ne 0) { throw "Git for Windows installer failed with exit code $($process.ExitCode)." }
+  } finally {
+    Remove-Item $installer -Force -ErrorAction SilentlyContinue
+  }
+  Refresh-ProcessPath
+}
+
+function Ensure-GitForClaude {
+  $health = Get-GitHealth
+  if (-not $health.healthy) {
+    Write-Warning "Existing Git for Windows is missing or unhealthy: $($health.detail)"
+    if (Get-Winget) {
+      try { Install-WingetPackage "Git.Git" "Git for Windows repair" -Force } catch { Write-Warning $_.Exception.Message }
+    }
+    $health = Get-GitHealth
+    if (-not $health.healthy) {
+      Install-GitFromOfficialRelease
+      $health = Get-GitHealth
+    }
+  }
+  if (-not $health.healthy -or -not $health.bashPath) { throw "Git for Windows/Git Bash is still unusable after repair: $($health.detail)" }
+  $env:CLAUDE_CODE_GIT_BASH_PATH = [string]$health.bashPath
+  [Environment]::SetEnvironmentVariable("CLAUDE_CODE_GIT_BASH_PATH", [string]$health.bashPath, "User")
+  Write-Host "[OK] Git and Git Bash verified: $($health.bashPath)" -ForegroundColor Green
+}
+
+function Ensure-RipgrepBestEffort {
+  if (Get-Command rg -ErrorAction SilentlyContinue) { Write-Host "[OK] ripgrep already installed" -ForegroundColor Green; return }
+  try { Install-WingetPackage "BurntSushi.ripgrep.MSVC" "ripgrep" }
+  catch { Write-Warning "Optional ripgrep setup skipped: $($_.Exception.Message)" }
+}
+
+function Ensure-RtkBestEffort {
+  try {
+    Refresh-ProcessPath
+    $rtk = Get-Command rtk -ErrorAction SilentlyContinue
+    if (-not $rtk) {
+      Install-WingetPackage "rtk-ai.rtk" "RTK"
+      Refresh-ProcessPath
+      $rtk = Get-Command rtk -ErrorAction SilentlyContinue
+    }
+    if (-not $rtk) { throw "rtk is not available on PATH." }
+    & $rtk.Source telemetry disable | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "telemetry opt-out failed (exit code $LASTEXITCODE)." }
+    & $rtk.Source init -g --auto-patch --no-trust-filters | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "initialization failed (exit code $LASTEXITCODE)." }
+    Write-Host "[OK] RTK initialized" -ForegroundColor Green
+  } catch {
+    Write-Warning "Optional RTK optimization skipped; OpenAI-CC remains installed: $($_.Exception.Message)"
+  }
+}
+
+function Install-ClaudeCodeBestEffort {
+  try {
+    Ensure-GitForClaude
+    if (-not (Test-ClaudeCodeInstalled)) {
+      $installed = $false
+      if (Get-Winget) {
+        try {
+          Install-WingetPackage "Anthropic.ClaudeCode" "Claude Code"
+          $installed = Test-ClaudeCodeInstalled
+        } catch { Write-Warning "winget Claude Code install failed: $($_.Exception.Message)" }
+      }
+      if (-not $installed) {
+        Refresh-ProcessPath
+        $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+        if (-not $npm) { $npm = Get-Command npm -ErrorAction SilentlyContinue }
+        if (-not $npm) { throw "npm is unavailable for the official Claude Code fallback install." }
+        Write-Host "Installing Claude Code through the official npm package fallback..." -ForegroundColor Cyan
+        & $npm.Source install -g @anthropic-ai/claude-code --no-fund --no-audit | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "npm Claude Code install failed (exit code $LASTEXITCODE)." }
+        Refresh-ProcessPath
+      }
+    }
+    if (-not (Test-ClaudeCodeInstalled)) { throw "Claude Code is still unavailable after installation." }
+    $command = Get-Command claude -ErrorAction SilentlyContinue
+    if ($command) {
+      $probe = Invoke-ProbeCommand $command.Source @("--version") 15
+      if ($probe.timedOut -or $probe.exitCode -ne 0) { throw "Claude Code executable failed verification: $($probe.output)" }
+    }
+    Write-Host "[OK] Claude Code ready" -ForegroundColor Green
+    return $true
+  } catch {
+    Write-Warning "Claude Code could not be prepared; OpenAI-CC core remains installed: $($_.Exception.Message)"
+    return $false
+  }
+}
+
+function Install-ClaudeDesktopBestEffort {
+  try {
+    if (Test-ClaudeDesktopInstalled) { Write-Host "[OK] Claude Desktop already installed" -ForegroundColor Green; return $true }
+    Install-WingetPackage "Anthropic.Claude" "Claude Desktop"
+    if (-not (Test-ClaudeDesktopInstalled)) { throw "Claude Desktop is unavailable after installation." }
+    Write-Host "[OK] Claude Desktop ready" -ForegroundColor Green
+    return $true
+  } catch {
+    Write-Warning "Claude Desktop could not be prepared; OpenAI-CC core remains installed: $($_.Exception.Message)"
+    return $false
+  }
+}
+
+function Refresh-InstalledClientConfigBestEffort {
+  try {
+    $installRoot = [string]$env:OPENAI_CC_CLIENT_INSTALL_ROOT
+    if (-not $installRoot) {
+      $local = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $HOME "AppData\Local" }
+      $installRoot = Join-Path $local "OpenAI-CC"
+    }
+    $installRoot = [IO.Path]::GetFullPath($installRoot)
+    $runtime = Join-Path $installRoot "current"
+    $configure = Join-Path $runtime "dist\scripts\configure-clients.js"
+    if (-not (Test-Path $configure -PathType Leaf)) { throw "Installed client configuration helper is missing." }
+
+    Refresh-ProcessPath
+    $node = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $node) {
+      $portableNode = Join-Path $installRoot "tools\node\node.exe"
+      if (Test-Path $portableNode -PathType Leaf) { $node = [pscustomobject]@{ Source = $portableNode } }
+    }
+    if (-not $node) { throw "Node.js is unavailable for post-install client configuration." }
+
+    $env:OPENAI_CC_HOME = $installRoot
+    $env:OPENAI_CC_RUNTIME_ROOT = $runtime
+    $env:DATA_DIR = Join-Path $installRoot ".data"
+    $env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8082"
+    $env:OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP = if (Test-ClaudeDesktopInstalled) { "1" } else { "0" }
+    & $node.Source $configure | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Client configuration refresh failed (exit code $LASTEXITCODE)." }
+    Write-Host "[OK] Claude client configuration refreshed after optional installs" -ForegroundColor Green
+  } catch {
+    Write-Warning "Post-install Claude client configuration refresh skipped; OpenAI-CC core remains installed: $($_.Exception.Message)"
+  }
+}
+
 function Ensure-CoreTools {
+  # These are productivity extras, not OpenAI-CC core dependencies.
   if ([string]$env:CI -eq "true") { return }
-  Refresh-ProcessPath
-  if (Get-Command git -ErrorAction SilentlyContinue) { Write-Host "[OK] Git already installed" -ForegroundColor Green }
-  else { Install-WingetPackage "Git.Git" "Git for Windows" }
-
-  if (Get-Command rg -ErrorAction SilentlyContinue) { Write-Host "[OK] ripgrep already installed" -ForegroundColor Green }
-  else { Install-WingetPackage "BurntSushi.ripgrep.MSVC" "ripgrep" }
-
-  if (Get-Command rtk -ErrorAction SilentlyContinue) { Write-Host "[OK] RTK already installed" -ForegroundColor Green }
-  else { Install-WingetPackage "rtk-ai.rtk" "RTK" }
-
-  Refresh-ProcessPath
-  $rtk = Get-Command rtk -ErrorAction SilentlyContinue
-  if (-not $rtk) { throw "RTK installed but rtk is not available on PATH." }
-  # Default RTK telemetry consent to No and keep client installs fully noninteractive.
-  & $rtk.Source telemetry disable | Out-Host
-  if ($LASTEXITCODE -ne 0) { throw "RTK telemetry opt-out failed (exit code $LASTEXITCODE)." }
-  & $rtk.Source init -g --auto-patch --no-trust-filters | Out-Host
-  if ($LASTEXITCODE -ne 0) { throw "RTK initialization failed (exit code $LASTEXITCODE)." }
-  Write-Host "[OK] RTK initialized" -ForegroundColor Green
+  Ensure-RipgrepBestEffort
+  Ensure-RtkBestEffort
 }
 
 function Copy-Tree([string]$Source, [string]$Destination) {
@@ -239,29 +454,18 @@ function Restore-ClaudeData([bool]$Rollback) {
 }
 
 try {
+  Assert-ClientPreflight
   $now = [DateTimeOffset]::UtcNow
   $expires = [DateTimeOffset]::FromUnixTimeMilliseconds($ExpirationTimestamp)
   if ($expires -le $now) { throw "This client installer has expired. Ask for a new OpenAI-CC installer." }
-  if ($expires -gt $now.AddSeconds(3660)) { throw "Client installer lifetime exceeds the one-hour maximum." }
+  if ($expires -gt $now.AddSeconds($MaxGrantLifetimeSeconds + 60)) { throw "Client installer lifetime exceeds the 48-hour maximum." }
 
-  $wantClaudeCode = Get-Choice "OPENAI_CC_CLIENT_INSTALL_CLAUDE_CODE" "Install/ensure Claude Code?"
-  $wantClaudeDesktop = Get-Choice "OPENAI_CC_CLIENT_INSTALL_CLAUDE_DESKTOP" "Install/ensure Claude Desktop?"
-  $wantVsCode = Get-Choice "OPENAI_CC_CLIENT_INSTALL_VSCODE" "Install/ensure VS Code + Claude Code extension?"
-
-  Write-Host "Installing OpenAI-CC..." -ForegroundColor Cyan
+  Write-Host "Preparing OpenAI-CC core first so optional Windows setup cannot consume the download window..." -ForegroundColor Cyan
   Backup-ClaudeData
-  Ensure-CoreTools
 
-  if ($wantClaudeCode) {
-    if (Test-ClaudeCodeInstalled) { Write-Host "[OK] Claude Code already installed" -ForegroundColor Green }
-    else { Install-WingetPackage "Anthropic.ClaudeCode" "Claude Code" }
-  }
-  if ($wantClaudeDesktop) {
-    if (Test-ClaudeDesktopInstalled) { Write-Host "[OK] Claude Desktop already installed" -ForegroundColor Green }
-    else { Install-WingetPackage "Anthropic.Claude" "Claude Desktop" }
-  }
-  if ($wantVsCode) { Install-ClaudeVsCode }
-
+  # Authenticate and cache the immutable, SHA-verified bootstrap before doing
+  # any optional Git/Claude/VS Code/RTK setup. bootstrap.ps1 itself downloads
+  # the complete verified runtime bundle before it installs Node or mutates runtime state.
   $authorizeUrl = Get-AuthorizeUrl
   $authorizeUri = [Uri]$authorizeUrl
   $localFixture = $authorizeUri.IsLoopback
@@ -301,10 +505,28 @@ try {
   } finally { $ErrorActionPreference = $previousErrorActionPreference }
   if ($installerExitCode -ne 0) { throw "OpenAI-CC installation failed with exit code $installerExitCode." }
 
+  # From this point onward OpenAI-CC core is successful. Optional client tooling
+  # is deliberately best-effort and cannot turn a working core install into failure.
   $script:InstallSucceeded = $true
+  Write-Host "[OK] OpenAI-CC core installed and verified." -ForegroundColor Green
+
+  $wantClaudeCode = Get-Choice "OPENAI_CC_CLIENT_INSTALL_CLAUDE_CODE" "Install/ensure Claude Code?"
+  $wantClaudeDesktop = Get-Choice "OPENAI_CC_CLIENT_INSTALL_CLAUDE_DESKTOP" "Install/ensure Claude Desktop?"
+  $wantVsCode = Get-Choice "OPENAI_CC_CLIENT_INSTALL_VSCODE" "Install/ensure VS Code + Claude Code extension?"
+
+  if ($wantClaudeCode) { Install-ClaudeCodeBestEffort | Out-Null }
+  if ($wantClaudeDesktop) { Install-ClaudeDesktopBestEffort | Out-Null }
+  if ($wantVsCode) {
+    try { Install-ClaudeVsCode }
+    catch { Write-Warning "VS Code integration skipped; OpenAI-CC core remains installed: $($_.Exception.Message)" }
+  }
+  Ensure-CoreTools
+  Refresh-InstalledClientConfigBestEffort
+
   Restore-ClaudeData $false
-  Write-Host "[OK] OpenAI-CC installed successfully." -ForegroundColor Green
+  Write-Host "[OK] OpenAI-CC installation finished." -ForegroundColor Green
   Write-Host "Admin: http://127.0.0.1:8082/admin" -ForegroundColor Green
+  Write-Host "Installer log: $InstallLogPath" -ForegroundColor DarkGray
   if ($wantVsCode -and $wantClaudeDesktop) { Write-Host "VS Code and Desktop session histories are separate by Anthropic design; both were preserved." -ForegroundColor DarkGray }
   if ($env:OPENAI_CC_CLIENT_NO_OPEN_ADMIN -ne "1") { Start-Process "http://127.0.0.1:8082/admin" }
   $ExitCode = 0
@@ -320,6 +542,8 @@ try {
   $auth = $null
   Remove-Item $BootstrapPath -Force -ErrorAction SilentlyContinue
   Remove-Item $BackupRoot -Recurse -Force -ErrorAction SilentlyContinue
+  Write-Host "Installer log: $InstallLogPath" -ForegroundColor DarkGray
+  if ($TranscriptStarted) { try { Stop-Transcript | Out-Null } catch { } }
 }
 
 exit $ExitCode

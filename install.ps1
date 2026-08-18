@@ -53,6 +53,49 @@ function Get-Sha256([string]$PathValue) {
   return (Get-FileHash -Algorithm SHA256 -Path $PathValue).Hash.ToLowerInvariant()
 }
 
+
+function Add-UserPathEntry([string]$Entry) {
+  if (-not $Entry) { return }
+  $current = [string][Environment]::GetEnvironmentVariable("Path", "User")
+  $parts = @($current -split ';' | Where-Object { $_ })
+  if ($parts | Where-Object { $_.TrimEnd('\') -ieq $Entry.TrimEnd('\') }) { return }
+  $next = (@($Entry) + $parts) -join ';'
+  [Environment]::SetEnvironmentVariable("Path", $next, "User")
+}
+
+function Install-PortableNodeLts {
+  Write-Host "winget is unavailable/unusable; installing a verified portable Node.js LTS runtime..." -ForegroundColor Yellow
+  $baseUrl = "https://nodejs.org/dist/latest-v20.x"
+  $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("openai-cc-node-" + [Guid]::NewGuid().ToString("N"))
+  $toolsRoot = Join-Path $script:ManagedRoot "tools"
+  $nodeRoot = Join-Path $toolsRoot "node"
+  New-Item -ItemType Directory -Force -Path $tempRoot, $toolsRoot | Out-Null
+  try {
+    $sumsPath = Join-Path $tempRoot "SHASUMS256.txt"
+    Invoke-WebRequest -Uri "$baseUrl/SHASUMS256.txt" -OutFile $sumsPath -UseBasicParsing -TimeoutSec 60
+    $sums = Get-Content $sumsPath -Raw
+    $match = [regex]::Match($sums, '(?mi)^([0-9a-f]{64})\s+(node-v20\.[0-9.]+-win-x64\.zip)$')
+    if (-not $match.Success) { throw "Could not resolve the current Node.js 20 x64 archive from SHASUMS256.txt." }
+    $expectedSha = $match.Groups[1].Value.ToLowerInvariant()
+    $archiveName = $match.Groups[2].Value
+    $archivePath = Join-Path $tempRoot $archiveName
+    Invoke-WebRequest -Uri "$baseUrl/$archiveName" -OutFile $archivePath -UseBasicParsing -TimeoutSec 180
+    if ((Get-Sha256 $archivePath) -ne $expectedSha) { throw "Portable Node.js download failed SHA-256 verification." }
+
+    $extractRoot = Join-Path $tempRoot "extract"
+    Expand-Archive -Path $archivePath -DestinationPath $extractRoot -Force
+    $sourceDir = Get-ChildItem $extractRoot -Directory | Select-Object -First 1
+    if (-not $sourceDir -or -not (Test-Path (Join-Path $sourceDir.FullName "node.exe"))) { throw "Portable Node.js archive layout is invalid." }
+    if (Test-Path $nodeRoot) { Remove-Item $nodeRoot -Recurse -Force }
+    Move-Item $sourceDir.FullName $nodeRoot
+    Add-UserPathEntry $nodeRoot
+    $env:Path = "$nodeRoot;$env:Path"
+    Write-Host "[OK] Verified portable Node.js installed under OpenAI-CC tools" -ForegroundColor Green
+  } finally {
+    Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Get-ContentDigest([object[]]$Files) {
   $canonical = (($Files | Sort-Object path | ForEach-Object { "$($_.path)|$($_.sha256)|$($_.size)" }) -join "`n") + "`n"
   $algorithm = [Security.Cryptography.SHA256]::Create()
@@ -81,14 +124,30 @@ function Ensure-Node {
 
   if ($needsInstall) {
     $winget = Get-Command winget -ErrorAction SilentlyContinue
-    if (-not $winget) { throw "Node.js $MinimumNodeVersion or newer is required. Install Node.js LTS or Microsoft App Installer/winget, then rerun. Git is not required." }
-    $verb = if ($node) { "upgrade" } else { "install" }
-    Invoke-Native $winget.Source @($verb, "--id", "OpenJS.NodeJS.LTS", "--exact", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements", "--silent", "--disable-interactivity") "Node.js LTS $verb failed"
-    Refresh-ProcessPath
-    $node = Get-Command node -ErrorAction SilentlyContinue
+    if ($winget) {
+      $verb = if ($node) { "upgrade" } else { "install" }
+      try {
+        Invoke-Native $winget.Source @($verb, "--id", "OpenJS.NodeJS.LTS", "--exact", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements", "--silent", "--disable-interactivity") "Node.js LTS $verb failed"
+      } catch {
+        Write-Warning "winget could not prepare Node.js: $($_.Exception.Message)"
+      }
+      Refresh-ProcessPath
+      $node = Get-Command node -ErrorAction SilentlyContinue
+      if ($node) {
+        try {
+          $candidateVersion = [Version]((& $node.Source --version).Trim().TrimStart('v'))
+          if ($candidateVersion -lt $MinimumNodeVersion) { $node = $null }
+        } catch { $node = $null }
+      }
+    }
+    if (-not $node) {
+      Install-PortableNodeLts
+      Refresh-ProcessPath
+      $node = Get-Command node -ErrorAction SilentlyContinue
+    }
   }
 
-  if (-not $node) { throw "Node.js is unavailable after dependency setup." }
+  if (-not $node) { throw "Node.js is unavailable after both winget and portable fallback setup." }
   $version = [Version]((& $node.Source --version).Trim().TrimStart('v'))
   if ($version -lt $MinimumNodeVersion) { throw "Node.js $MinimumNodeVersion or newer is required; found $version." }
   $script:NodeCommand = $node.Source
@@ -235,6 +294,40 @@ function Get-PortListener {
   try { return Get-NetTCPConnection -LocalPort 8082 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 } catch { return $null }
 }
 
+function Test-LegacyFccProcess([object]$Info) {
+  if (-not $Info -or -not $Info.CommandLine) { return $false }
+  return [bool]($Info.CommandLine -match '(?i)(?:free-claude-code|fcc-server|[\\/]\.local[\\/]bin[\\/]fcc(?:-server)?(?:\.exe)?\b)')
+}
+
+function Remove-LegacyFccStartupArtifacts {
+  # Migration is intentionally file/registration based. Never execute the old
+  # uv/free-claude-code binaries: App Control may block them, and cleanup must
+  # never prevent the new OpenAI-CC runtime from installing.
+  $startup = [Environment]::GetFolderPath("Startup")
+  if ($startup) {
+    foreach ($name in @("FCC Server.lnk", "Free Claude Code.lnk")) {
+      $path = Join-Path $startup $name
+      if (Test-Path $path) { Remove-Item $path -Force -ErrorAction SilentlyContinue }
+    }
+  }
+
+  $programs = [Environment]::GetFolderPath("Programs")
+  if ($programs) {
+    foreach ($name in @("FCC Server.lnk", "Free Claude Code.lnk")) {
+      $path = Join-Path $programs $name
+      if (Test-Path $path) { Remove-Item $path -Force -ErrorAction SilentlyContinue }
+    }
+  }
+
+  $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+  if (Test-Path $runKey) {
+    foreach ($name in @("FCC Server", "Free Claude Code")) {
+      Remove-ItemProperty -Path $runKey -Name $name -ErrorAction SilentlyContinue
+    }
+  }
+  Write-Host "[OK] Legacy FCC startup entries neutralized without running old executables" -ForegroundColor Green
+}
+
 function Stop-ManagedRuntime {
   Write-Step "Stop managed runtime"
   $listener = Get-PortListener
@@ -248,10 +341,15 @@ function Stop-ManagedRuntime {
       try { $managedByHealth = ([IO.Path]::GetFullPath([string]$health.installRoot).TrimEnd('\') -ieq $script:ManagedRoot) } catch { }
     }
     $managedByCommand = [bool]($info -and $info.CommandLine -and $info.CommandLine.IndexOf($script:ManagedRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $info.CommandLine -match '(?i)dist[\\/]src[\\/]index\.js')
-    if (-not $managedByHealth -and -not $managedByCommand) {
+    $legacyFcc = Test-LegacyFccProcess $info
+    if (-not $managedByHealth -and -not $managedByCommand -and -not $legacyFcc) {
       throw "Port 8082 is occupied by unrelated PID $pidValue. Refusing to terminate it."
     }
-    Write-Host "Stopping managed OpenAI-CC PID $pidValue" -ForegroundColor Yellow
+    if ($legacyFcc) {
+      Write-Host "Stopping legacy FCC PID $pidValue so OpenAI-CC can take over port 8082" -ForegroundColor Yellow
+    } else {
+      Write-Host "Stopping managed OpenAI-CC PID $pidValue" -ForegroundColor Yellow
+    }
     & taskkill.exe /PID $pidValue /T /F | Out-Null
   }
 
@@ -334,6 +432,7 @@ $script:LegacyStartupShortcutTemplate = @'
 '@
 
 function Install-StartupShortcut {
+  Remove-LegacyFccStartupArtifacts
   if ($NoStartupShortcut) { return }
 
   $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"

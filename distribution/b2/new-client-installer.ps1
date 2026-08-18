@@ -2,8 +2,8 @@
 param(
   [string]$CredentialFile,
   [string]$OutputPath,
-  [ValidateRange(60, 3600)]
-  [int]$TtlSeconds = 3600
+  [ValidateRange(300, 172800)]
+  [int]$TtlSeconds = 172800
 )
 
 $ErrorActionPreference = "Stop"
@@ -188,7 +188,7 @@ exit $LASTEXITCODE
   Write-Host "[OK] One-click client installer created." -ForegroundColor Green
   Write-Host "File:    $OutputPath"
   Write-Host "Expires: $($expiresLocal.ToString('yyyy-MM-dd HH:mm:ss zzz'))"
-  Write-Host "Send this one file privately and have the client double-click it before expiry."
+  Write-Host "Share this file through a secure download link (Google Drive recommended); do not email .cmd attachments."
   Write-Host "It contains only a temporary one-release read grant and deletes itself after a successful install."
 } catch {
   if ($Created -and $Grant -and $Grant.applicationKeyId) {

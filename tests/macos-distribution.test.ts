@@ -43,7 +43,8 @@ test("macOS client generator reuses the existing short-lived B2 grant contract",
 
   assert.match(generator, /grant-release\.mjs/);
   assert.match(generator, /readFiles/);
-  assert.match(generator, /3660000/);
+  assert.match(generator, /ValidateRange\(300, 172800\)/);
+  assert.match(generator, /172860000/);
   assert.match(generator, /openai-cc-runtime-manifest-darwin-arm64\.json/);
   assert.match(generator, /installerSha256/);
   assert.match(generator, /\.command/);
