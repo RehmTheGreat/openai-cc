@@ -88,7 +88,7 @@ Managed layout:
 
 The installer verifies the bundle/build identity, preserves `.data`, stops only a process proven to be the managed OpenAI-CC gateway, atomically swaps `current`, refreshes client configuration, starts the new runtime, and verifies it. An unrelated process on port 8082 is never killed.
 
-The Windows Startup shortcut starts OpenAI-CC at sign-in. There is no crash watchdog that continually resurrects the process; manually killing the gateway leaves it stopped until the user starts it again or signs in again.
+Windows startup uses an explicitly enabled per-user `HKCU\...\Run` entry that launches PowerShell directly, plus a delayed per-user Task Scheduler logon trigger as an independent fallback. Both are one-shot sign-in mechanisms, not crash watchdogs: manually killing the gateway leaves it stopped until the user starts it again or signs in again.
 
 Uninstall:
 
