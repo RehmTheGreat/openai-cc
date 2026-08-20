@@ -5,14 +5,14 @@ on:
     paths:
       - "install.ps1"
       - "uninstall.ps1"
-      - "run-gateway.vbs"
+      - "run-gateway.ps1"
       - "scripts/build-runtime-bundle.ps1"
       - ".github/workflows/windows-startup-ci.yml"
   pull_request:
     paths:
       - "install.ps1"
       - "uninstall.ps1"
-      - "run-gateway.vbs"
+      - "run-gateway.ps1"
       - "scripts/build-runtime-bundle.ps1"
       - ".github/workflows/windows-startup-ci.yml"
 
@@ -57,6 +57,23 @@ jobs:
           if (-not (Test-Path (Join-Path $out ([string]$manifest.bundleUrl)))) { throw "Bundle referenced by manifest is missing" }
           "BUNDLE_DIR=$out" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Seed the exact stale-disabled state the old installer missed
+        shell: powershell
+        run: |
+          $valueName = "OpenAI-CC Gateway"
+          $approvedKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+          New-Item -Path $approvedKey -Force | Out-Null
+          $disabled = [byte[]](0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+          New-ItemProperty -Path $approvedKey -Name $valueName -Value $disabled -PropertyType Binary -Force | Out-Null
+
+          Import-Module ScheduledTasks
+          $userId = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+          $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" -Argument "/d /c exit 99"
+          $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
+          $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
+          Register-ScheduledTask -TaskName $valueName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+          Disable-ScheduledTask -TaskName $valueName | Out-Null
+
       - name: Install with logon startup enabled
         shell: powershell
         run: |
@@ -67,32 +84,50 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Startup-enabled bundle install failed" }
           "INSTALL_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Verify HKCU startup registration and launcher restart
+      - name: Verify startup registrations are enabled and independent of WScript
         shell: powershell
         run: |
-          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
           $valueName = "OpenAI-CC Gateway"
-          $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
-          $launcher = Join-Path $env:INSTALL_ROOT "current\run-gateway.vbs"
-          $expected = "`"$wscript`" `"$launcher`""
-          $actual = [string](Get-ItemPropertyValue -Path $runKey -Name $valueName -ErrorAction Stop)
-          if ($actual -ne $expected) { throw "HKCU startup value mismatch. Expected '$expected', got '$actual'." }
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          $approvedKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+          $runCommand = [string](Get-ItemPropertyValue -Path $runKey -Name $valueName -ErrorAction Stop)
+          if ($runCommand -notmatch '(?i)WindowsPowerShell\\v1\.0\\powershell\.exe') { throw "HKCU Run no longer invokes Windows PowerShell directly." }
+          if ($runCommand -notmatch '(?i)run-gateway\.ps1') { throw "HKCU Run does not reference run-gateway.ps1." }
+          if ($runCommand -notmatch '(?i)-NodePath') { throw "HKCU Run does not pin the installer-verified Node path." }
+          if ($runCommand -match '(?i)wscript|\.vbs') { throw "HKCU Run still depends on Windows Script Host/VBS." }
 
+          $approved = [byte[]](Get-ItemPropertyValue -Path $approvedKey -Name $valueName -ErrorAction Stop)
+          if ($approved.Length -lt 1 -or $approved[0] -ne 0x02) { throw "StartupApproved did not transition from stale-disabled to enabled." }
+
+          $task = Get-ScheduledTask -TaskName $valueName -ErrorAction Stop
+          if ([string]$task.State -eq "Disabled") { throw "Scheduled logon fallback remained disabled." }
+          $actions = @($task.Actions)
+          if ($actions.Count -ne 1) { throw "Scheduled logon fallback has an unexpected action count." }
+          $taskExecute = [Environment]::ExpandEnvironmentVariables([string]$actions[0].Execute)
+          $taskExecute = [IO.Path]::GetFullPath($taskExecute)
+          $taskCommand = "`"$taskExecute`" $([string]$actions[0].Arguments)"
+          if ($taskCommand -ne $runCommand) { throw "Task Scheduler and HKCU Run do not use the same verified launcher." }
+
+          if (Test-Path (Join-Path $env:INSTALL_ROOT "current\run-gateway.vbs")) {
+            throw "Obsolete VBS launcher leaked into the runtime bundle."
+          }
           $startup = [Environment]::GetFolderPath("Startup")
           if ($startup -and (Test-Path (Join-Path $startup "OpenAI-CC Gateway.lnk"))) {
-            throw "Legacy Startup-folder shortcut still exists after registry startup registration."
+            throw "Obsolete Startup-folder shortcut still exists."
           }
+          Write-Host "[OK] stale StartupApproved/task state was repaired; PowerShell Run + delayed Task Scheduler fallback are enabled."
 
+      - name: Exercise the scheduled-task startup path from a fully stopped gateway
+        shell: powershell
+        run: |
+          $valueName = "OpenAI-CC Gateway"
           $health = Invoke-RestMethod http://127.0.0.1:8082/healthz -TimeoutSec 5
-          if (-not $health.ok) { throw "Gateway was unhealthy before restart test." }
-          if ([IO.Path]::GetFullPath([string]$health.installRoot).TrimEnd('\') -ine [IO.Path]::GetFullPath($env:INSTALL_ROOT).TrimEnd('\')) {
-            throw "Gateway health installRoot does not match startup test root."
-          }
           taskkill.exe /PID ([int]$health.pid) /T /F | Out-Null
+          Start-Sleep -Milliseconds 500
 
-          Start-Process -FilePath $wscript -ArgumentList @("`"$launcher`"") -WindowStyle Hidden | Out-Null
+          Start-ScheduledTask -TaskName $valueName
           $restarted = $null
-          for ($i = 0; $i -lt 60; $i++) {
+          for ($i = 0; $i -lt 80; $i++) {
             Start-Sleep -Milliseconds 250
             try {
               $candidate = Invoke-RestMethod http://127.0.0.1:8082/healthz -TimeoutSec 2
@@ -102,22 +137,49 @@ jobs:
               }
             } catch { }
           }
-          if (-not $restarted) { throw "The registered WScript launcher did not restart the gateway." }
-          Write-Host "[OK] HKCU Run entry is exact and its silent launcher restarts the gateway."
+          if (-not $restarted) { throw "The registered Task Scheduler action did not restart the gateway from a stopped state." }
+          Write-Host "[OK] scheduled-task startup path launched the real gateway from a stopped state."
 
-      - name: Verify uninstall removes startup registration
+      - name: Exercise the HKCU Run action from a fully stopped gateway
+        shell: powershell
+        run: |
+          $valueName = "OpenAI-CC Gateway"
+          $health = Invoke-RestMethod http://127.0.0.1:8082/healthz -TimeoutSec 5
+          taskkill.exe /PID ([int]$health.pid) /T /F | Out-Null
+          Start-Sleep -Milliseconds 500
+
+          $task = Get-ScheduledTask -TaskName $valueName -ErrorAction Stop
+          $action = @($task.Actions)[0]
+          Start-Process -FilePath ([string]$action.Execute) -ArgumentList ([string]$action.Arguments) -WindowStyle Hidden | Out-Null
+          $restarted = $null
+          for ($i = 0; $i -lt 80; $i++) {
+            Start-Sleep -Milliseconds 250
+            try {
+              $candidate = Invoke-RestMethod http://127.0.0.1:8082/healthz -TimeoutSec 2
+              if ($candidate.ok -and ([IO.Path]::GetFullPath([string]$candidate.installRoot).TrimEnd('\') -ieq [IO.Path]::GetFullPath($env:INSTALL_ROOT).TrimEnd('\'))) {
+                $restarted = $candidate
+                break
+              }
+            } catch { }
+          }
+          if (-not $restarted) { throw "The direct PowerShell startup action did not restart the gateway from a stopped state." }
+          Write-Host "[OK] direct PowerShell/HKCU startup action launched the real gateway from a stopped state."
+
+      - name: Verify uninstall removes every startup registration
         shell: powershell
         run: |
           $uninstall = Join-Path $env:INSTALL_ROOT "current\uninstall.ps1"
           & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $uninstall -PurgeData -InstallRoot $env:INSTALL_ROOT
           if ($LASTEXITCODE -ne 0) { throw "Startup test uninstall failed" }
 
-          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
           $valueName = "OpenAI-CC Gateway"
-          $remaining = Get-ItemProperty -Path $runKey -Name $valueName -ErrorAction SilentlyContinue
-          if ($null -ne $remaining) { throw "OpenAI-CC HKCU startup entry survived uninstall." }
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          $approvedKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+          if (Get-ItemProperty -Path $runKey -Name $valueName -ErrorAction SilentlyContinue) { throw "HKCU Run startup entry survived uninstall." }
+          if (Get-ItemProperty -Path $approvedKey -Name $valueName -ErrorAction SilentlyContinue) { throw "StartupApproved state survived uninstall." }
+          if (Get-ScheduledTask -TaskName $valueName -ErrorAction SilentlyContinue) { throw "Scheduled logon task survived uninstall." }
           if (Test-Path (Join-Path $env:INSTALL_ROOT "current")) { throw "Runtime survived startup test uninstall." }
-          Write-Host "[OK] Uninstall removed the startup registration."
+          Write-Host "[OK] uninstall removed Run, StartupApproved, Task Scheduler, and runtime state."
 
       - name: Cleanup gateway if needed
         if: always()
@@ -127,5 +189,9 @@ jobs:
             $health = Invoke-RestMethod http://127.0.0.1:8082/healthz -TimeoutSec 2
             if ($health.pid) { taskkill.exe /PID ([int]$health.pid) /T /F | Out-Null }
           } catch { }
+          $valueName = "OpenAI-CC Gateway"
           $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-          Remove-ItemProperty -Path $runKey -Name "OpenAI-CC Gateway" -Force -ErrorAction SilentlyContinue
+          $approvedKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+          Remove-ItemProperty -Path $runKey -Name $valueName -Force -ErrorAction SilentlyContinue
+          Remove-ItemProperty -Path $approvedKey -Name $valueName -Force -ErrorAction SilentlyContinue
+          try { Unregister-ScheduledTask -TaskName $valueName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
