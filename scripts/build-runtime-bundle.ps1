@@ -76,7 +76,6 @@ try {
   Copy-RuntimeItem "node_modules"
   Copy-RuntimeItem "package.json"
   Copy-RuntimeItem "run-gateway.ps1"
-  Copy-RuntimeItem "run-gateway.vbs"
   Copy-RuntimeItem "run-claude.ps1"
   Copy-RuntimeItem "uninstall.ps1"
 
@@ -129,31 +128,9 @@ try {
   $bootstrapSource = Join-Path $RepoRoot "install.ps1"
   $bootstrapOutput = Join-Path $OutputDirectory "install.ps1"
   $bootstrap = Get-Content $bootstrapSource -Raw
-
-  $oldShortcut = @'
-  $shortcut.TargetPath = (Get-Command powershell.exe).Source
-  $launcher = Join-Path $script:CurrentRuntime "run-gateway.ps1"
-  $shortcut.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`" -InstallRoot `"$script:ManagedRoot`""
-'@
-  $newShortcut = @'
-  $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
-  if (-not (Test-Path $wscript)) { throw "Windows Script Host is unavailable; cannot install silent startup launcher." }
-  $shortcut.TargetPath = $wscript
-  $launcher = Join-Path $script:CurrentRuntime "run-gateway.vbs"
-  $shortcut.Arguments = "`"$launcher`""
-'@
   # Keep deterministic packaging independent of Git/PowerShell working-tree line endings.
   $bootstrapNormalized = $bootstrap.Replace("`r`n", "`n")
-  $oldShortcutNormalized = $oldShortcut.Replace("`r`n", "`n")
-  $newShortcutNormalized = $newShortcut.Replace("`r`n", "`n")
-  if (-not $bootstrapNormalized.Contains($oldShortcutNormalized)) { throw "Bootstrap startup-shortcut template changed unexpectedly; refusing to emit a partially patched installer." }
-  $bootstrap = $bootstrapNormalized.Replace($oldShortcutNormalized, $newShortcutNormalized)
-
-  $oldRequired = '@("dist\src\index.js", "dist\scripts\configure-clients.js", "dist\scripts\codex-doctor.js", "node_modules", "run-gateway.ps1", "run-claude.ps1", "uninstall.ps1")'
-  $newRequired = '@("dist\src\index.js", "dist\scripts\configure-clients.js", "dist\scripts\codex-doctor.js", "node_modules", "run-gateway.ps1", "run-gateway.vbs", "run-claude.ps1", "uninstall.ps1")'
-  if (-not $bootstrap.Contains($oldRequired)) { throw "Bootstrap required-runtime template changed unexpectedly; refusing to omit the silent launcher from verification." }
-  $bootstrap = $bootstrap.Replace($oldRequired, $newRequired)
-  Write-Utf8NoBom $bootstrapOutput $bootstrap
+  Write-Utf8NoBom $bootstrapOutput $bootstrapNormalized
   $bootstrapSha256 = Get-Sha256 $bootstrapOutput
 
   if (-not $BundleUrl) { $BundleUrl = $bundleName }
