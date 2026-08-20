@@ -654,7 +654,7 @@ function Has-UsableChatGptCredential {
 
 function Run-CodexDoctorIfAvailable {
   Write-Step "ChatGPT/Codex verification"
-  if (-not (Has-UsableChatGptCredential()) {
+  if (-not (Has-UsableChatGptCredential)) {
     Write-Host "No usable ChatGPT OAuth credential is present. Installation succeeds without credentials." -ForegroundColor Yellow
     Write-Host "Add credentials in $GatewayBaseUrl/admin; codex:doctor will be available from the installed runtime." -ForegroundColor Yellow
     return

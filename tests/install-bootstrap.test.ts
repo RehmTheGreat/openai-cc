@@ -191,6 +191,8 @@ test("fresh-install verification enforces current provider/model defaults withou
   assert.match(install, /gateway did not expose exactly four Claude Desktop-facing routes/);
   assert.match(install, /Admin endpoint did not return HTTP 200/);
   assert.match(install, /codex-doctor\.js/);
+  assert.match(install, /if \(-not \(Has-UsableChatGptCredential\)\) \{/);
+  assert.doesNotMatch(install, /Has-UsableChatGptCredential\(\)/);
   assert.match(install, /No usable ChatGPT OAuth credential is present/);
   assert.match(install, /account\.status -eq "ready"/);
   assert.match(install, /doctorExitCode -eq 2/);
