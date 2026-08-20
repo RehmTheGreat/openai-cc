@@ -135,6 +135,35 @@ test("client distribution is 48-hour, link-first, bare-PC resilient, and optiona
   assert.doesNotMatch(install, /uv\s+tool\s+uninstall\s+free-claude-code/i);
 });
 
+test("Windows startup repairs disabled state and has independent PowerShell logon paths", async () => {
+  const install = await readFile(path.join(process.cwd(), "install.ps1"), "utf8");
+  const launcher = await readFile(path.join(process.cwd(), "run-gateway.ps1"), "utf8");
+  const uninstall = await readFile(path.join(process.cwd(), "uninstall.ps1"), "utf8");
+  const builder = await readFile(path.join(process.cwd(), "scripts", "build-runtime-bundle.ps1"), "utf8");
+
+  assert.match(install, /Explorer\\StartupApproved\\Run/);
+  assert.match(install, /\[byte\[\]\]\(0x02/);
+  assert.match(install, /Register-ScheduledTask/);
+  assert.match(install, /New-ScheduledTaskTrigger -AtLogOn -User/);
+  assert.match(install, /LogonType Interactive/);
+  assert.match(install, /PT15S/);
+  assert.match(install, /-NodePath/);
+  assert.match(install, /Remove-OpenAiCcStartupRegistrations/);
+  assert.match(install, /automatic startup disabled by installer option/);
+  assert.doesNotMatch(install, /run-gateway\.vbs/);
+  assert.doesNotMatch(install, /wscript\.exe/i);
+
+  assert.match(launcher, /\[string\]\$NodePath/);
+  assert.match(launcher, /function Resolve-NodeCommand/);
+  assert.match(launcher, /tools\\node\\node\.exe/);
+  assert.match(launcher, /GetEnvironmentVariable\("Path", "Machine"\)/);
+  assert.match(launcher, /Programs\\nodejs\\node\.exe/);
+
+  assert.match(uninstall, /Unregister-ScheduledTask/);
+  assert.match(uninstall, /Explorer\\StartupApproved\\Run/);
+  assert.doesNotMatch(builder, /Copy-RuntimeItem "run-gateway\.vbs"/);
+});
+
 test("B2 bootstrap bytes are canonical across Windows and Unix working-tree line endings", async () => {
   const grant = await readFile(path.join(process.cwd(), "distribution/b2/grant-release.mjs"), "utf8");
   const publish = await readFile(path.join(process.cwd(), "distribution/b2/publish-release.mjs"), "utf8");
