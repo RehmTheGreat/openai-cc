@@ -93,7 +93,6 @@ jobs:
           $runCommand = [string](Get-ItemPropertyValue -Path $runKey -Name $valueName -ErrorAction Stop)
           if ($runCommand -notmatch '(?i)WindowsPowerShell\\v1\.0\\powershell\.exe') { throw "HKCU Run no longer invokes Windows PowerShell directly." }
           if ($runCommand -notmatch '(?i)run-gateway\.ps1') { throw "HKCU Run does not reference run-gateway.ps1." }
-          if ($runCommand -notmatch '(?i)-NodePath') { throw "HKCU Run does not pin the installer-verified Node path." }
           if ($runCommand -match '(?i)wscript|\.vbs') { throw "HKCU Run still depends on Windows Script Host/VBS." }
 
           $approved = [byte[]](Get-ItemPropertyValue -Path $approvedKey -Name $valueName -ErrorAction Stop)

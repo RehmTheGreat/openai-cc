@@ -147,7 +147,6 @@ test("Windows startup repairs disabled state and has independent PowerShell logo
   assert.match(install, /New-ScheduledTaskTrigger -AtLogOn -User/);
   assert.match(install, /LogonType Interactive/);
   assert.match(install, /PT15S/);
-  assert.match(install, /-NodePath/);
   assert.match(install, /Remove-OpenAiCcStartupRegistrations/);
   assert.match(install, /automatic startup disabled by installer option/);
   assert.doesNotMatch(install, /run-gateway\.vbs/);

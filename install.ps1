@@ -53,6 +53,7 @@ function Get-Sha256([string]$PathValue) {
   return (Get-FileHash -Algorithm SHA256 -Path $PathValue).Hash.ToLowerInvariant()
 }
 
+
 function Add-UserPathEntry([string]$Entry) {
   if (-not $Entry) { return }
   $current = [string][Environment]::GetEnvironmentVariable("Path", "User")
@@ -514,12 +515,11 @@ function Install-StartupShortcut {
   }
   $launcher = Join-Path $script:CurrentRuntime "run-gateway.ps1"
   if (-not (Test-Path $launcher -PathType Leaf)) { throw "OpenAI-CC startup launcher is missing: $launcher" }
-  $nodePath = [IO.Path]::GetFullPath([string]$script:NodeCommand)
-  if (-not (Test-Path $nodePath -PathType Leaf)) { throw "Installer-selected Node.js path disappeared before startup registration: $nodePath" }
-
   # Use PowerShell directly. The previous WScript/VBS hop could exist on disk yet
-  # still be blocked by Windows Script Host policy or application control.
-  $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`" -InstallRoot `"$script:ManagedRoot`" -NodePath `"$nodePath`""
+  # still be blocked by Windows Script Host policy or application control. The
+  # launcher infers InstallRoot from its own current\ directory, which keeps the
+  # Windows Run command short and avoids repeating long user/profile paths.
+  $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`""
   $command = "`"$powerShellPath`" $arguments"
   if ($command.Length -gt 260) {
     throw "OpenAI-CC startup command exceeds the Windows Run-key command-line limit. Choose a shorter install path."
@@ -654,7 +654,7 @@ function Has-UsableChatGptCredential {
 
 function Run-CodexDoctorIfAvailable {
   Write-Step "ChatGPT/Codex verification"
-  if (-not (Has-UsableChatGptCredential)) {
+  if (-not (Has-UsableChatGptCredential()) {
     Write-Host "No usable ChatGPT OAuth credential is present. Installation succeeds without credentials." -ForegroundColor Yellow
     Write-Host "Add credentials in $GatewayBaseUrl/admin; codex:doctor will be available from the installed runtime." -ForegroundColor Yellow
     return
@@ -687,13 +687,13 @@ function Remove-LegacyManagedFiles {
   Write-Host "[OK] Legacy Git/source runtime removed; .data remained untouched" -ForegroundColor Green
 }
 
-function Write-InstallState([object]$Distribution, [object]$Health, [object]$DataFingerprint) {
+function Write-InstallState([Object]$Distribution, [object]$Health, [object]$DataFingerprint) {
   $state = [ordered]@{
     schemaVersion = 1
-    appVersion = [string]$Distribution.appVersion
+    appVersion = [string]$distribution.appVersion
     sourceCommit = ([string]$Distribution.sourceCommit).ToLowerInvariant()
     bundleSha256 = ([string]$Distribution.bundleSha256).ToLowerInvariant()
-    contentSha256 = ([string]$Distribution.contentSha256).ToLowerInvariant()
+    contentSha256 = ([string]$distribution.contentSha256).ToLowerInvariant()
     installedAt = [DateTime]::UtcNow.ToString("o")
     installRoot = $script:ManagedRoot
     runtimeRoot = $script:CurrentRuntime
@@ -786,7 +786,6 @@ try {
   Move-Item $stage $script:CurrentRuntime
   $script:SwappedRuntime = $true
   Write-Host "[OK] current runtime swapped atomically; .data was not moved or deleted" -ForegroundColor Green
-
   Configure-Clients
   Start-ManagedRuntime
   $health = Verify-Installation $distribution $internalManifest $preDataFingerprint
