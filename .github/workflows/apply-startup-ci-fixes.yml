@@ -1,0 +1,66 @@
+name: Apply startup reliability follow-up fixes
+
+on:
+  push:
+    branches:
+      - fix/windows-startup-reliability
+    paths:
+      - ".github/workflows/apply-startup-ci-fixes.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/windows-startup-reliability
+          fetch-depth: 0
+
+      - name: Apply surgical CI fixes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f"Expected patch target missing in {path}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace(
+              "install.ps1",
+              '''  $nodePath = [IO.Path]::GetFullPath([string]$script:NodeCommand)\n  if (-not (Test-Path $nodePath -PathType Leaf)) { throw "Installer-selected Node.js path disappeared before startup registration: $nodePath" }\n\n  # Use PowerShell directly. The previous WScript/VBS hop could exist on disk yet\n  # still be blocked by Windows Script Host policy or application control.\n  $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`" -InstallRoot `"$script:ManagedRoot`" -NodePath `"$nodePath`""\n''',
+              '''  # Use PowerShell directly. The previous WScript/VBS hop could exist on disk yet\n  # still be blocked by Windows Script Host policy or application control. The\n  # launcher infers InstallRoot from its own current\\ directory, which keeps the\n  # Windows Run command short and avoids repeating long user/profile paths.\n  $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`""\n''',
+          )
+
+          replace(
+              "tests/install-bootstrap.test.ts",
+              "  assert.match(install, /-NodePath/);\n",
+              "  assert.doesNotMatch(install, /-NodePath/);\n",
+          )
+
+          replace(
+              ".github/workflows/windows-startup-ci.yml",
+              '''          if ($runCommand -notmatch '(?i)-NodePath') { throw "HKCU Run does not pin the installer-verified Node path." }\n''',
+              '''          if ($runCommand -match '(?i)-NodePath|-InstallRoot') { throw "HKCU Run still carries redundant long-path startup arguments." }\n''',
+          )
+
+          replace(
+              ".github/workflows/distribution-ci.yml",
+              '''            $bootstrapSha = (Get-FileHash .\\distribution\\b2\\bootstrap.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()\n            if ([string]$grant.bootstrapSha256 -ne $bootstrapSha) { throw "Grant bootstrap hash does not match exact checkout" }\n''',
+              '''            $bootstrapText = (Get-Content .\\distribution\\b2\\bootstrap.ps1 -Raw).Replace("`r`n", "`n")\n            $sha256 = [Security.Cryptography.SHA256]::Create()\n            try {\n              $bootstrapBytes = [Text.Encoding]::UTF8.GetBytes($bootstrapText)\n              $bootstrapSha = ([BitConverter]::ToString($sha256.ComputeHash($bootstrapBytes))).Replace("-", "").ToLowerInvariant()\n            } finally { $sha256.Dispose() }\n            if ([string]$grant.bootstrapSha256 -ne $bootstrapSha) { throw "Grant canonical bootstrap hash does not match exact checkout" }\n''',
+          )
+
+      - name: Commit patched branch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add install.ps1 tests/install-bootstrap.test.ts .github/workflows/windows-startup-ci.yml .github/workflows/distribution-ci.yml
+          git diff --cached --check
+          git commit -m "Fix startup command length and canonical B2 hash CI"
+          git push origin HEAD:fix/windows-startup-reliability
