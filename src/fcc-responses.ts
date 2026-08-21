@@ -75,7 +75,8 @@ function validateSupportedRequest(req: AnthropicRequest): void {
 
   const unsupported: string[] = [];
   if (Array.isArray(raw.stop_sequences) && raw.stop_sequences.length) unsupported.push("stop_sequences");
-  if (raw.top_k !== undefined && raw.top_k !== null) unsupported.push("top_k");
+  // Anthropic-compatible chat frontends commonly send top_k by default.
+  // Responses has no equivalent, so ignore it rather than rejecting the request.
   if (!isNoopContextManagement(raw.context_management)) unsupported.push("context_management");
 
   if (raw.output_config && typeof raw.output_config === "object" && !Array.isArray(raw.output_config)) {
