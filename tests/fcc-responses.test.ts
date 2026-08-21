@@ -72,6 +72,15 @@ test("FCC port accepts the Claude no-op thinking context edit", () => {
   assert.doesNotThrow(() => anthropicToFccResponses(req));
 });
 
+test("FCC port tolerates Anthropic top_k from generic chat frontends", () => {
+  const req = request() as any;
+  req.top_k = 40;
+  const converted = anthropicToFccResponses(req) as any;
+
+  assert.equal(converted.top_k, undefined);
+  assert.equal(converted.max_output_tokens, 4096);
+});
+
 test("FCC port rejects Anthropic fields Responses cannot represent", () => {
   const req = request() as any;
   req.stop_sequences = ["STOP"];
