@@ -422,41 +422,130 @@ function Start-ManagedRuntime {
   throw "Gateway startup failure: OpenAI-CC did not become healthy at $GatewayBaseUrl/healthz."
 }
 
-# build-runtime-bundle.ps1 keeps this inert legacy template as a packaging guard.
-# The generated bootstrap no longer executes this shortcut path; startup is
-# registered through HKCU\Software\Microsoft\Windows\CurrentVersion\Run below.
-$script:LegacyStartupShortcutTemplate = @'
-  $shortcut.TargetPath = (Get-Command powershell.exe).Source
-  $launcher = Join-Path $script:CurrentRuntime "run-gateway.ps1"
-  $shortcut.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`" -InstallRoot `"$script:ManagedRoot`""
-'@
-
-function Install-StartupShortcut {
-  Remove-LegacyFccStartupArtifacts
-  if ($NoStartupShortcut) { return }
-
-  $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+function Remove-OpenAiCcStartupRegistrations {
   $valueName = "OpenAI-CC Gateway"
-  $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
-  $launcher = Join-Path $script:CurrentRuntime "run-gateway.vbs"
-  if (-not (Test-Path $wscript -PathType Leaf)) { throw "Windows Script Host is unavailable; cannot register OpenAI-CC startup." }
-  if (-not (Test-Path $launcher -PathType Leaf)) { throw "OpenAI-CC silent startup launcher is missing: $launcher" }
+  $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+  if (Test-Path $runKey) {
+    Remove-ItemProperty -Path $runKey -Name $valueName -Force -ErrorAction SilentlyContinue
+  }
 
-  $command = "`"$wscript`" `"$launcher`""
-  New-Item -Path $runKey -Force | Out-Null
-  New-ItemProperty -Path $runKey -Name $valueName -Value $command -PropertyType String -Force | Out-Null
-  $saved = [string](Get-ItemPropertyValue -Path $runKey -Name $valueName)
-  if ($saved -ne $command) { throw "OpenAI-CC startup registration could not be verified after writing HKCU Run." }
+  # Task Manager/Settings can leave a Run value present but silently disabled
+  # through StartupApproved. Remove our stale approval state when disabling or
+  # before writing a fresh enabled state.
+  $approvedKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+  if (Test-Path $approvedKey) {
+    Remove-ItemProperty -Path $approvedKey -Name $valueName -Force -ErrorAction SilentlyContinue
+  }
 
-  # Remove the old Startup-folder mechanism so there is one authoritative
-  # per-user startup entry and no duplicate gateway launch race at logon.
+  try {
+    if (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) {
+      $task = Get-ScheduledTask -TaskName $valueName -ErrorAction SilentlyContinue
+      if ($task) { Unregister-ScheduledTask -TaskName $valueName -Confirm:$false -ErrorAction Stop }
+    }
+  } catch {
+    Write-Warning "Could not remove an older OpenAI-CC scheduled task: $($_.Exception.Message)"
+  }
+
   $startup = [Environment]::GetFolderPath("Startup")
   if ($startup) {
     $shortcutPath = Join-Path $startup "OpenAI-CC Gateway.lnk"
-    if (Test-Path $shortcutPath) { Remove-Item $shortcutPath -Force }
+    if (Test-Path $shortcutPath) { Remove-Item $shortcutPath -Force -ErrorAction SilentlyContinue }
+  }
+}
+
+function Set-StartupApprovedEnabled([string]$ValueName) {
+  $approvedKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+  New-Item -Path $approvedKey -Force | Out-Null
+  $enabled = [byte[]](0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+  New-ItemProperty -Path $approvedKey -Name $ValueName -Value $enabled -PropertyType Binary -Force | Out-Null
+  $saved = [byte[]](Get-ItemPropertyValue -Path $approvedKey -Name $ValueName -ErrorAction Stop)
+  if ($saved.Length -lt 1 -or $saved[0] -ne 0x02) {
+    throw "Windows StartupApproved state did not remain enabled for $ValueName."
+  }
+}
+
+function Register-LogonTaskBestEffort([string]$PowerShellPath, [string]$Arguments) {
+  $taskName = "OpenAI-CC Gateway"
+  try {
+    Import-Module ScheduledTasks -ErrorAction Stop
+    $userId = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    if (-not $userId) { throw "Could not resolve the current Windows user for the logon task." }
+
+    $action = New-ScheduledTaskAction -Execute $PowerShellPath -Argument $Arguments
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
+    try { $trigger.Delay = "PT15S" } catch { }
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
+    $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    if ([string]$task.State -eq "Disabled") {
+      Enable-ScheduledTask -TaskName $taskName -ErrorAction Stop | Out-Null
+      $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    }
+    $actions = @($task.Actions)
+    $actualExecute = if ($actions.Count -eq 1) { [Environment]::ExpandEnvironmentVariables([string]$actions[0].Execute) } else { "" }
+    try { $actualExecute = [IO.Path]::GetFullPath($actualExecute) } catch { }
+    $expectedExecute = [IO.Path]::GetFullPath($PowerShellPath)
+    if ($actions.Count -ne 1 -or $actualExecute -ine $expectedExecute -or [string]$actions[0].Arguments -ne $Arguments) {
+      throw "Scheduled task action does not match the installed OpenAI-CC launcher."
+    }
+    if ([string]$task.State -eq "Disabled") { throw "Scheduled task remained disabled after registration." }
+    Write-Host "[OK] Delayed per-user logon task registered as an independent startup fallback" -ForegroundColor Green
+    return $true
+  } catch {
+    Write-Warning "Task Scheduler fallback could not be registered; the enabled HKCU Run path remains active: $($_.Exception.Message)"
+    return $false
+  }
+}
+
+function Install-StartupShortcut {
+  Remove-LegacyFccStartupArtifacts
+  if ($NoStartupShortcut) {
+    Remove-OpenAiCcStartupRegistrations
+    Write-Host "[OK] OpenAI-CC automatic startup disabled by installer option" -ForegroundColor Green
+    return
   }
 
-  Write-Host "[OK] Per-user gateway startup registered and verified" -ForegroundColor Green
+  $valueName = "OpenAI-CC Gateway"
+  $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+  $powerShellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+  if (-not (Test-Path $powerShellPath -PathType Leaf)) {
+    $powerShellPath = (Get-Command powershell.exe -ErrorAction Stop).Source
+  }
+  $launcher = Join-Path $script:CurrentRuntime "run-gateway.ps1"
+  if (-not (Test-Path $launcher -PathType Leaf)) { throw "OpenAI-CC startup launcher is missing: $launcher" }
+  # Use PowerShell directly. The previous WScript/VBS hop could exist on disk yet
+  # still be blocked by Windows Script Host policy or application control. The
+  # launcher infers InstallRoot from its own current\ directory, which keeps the
+  # Windows Run command short and avoids repeating long user/profile paths.
+  $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`""
+  $command = "`"$powerShellPath`" $arguments"
+  if ($command.Length -gt 260) {
+    throw "OpenAI-CC startup command exceeds the Windows Run-key command-line limit. Choose a shorter install path."
+  }
+
+  New-Item -Path $runKey -Force | Out-Null
+  New-ItemProperty -Path $runKey -Name $valueName -Value $command -PropertyType String -Force | Out-Null
+  Set-StartupApprovedEnabled $valueName
+
+  $saved = [string](Get-ItemPropertyValue -Path $runKey -Name $valueName -ErrorAction Stop)
+  if ($saved -ne $command) { throw "OpenAI-CC HKCU Run registration could not be verified after writing it." }
+  Write-Host "[OK] Per-user HKCU Run startup registered, explicitly enabled, and verified" -ForegroundColor Green
+
+  # Register a second, delayed one-shot-at-logon path. This is not a watchdog:
+  # if the Run entry already started the gateway, run-gateway.ps1 exits cleanly
+  # after recognizing the healthy managed listener. If Task Scheduler is blocked
+  # by local policy, the verified Run entry remains the primary mechanism.
+  Register-LogonTaskBestEffort $powerShellPath $arguments | Out-Null
+
+  # Remove the obsolete Startup-folder shortcut so there is no third shell-level
+  # startup entry and no dependency on the old VBS launcher.
+  $startup = [Environment]::GetFolderPath("Startup")
+  if ($startup) {
+    $shortcutPath = Join-Path $startup "OpenAI-CC Gateway.lnk"
+    if (Test-Path $shortcutPath) { Remove-Item $shortcutPath -Force -ErrorAction SilentlyContinue }
+  }
 }
 
 function Verify-Installation([object]$Distribution, [object]$InternalManifest, [object]$PreDataFingerprint) {
@@ -598,13 +687,13 @@ function Remove-LegacyManagedFiles {
   Write-Host "[OK] Legacy Git/source runtime removed; .data remained untouched" -ForegroundColor Green
 }
 
-function Write-InstallState([object]$Distribution, [object]$Health, [object]$DataFingerprint) {
+function Write-InstallState([Object]$Distribution, [object]$Health, [object]$DataFingerprint) {
   $state = [ordered]@{
     schemaVersion = 1
-    appVersion = [string]$Distribution.appVersion
+    appVersion = [string]$distribution.appVersion
     sourceCommit = ([string]$Distribution.sourceCommit).ToLowerInvariant()
     bundleSha256 = ([string]$Distribution.bundleSha256).ToLowerInvariant()
-    contentSha256 = ([string]$Distribution.contentSha256).ToLowerInvariant()
+    contentSha256 = ([string]$distribution.contentSha256).ToLowerInvariant()
     installedAt = [DateTime]::UtcNow.ToString("o")
     installRoot = $script:ManagedRoot
     runtimeRoot = $script:CurrentRuntime
@@ -697,7 +786,6 @@ try {
   Move-Item $stage $script:CurrentRuntime
   $script:SwappedRuntime = $true
   Write-Host "[OK] current runtime swapped atomically; .data was not moved or deleted" -ForegroundColor Green
-
   Configure-Clients
   Start-ManagedRuntime
   $health = Verify-Installation $distribution $internalManifest $preDataFingerprint

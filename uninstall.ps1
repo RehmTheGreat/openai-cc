@@ -61,22 +61,37 @@ function Stop-ManagedRuntime {
 }
 
 function Remove-StartupShortcut {
-  $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
   $valueName = "OpenAI-CC Gateway"
+  $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
   if (Test-Path $runKey) {
-    $existing = Get-ItemProperty -Path $runKey -Name $valueName -ErrorAction SilentlyContinue
-    if ($null -ne $existing) {
-      Remove-ItemProperty -Path $runKey -Name $valueName -Force
-      $remaining = Get-ItemProperty -Path $runKey -Name $valueName -ErrorAction SilentlyContinue
-      if ($null -ne $remaining) { throw "Failed to remove OpenAI-CC HKCU startup registration." }
-    }
+    Remove-ItemProperty -Path $runKey -Name $valueName -Force -ErrorAction SilentlyContinue
+    $remaining = Get-ItemProperty -Path $runKey -Name $valueName -ErrorAction SilentlyContinue
+    if ($null -ne $remaining) { throw "Failed to remove OpenAI-CC HKCU startup registration." }
   }
 
-  # Also clean the legacy Startup-folder shortcut from older installs.
+  $approvedKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+  if (Test-Path $approvedKey) {
+    Remove-ItemProperty -Path $approvedKey -Name $valueName -Force -ErrorAction SilentlyContinue
+  }
+
+  try {
+    if (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) {
+      $task = Get-ScheduledTask -TaskName $valueName -ErrorAction SilentlyContinue
+      if ($task) { Unregister-ScheduledTask -TaskName $valueName -Confirm:$false -ErrorAction Stop }
+      if (Get-ScheduledTask -TaskName $valueName -ErrorAction SilentlyContinue) {
+        throw "Failed to remove OpenAI-CC scheduled logon task."
+      }
+    }
+  } catch {
+    throw "Failed to remove OpenAI-CC Task Scheduler startup registration: $($_.Exception.Message)"
+  }
+
+  # Also clean Startup-folder artifacts from older releases.
   $startup = [Environment]::GetFolderPath("Startup")
-  if (-not $startup) { return }
-  $shortcut = Join-Path $startup "OpenAI-CC Gateway.lnk"
-  if (Test-Path $shortcut) { Remove-Item $shortcut -Force }
+  if ($startup) {
+    $shortcut = Join-Path $startup "OpenAI-CC Gateway.lnk"
+    if (Test-Path $shortcut) { Remove-Item $shortcut -Force }
+  }
 }
 
 if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) { throw "This uninstaller targets native Windows PowerShell." }

@@ -121,7 +121,7 @@ Do not create `[1m]` duplicate models or `supports1m` variants merely to influen
 
 OpenAI-CC is not an unkillable service.
 
-- Windows may start it through the existing Startup shortcut at sign-in.
+- Windows starts it at sign-in through an explicitly enabled per-user HKCU Run entry with a delayed per-user Task Scheduler logon fallback. Both are one-shot login mechanisms, not watchdogs.
 - macOS may load it at login, but the LaunchAgent must not use `KeepAlive=true`.
 - Do not add a watchdog, polling supervisor, wake-triggered resurrection task, or restart loop.
 - If the user deliberately kills the gateway process, it stays stopped until explicitly launched again or the next normal login-start behavior occurs.
