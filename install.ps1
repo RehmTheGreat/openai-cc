@@ -277,10 +277,10 @@ function Verify-ExtractedRuntime([string]$Stage, [object]$Distribution) {
   if ([string]$build.buildSha -ine [string]$Distribution.sourceCommit) { throw "Installed build SHA would not match expected source SHA." }
   if ([string]$build.appVersion -ne [string]$Distribution.appVersion) { throw "Installed build version would not match expected application version." }
 
-  foreach ($required in @("dist\src\index.js", "dist\scripts\configure-clients.js", "dist\scripts\codex-doctor.js", "node_modules", "run-gateway.ps1", "run-claude.ps1", "uninstall.ps1")) {
+  foreach ($required in @("dist\src\index.js", "dist\scripts\configure-clients.js", "dist\scripts\codex-doctor.js", "node_modules", "run-gateway.ps1", "run-gateway-silent.vbs", "run-claude.ps1", "uninstall.ps1")) {
     if (-not (Test-Path (Join-Path $Stage $required))) { throw "Runtime bundle is missing required item: $required" }
   }
-  foreach ($forbidden in @(".data", ".git", "src", "tests", "setup.ps1", "install.ps1")) {
+  foreach ($forbidden in @(".data", ".git", "src", "tests", "setup.ps1", "install.ps1", "run-gateway.vbs")) {
     if (Test-Path (Join-Path $Stage $forbidden)) { throw "Runtime bundle contains forbidden item: $forbidden" }
   }
   return $internal
@@ -509,18 +509,16 @@ function Install-StartupShortcut {
 
   $valueName = "OpenAI-CC Gateway"
   $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-  $powerShellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-  if (-not (Test-Path $powerShellPath -PathType Leaf)) {
-    $powerShellPath = (Get-Command powershell.exe -ErrorAction Stop).Source
-  }
-  $launcher = Join-Path $script:CurrentRuntime "run-gateway.ps1"
-  if (-not (Test-Path $launcher -PathType Leaf)) { throw "OpenAI-CC startup launcher is missing: $launcher" }
-  # Use PowerShell directly. The previous WScript/VBS hop could exist on disk yet
-  # still be blocked by Windows Script Host policy or application control. The
-  # launcher infers InstallRoot from its own current\ directory, which keeps the
-  # Windows Run command short and avoids repeating long user/profile paths.
-  $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`""
-  $command = "`"$powerShellPath`" $arguments"
+  $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+  if (-not (Test-Path $wscript -PathType Leaf)) { throw "Windows Script Host is unavailable: $wscript" }
+  $launcher = Join-Path $script:CurrentRuntime "run-gateway-silent.vbs"
+  if (-not (Test-Path $launcher -PathType Leaf)) { throw "OpenAI-CC console-less startup launcher is missing: $launcher" }
+  # WScript is a GUI-subsystem host. Registry Run and Task Scheduler both launch
+  # wscript.exe, so no console window appears at logon. The shim contains no
+  # reliability logic; run-gateway.ps1 still owns deterministic Node resolution,
+  # healthz idempotency, and every PR #44 startup guarantee.
+  $arguments = "`"$launcher`""
+  $command = "`"$wscript`" $arguments"
   if ($command.Length -gt 260) {
     throw "OpenAI-CC startup command exceeds the Windows Run-key command-line limit. Choose a shorter install path."
   }
@@ -537,10 +535,10 @@ function Install-StartupShortcut {
   # if the Run entry already started the gateway, run-gateway.ps1 exits cleanly
   # after recognizing the healthy managed listener. If Task Scheduler is blocked
   # by local policy, the verified Run entry remains the primary mechanism.
-  Register-LogonTaskBestEffort $powerShellPath $arguments | Out-Null
+  Register-LogonTaskBestEffort $wscript $arguments | Out-Null
 
   # Remove the obsolete Startup-folder shortcut so there is no third shell-level
-  # startup entry and no dependency on the old VBS launcher.
+  # startup entry.
   $startup = [Environment]::GetFolderPath("Startup")
   if ($startup) {
     $shortcutPath = Join-Path $startup "OpenAI-CC Gateway.lnk"
@@ -679,7 +677,7 @@ function Remove-LegacyManagedFiles {
   foreach ($relative in @(
     ".git", ".github", "src", "tests", "scripts", "dist", "distribution", "node_modules",
     ".env.example", ".gitignore", "AGENTS.md", "LICENSE", "README.md", "package.json", "package-lock.json",
-    "setup.ps1", "install.ps1", "run-gateway.ps1", "run-claude.ps1", "tsconfig.json"
+    "setup.ps1", "install.ps1", "run-gateway.vbs", "run-gateway.ps1", "run-claude.ps1", "tsconfig.json"
   )) {
     $pathValue = Join-Path $script:ManagedRoot $relative
     if (Test-Path $pathValue) { Remove-ManagedItem $pathValue }

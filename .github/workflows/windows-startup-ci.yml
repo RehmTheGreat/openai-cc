@@ -6,6 +6,7 @@ on:
       - "install.ps1"
       - "uninstall.ps1"
       - "run-gateway.ps1"
+      - "run-gateway-silent.vbs"
       - "scripts/build-runtime-bundle.ps1"
       - ".github/workflows/windows-startup-ci.yml"
   pull_request:
@@ -13,6 +14,7 @@ on:
       - "install.ps1"
       - "uninstall.ps1"
       - "run-gateway.ps1"
+      - "run-gateway-silent.vbs"
       - "scripts/build-runtime-bundle.ps1"
       - ".github/workflows/windows-startup-ci.yml"
 
@@ -84,16 +86,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Startup-enabled bundle install failed" }
           "INSTALL_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Verify startup registrations are enabled and independent of WScript
+      - name: Verify console-less startup registrations are enabled
         shell: powershell
         run: |
           $valueName = "OpenAI-CC Gateway"
           $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
           $approvedKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
           $runCommand = [string](Get-ItemPropertyValue -Path $runKey -Name $valueName -ErrorAction Stop)
-          if ($runCommand -notmatch '(?i)WindowsPowerShell\\v1\.0\\powershell\.exe') { throw "HKCU Run no longer invokes Windows PowerShell directly." }
-          if ($runCommand -notmatch '(?i)run-gateway\.ps1') { throw "HKCU Run does not reference run-gateway.ps1." }
-          if ($runCommand -match '(?i)wscript|\.vbs') { throw "HKCU Run still depends on Windows Script Host/VBS." }
+          if ($runCommand -notmatch '(?i)wscript\.exe') { throw "HKCU Run does not invoke the console-less wscript.exe host." }
+          if ($runCommand -notmatch '(?i)run-gateway-silent\.vbs') { throw "HKCU Run does not reference the console-less launcher." }
 
           $approved = [byte[]](Get-ItemPropertyValue -Path $approvedKey -Name $valueName -ErrorAction Stop)
           if ($approved.Length -lt 1 -or $approved[0] -ne 0x02) { throw "StartupApproved did not transition from stale-disabled to enabled." }
@@ -107,15 +108,17 @@ jobs:
           $taskCommand = "`"$taskExecute`" $([string]$actions[0].Arguments)"
           if ($taskCommand -ne $runCommand) { throw "Task Scheduler and HKCU Run do not use the same verified launcher." }
 
+          if (-not (Test-Path (Join-Path $env:INSTALL_ROOT "current\run-gateway-silent.vbs"))) {
+            throw "Console-less launcher is missing from the runtime bundle."
+          }
           if (Test-Path (Join-Path $env:INSTALL_ROOT "current\run-gateway.vbs")) {
-            throw "Obsolete VBS launcher leaked into the runtime bundle."
+            throw "Obsolete run-gateway.vbs leaked into the runtime bundle."
           }
           $startup = [Environment]::GetFolderPath("Startup")
           if ($startup -and (Test-Path (Join-Path $startup "OpenAI-CC Gateway.lnk"))) {
             throw "Obsolete Startup-folder shortcut still exists."
           }
-          Write-Host "[OK] stale StartupApproved/task state was repaired; PowerShell Run + delayed Task Scheduler fallback are enabled."
-
+          Write-Host "[OK] stale StartupApproved/task state was repaired; console-less wscript Run + delayed Task Scheduler fallback are enabled."
       - name: Exercise the scheduled-task startup path from a fully stopped gateway
         shell: powershell
         run: |
@@ -136,7 +139,7 @@ jobs:
               }
             } catch { }
           }
-          if (-not $restarted) { throw "The registered Task Scheduler action did not restart the gateway from a stopped state." }
+          if (-not $restarted) { throw "The registered console-less Task Scheduler action did not restart the gateway from a stopped state." }
           Write-Host "[OK] scheduled-task startup path launched the real gateway from a stopped state."
 
       - name: Exercise the HKCU Run action from a fully stopped gateway
@@ -194,3 +197,4 @@ jobs:
           Remove-ItemProperty -Path $runKey -Name $valueName -Force -ErrorAction SilentlyContinue
           Remove-ItemProperty -Path $approvedKey -Name $valueName -Force -ErrorAction SilentlyContinue
           try { Unregister-ScheduledTask -TaskName $valueName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+          Get-ChildItem -Path $env:INSTALL_ROOT -Recurse -Filter "run-gateway-silent.vbs" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue

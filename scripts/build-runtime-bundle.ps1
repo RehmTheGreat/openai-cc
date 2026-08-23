@@ -76,6 +76,7 @@ try {
   Copy-RuntimeItem "node_modules"
   Copy-RuntimeItem "package.json"
   Copy-RuntimeItem "run-gateway.ps1"
+  Copy-RuntimeItem "run-gateway-silent.vbs"
   Copy-RuntimeItem "run-claude.ps1"
   Copy-RuntimeItem "uninstall.ps1"
 

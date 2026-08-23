@@ -1,1 +1,2 @@
 distribution/b2/bootstrap.ps1 text eol=lf
+run-gateway-silent.vbs text eol=crlf
