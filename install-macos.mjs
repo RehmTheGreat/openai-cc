@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { createReadStream, openSync } from "node:fs";
-import { lstat, mkdir, mkdtemp, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import os from "node:os";
+import { provisionMacClients } from "./macos-provision-clients.mjs";
 
 const GATEWAY = "http://127.0.0.1:8082";
 
@@ -50,6 +51,7 @@ function contentDigest(files) {
   return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 async function jsonFile(path) { return JSON.parse(await readFile(path, "utf8")); }
+async function readJsonSafe(path) { try { return await jsonFile(path); } catch { return {}; } }
 function normalized(path) { return resolve(path); }
 function managedChild(root, candidate) {
   const managed = normalized(root), target = normalized(candidate);
@@ -57,6 +59,55 @@ function managedChild(root, candidate) {
   return target;
 }
 function timestamp() { return new Date().toISOString().replace(/[:.]/g, "-"); }
+
+const CLAUDE_ENV_KEYS = [
+  "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
+  "ANTHROPIC_DEFAULT_FABLE_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+  "CLAUDE_CODE_USE_GATEWAY", "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_CODE_PLUGIN_PREFER_HTTPS",
+  "CLAUDE_CODE_CONTEXT_WINDOW", "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "DISABLE_COMPACT",
+];
+function snapshotKey(object, key) {
+  return object && Object.prototype.hasOwnProperty.call(object, key) ? { present:true, value:object[key] } : { present:false };
+}
+async function captureManagedClientConfig(home) {
+  const settings = await readJsonSafe(join(home, ".claude", "settings.json"));
+  const state = await readJsonSafe(join(home, ".claude.json"));
+  const env = settings.env && typeof settings.env === "object" && !Array.isArray(settings.env) ? settings.env : {};
+  const overrides = settings.modelOverrides && typeof settings.modelOverrides === "object" && !Array.isArray(settings.modelOverrides) ? settings.modelOverrides : {};
+  const support = join(home, "Library", "Application Support");
+  const normalFile = join(support, "Claude", "claude_desktop_config.json");
+  const threepDir = join(support, "Claude-3p");
+  const threepFile = join(threepDir, "claude_desktop_config.json");
+  const profileFile = join(threepDir, "configLibrary", "00000000-0000-4000-8000-000000008082.json");
+  const metaFile = join(threepDir, "configLibrary", "_meta.json");
+  const normal = await readJsonSafe(normalFile), threep = await readJsonSafe(threepFile), profile = await readJsonSafe(profileFile), meta = await readJsonSafe(metaFile);
+  const priorEntry = Array.isArray(meta.entries) ? meta.entries.find((entry) => entry?.id === "00000000-0000-4000-8000-000000008082") : undefined;
+  return {
+    claudeCode: {
+      availableModels:snapshotKey(settings, "availableModels"),
+      env:Object.fromEntries(CLAUDE_ENV_KEYS.map((key)=>[key, snapshotKey(env, key)])),
+      modelOverrides:{
+        "claude-fable-5":snapshotKey(overrides, "claude-fable-5"),
+        "claude-sonnet-5":snapshotKey(overrides, "claude-sonnet-5"),
+      },
+      state:{
+        hasCompletedOnboarding:snapshotKey(state, "hasCompletedOnboarding"),
+        hasSeenOnboarding:snapshotKey(state, "hasSeenOnboarding"),
+        numStartups:snapshotKey(state, "numStartups"),
+      },
+    },
+    claudeDesktop: {
+      normalDeploymentMode:snapshotKey(normal, "deploymentMode"),
+      threepDeploymentMode:snapshotKey(threep, "deploymentMode"),
+      profile:{ present:await exists(profileFile), value:profile },
+      metaEntry:{ present:Boolean(priorEntry), value:priorEntry },
+      metaAppliedId:snapshotKey(meta, "appliedId"),
+    },
+  };
+}
 
 if (process.platform !== "darwin" || process.arch !== "arm64") {
   fail(`This installer supports Apple Silicon macOS only (darwin-arm64); got ${process.platform}-${process.arch}.`);
@@ -72,20 +123,28 @@ const bundlePath = resolve(bundleArg);
 if (!(await exists(manifestPath))) fail("--manifest must point to a local distribution manifest.");
 if (!(await exists(bundlePath))) fail("--bundle must point to a local runtime ZIP.");
 const skipDesktop = has("--skip-desktop-config");
+const skipClientProvision = has("--skip-client-provision") || process.env.OPENAI_CC_SKIP_CLIENT_PROVISION === "1";
 const noLaunchAgent = has("--no-launch-agent");
 const installRoot = resolve(arg("--install-root", join(os.homedir(), "Library", "Application Support", "OpenAI-CC")));
+const bootstrapNodeRootArg = arg("--bootstrap-node-root");
+const bootstrapNodeRoot = resolve(bootstrapNodeRootArg || dirname(dirname(process.execPath)));
 const current = join(installRoot, "current");
 const dataDir = join(installRoot, ".data");
 const rollbackDir = join(installRoot, "rollbacks");
 const failedDir = join(installRoot, "failed");
 const logDir = join(os.homedir(), "Library", "Logs", "OpenAI-CC");
 const launchAgent = join(os.homedir(), "Library", "LaunchAgents", "com.openai-cc.gateway.plist");
-for (const path of [current, dataDir, rollbackDir, failedDir]) managedChild(installRoot, path);
+const toolchainRoot = join(installRoot, "toolchain");
+const privateNodeRoot = join(installRoot, "toolchain", "node");
+const privateNode = join(privateNodeRoot, "bin", "node");
+const installStateFile = join(installRoot, "install-state.json");
+for (const path of [current, dataDir, rollbackDir, failedDir, toolchainRoot, privateNodeRoot]) managedChild(installRoot, path);
 await mkdir(installRoot, { recursive: true });
 await mkdir(dataDir, { recursive: true });
 await mkdir(rollbackDir, { recursive: true });
 await mkdir(failedDir, { recursive: true });
 await mkdir(logDir, { recursive: true });
+await mkdir(toolchainRoot, { recursive: true });
 await mkdir(dirname(launchAgent), { recursive: true });
 
 const distribution = await jsonFile(manifestPath);
@@ -135,7 +194,7 @@ async function verifyRuntime(root) {
   const build = await jsonFile(join(root, "dist", "build-info.json"));
   if (String(build.buildSha).toLowerCase() !== String(distribution.sourceCommit).toLowerCase()) fail("Installed build SHA mismatch.");
   if (String(build.appVersion) !== String(distribution.appVersion)) fail("Installed build version mismatch.");
-  for (const required of ["dist/src/index.js", "dist/scripts/configure-clients.js", "dist/scripts/codex-doctor.js", "dist/scripts/migrate-data.js", "package.json", "run-gateway.sh", "run-claude.sh"]) {
+  for (const required of ["dist/src/index.js", "dist/scripts/configure-clients.js", "dist/scripts/codex-doctor.js", "dist/scripts/migrate-data.js", "package.json", "run-gateway.sh", "run-claude.sh", "uninstall-macos.mjs", "uninstall.command"]) {
     if (!(await exists(join(root, ...required.split("/"))))) fail(`Runtime bundle is missing required item: ${required}`);
   }
   return internal;
@@ -173,7 +232,44 @@ async function assertPortOwnership() {
   }
 }
 
+function nodeMajor(nodePath) {
+  const result = spawnSync(nodePath, ["-p", "Number(process.versions.node.split(\".\")[0])"], { encoding: "utf8" });
+  return result.status === 0 ? Number(String(result.stdout || "").trim()) : 0;
+}
+async function installPrivateNode() {
+  const sourceNode = join(bootstrapNodeRoot, "bin", "node");
+  if (!(await exists(sourceNode)) || nodeMajor(sourceNode) < 20) fail(`--bootstrap-node-root does not contain a working Node 20+: ${bootstrapNodeRoot}`);
+  if (resolve(bootstrapNodeRoot) === resolve(privateNodeRoot)) return privateNode;
+  const stageParent = await mkdtemp(join(toolchainRoot, ".node-stage-"));
+  const staged = join(stageParent, "node");
+  const backup = join(toolchainRoot, `.node-old-${Date.now()}`);
+  let backedUp = false;
+  try {
+    if (bootstrapNodeRootArg) {
+      await cp(bootstrapNodeRoot, staged, { recursive: true, force: true, dereference: false });
+    } else {
+      await mkdir(join(staged, "bin"), { recursive: true });
+      await cp(sourceNode, join(staged, "bin", "node"), { force: true, dereference: true });
+      await chmod(join(staged, "bin", "node"), 0o755);
+    }
+    const stagedNode = join(staged, "bin", "node");
+    if (!(await exists(stagedNode)) || nodeMajor(stagedNode) < 20) fail("Staged private Node failed verification.");
+    if (await exists(privateNodeRoot)) { await rename(privateNodeRoot, backup); backedUp = true; }
+    try { await rename(staged, privateNodeRoot); }
+    catch (error) {
+      if (backedUp && await exists(backup) && !(await exists(privateNodeRoot))) await rename(backup, privateNodeRoot);
+      throw error;
+    }
+    if (backedUp) await rm(backup, { recursive: true, force: true });
+  } finally {
+    await rm(stageParent, { recursive: true, force: true });
+  }
+  if (!(await exists(privateNode)) || nodeMajor(privateNode) < 20) fail("Persistent private Node verification failed.");
+  return privateNode;
+}
+
 const freshModelConfig = !(await exists(join(dataDir, "model-config.json")));
+const previousInstallState = await readJsonSafe(installStateFile);
 await assertPortOwnership();
 let internal;
 let staged = "";
@@ -210,13 +306,21 @@ try {
     swapped = true;
   }
 
+  const persistentNode = await installPrivateNode();
+  const nodeVersion = String(spawnSync(persistentNode, ["--version"], { encoding: "utf8" }).stdout || "").trim();
   const migration = join(current, "dist", "scripts", "migrate-data.js");
-  const migrate = spawnSync(process.execPath, [migration, dataDir], { stdio: "inherit", env: { ...process.env, OPENAI_CC_HOME: installRoot, OPENAI_CC_RUNTIME_ROOT: current, DATA_DIR: dataDir } });
+  const migrate = spawnSync(persistentNode, [migration, dataDir], { stdio: "inherit", env: { ...process.env, OPENAI_CC_HOME: installRoot, OPENAI_CC_RUNTIME_ROOT: current, DATA_DIR: dataDir } });
   if (migrate.status !== 0) fail(`Persistent .data migration failed (exit code ${migrate.status}).`);
   const beforeData = freshModelConfig ? undefined : await fingerprintData();
 
-  const desktopInstalled = await exists("/Applications/Claude.app") || await exists(join(os.homedir(), "Applications", "Claude.app"));
-  const configure = spawnSync(process.execPath, [join(current, "dist", "scripts", "configure-clients.js")], {
+  let managedDependencies = { ...(previousInstallState.managedDependencies || {}), node: { path: persistentNode, version: nodeVersion, installedByOpenAICC: true } };
+  if (!managedDependencies.configurationBeforeOpenAICC) managedDependencies.configurationBeforeOpenAICC = await captureManagedClientConfig(os.homedir());
+  if (!skipClientProvision) {
+    const clients = await provisionMacClients({ previous: managedDependencies, skipDesktop });
+    managedDependencies = { ...managedDependencies, ...clients };
+  }
+
+  const configure = spawnSync(persistentNode, [join(current, "dist", "scripts", "configure-clients.js")], {
     stdio: "inherit",
     cwd: installRoot,
     env: {
@@ -225,14 +329,14 @@ try {
       OPENAI_CC_RUNTIME_ROOT: current,
       DATA_DIR: dataDir,
       ANTHROPIC_BASE_URL: GATEWAY,
-      OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP: !skipDesktop && desktopInstalled ? "1" : "0",
+      OPENAI_CC_CONFIGURE_CLAUDE_DESKTOP: skipDesktop ? "0" : "1",
     },
   });
   if (configure.status !== 0) fail(`Client configuration failed (exit code ${configure.status}).`);
 
   if (!noLaunchAgent) {
     const esc = (value) => String(value).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
-    const plist = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>com.openai-cc.gateway</string>\n<key>ProgramArguments</key><array><string>/bin/bash</string><string>${esc(join(current,"run-gateway.sh"))}</string><string>--install-root</string><string>${esc(installRoot)}</string></array>\n<key>EnvironmentVariables</key><dict><key>OPENAI_CC_NODE</key><string>${esc(process.execPath)}</string></dict>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><false/>\n<key>StandardOutPath</key><string>${esc(join(logDir,"gateway.log"))}</string>\n<key>StandardErrorPath</key><string>${esc(join(logDir,"gateway.err.log"))}</string>\n</dict></plist>\n`;
+    const plist = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>com.openai-cc.gateway</string>\n<key>ProgramArguments</key><array><string>/bin/bash</string><string>${esc(join(current,"run-gateway.sh"))}</string><string>--install-root</string><string>${esc(installRoot)}</string></array>\n<key>EnvironmentVariables</key><dict><key>OPENAI_CC_NODE</key><string>${esc(persistentNode)}</string></dict>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><false/>\n<key>StandardOutPath</key><string>${esc(join(logDir,"gateway.log"))}</string>\n<key>StandardErrorPath</key><string>${esc(join(logDir,"gateway.err.log"))}</string>\n</dict></plist>\n`;
     await writeFile(launchAgent, plist, { encoding: "utf8", mode: 0o600 });
   }
 
@@ -243,7 +347,7 @@ try {
     const child = spawn("/bin/bash", [join(current, "run-gateway.sh"), "--install-root", installRoot], {
       detached: true,
       stdio: ["ignore", stdout, stderr],
-      env: { ...process.env, OPENAI_CC_NODE: process.execPath },
+      env: { ...process.env, OPENAI_CC_NODE: persistentNode },
     });
     child.unref();
   }
@@ -260,8 +364,14 @@ try {
   if (resolve(String(state.installRoot || "")) !== installRoot) fail("Verification failed: health installRoot does not match managed root.");
   if (resolve(String(state.runtimeRoot || "")) !== current) fail("Verification failed: health runtimeRoot is not the active current runtime.");
 
+  const rootResponse = await fetch(`${GATEWAY}/`, { redirect: "manual" });
+  if (rootResponse.status !== 302 || rootResponse.headers.get("location") !== "/admin") fail("Verification failed: gateway root did not redirect to /admin.");
   const admin = await fetch(`${GATEWAY}/admin`);
   if (!admin.ok) fail("Verification failed: Admin endpoint did not return HTTP 200.");
+  if (!skipClientProvision) {
+    if (!managedDependencies.claudeCode?.path || !(await exists(managedDependencies.claudeCode.path))) fail("Verification failed: Claude Code executable is missing.");
+    if (!skipDesktop && (!managedDependencies.claudeDesktop?.path || !(await exists(managedDependencies.claudeDesktop.path)))) fail("Verification failed: Claude Desktop application is missing.");
+  }
   const adminState = await (await fetch(`${GATEWAY}/admin/state`)).json();
   const models = await (await fetch(`${GATEWAY}/v1/models`)).json();
   if (!Array.isArray(models.data) || models.data.length !== 4) fail("Verification failed: gateway did not expose exactly four Claude Desktop-facing routes.");
@@ -313,6 +423,10 @@ try {
     if (afterData.count !== beforeData.count || afterData.digest !== beforeData.digest) fail("Verification failed: protected .data changed during update.");
   }
 
+  const uninstallLauncher = join(installRoot, "uninstall.command");
+  await cp(join(current, "uninstall.command"), uninstallLauncher, { force: true });
+  await chmod(uninstallLauncher, 0o700);
+
   const installState = {
     schemaVersion:1,
     platform:"darwin-arm64",
@@ -325,8 +439,9 @@ try {
     runtimeRoot:current,
     pid:Number(state.pid),
     dataFingerprint:beforeData?.digest || null,
+    managedDependencies,
   };
-  await writeFile(join(installRoot, "install-state.json"), JSON.stringify(installState, null, 2) + "\n", "utf8");
+  await writeFile(installStateFile, JSON.stringify(installState, null, 2) + "\n", "utf8");
 
   console.log(`[OK] OpenAI-CC ${distribution.appVersion} installed for Apple Silicon macOS.`);
   console.log(`[OK] Source SHA = installed build SHA = running /healthz SHA: ${distribution.sourceCommit}`);

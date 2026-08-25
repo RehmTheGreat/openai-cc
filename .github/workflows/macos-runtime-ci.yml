@@ -40,8 +40,12 @@ jobs:
           bash -n install.sh
           bash -n run-gateway.sh
           bash -n run-claude.sh
+          bash -n uninstall.command
           node --check install-macos.mjs
+          node --check macos-provision-clients.mjs
+          node --check uninstall-macos.mjs
           node --check scripts/build-runtime-bundle-macos.mjs
+          node --check scripts/build-public-macos-installer.mjs
           test -f distribution/b2/new-mac-client-installer.ps1
 
       - name: Build production darwin-arm64 bundle
@@ -49,7 +53,11 @@ jobs:
           npm prune --omit=dev --no-audit --no-fund
           out="$RUNNER_TEMP/openai-cc-mac-bundle"
           node scripts/build-runtime-bundle-macos.mjs --output "$out"
+          node scripts/build-public-macos-installer.mjs --bundle-dir "$out" --output "$out/OpenAI-CC-Mac-Installer.command"
+          bash -n "$out/OpenAI-CC-Mac-Installer.command"
+          grep -F "Source SHA: $(git rev-parse HEAD)" "$out/OpenAI-CC-Mac-Installer.command" >/dev/null
           echo "BUNDLE_DIR=$out" >> "$GITHUB_ENV"
+          echo "PUBLIC_INSTALLER=$out/OpenAI-CC-Mac-Installer.command" >> "$GITHUB_ENV"
 
       - name: Reject persistent state in bundle
         run: |
@@ -65,11 +73,14 @@ jobs:
           root="$RUNNER_TEMP/OpenAI-CC-mac-target"
           manifest="$BUNDLE_DIR/openai-cc-runtime-manifest-darwin-arm64.json"
           bundle="$(node -e 'const p=require("node:path"),m=require(process.argv[1]);process.stdout.write(p.join(p.dirname(process.argv[1]),m.bundleUrl))' "$manifest")"
-          bash "$BUNDLE_DIR/install.sh" --manifest "$manifest" --bundle "$bundle" --install-root "$root" --skip-desktop-config --no-launch-agent
+          bash "$BUNDLE_DIR/install.sh" --manifest "$manifest" --bundle "$bundle" --install-root "$root" --skip-desktop-config --skip-client-provision --no-launch-agent
           test -f "$root/current/runtime-manifest.json"
+          test -x "$root/toolchain/node/bin/node"
+          "$root/toolchain/node/bin/node" --version
           test -f "$root/.data/model-config.json"
           test -f "$root/install-state.json"
           curl -fsS http://127.0.0.1:8082/healthz
+          test "$(curl -sS -o /dev/null -w '%{http_code}' --max-redirs 0 http://127.0.0.1:8082/)" = "302"
           echo "INSTALL_ROOT=$root" >> "$GITHUB_ENV"
 
       - name: Reinstall preserves target-local data
@@ -77,6 +88,39 @@ jobs:
           printf '%s\n' 'mac-persistence-marker' > "$INSTALL_ROOT/.data/mac-ci-marker.txt"
           manifest="$BUNDLE_DIR/openai-cc-runtime-manifest-darwin-arm64.json"
           bundle="$(node -e 'const p=require("node:path"),m=require(process.argv[1]);process.stdout.write(p.join(p.dirname(process.argv[1]),m.bundleUrl))' "$manifest")"
-          bash "$BUNDLE_DIR/install.sh" --manifest "$manifest" --bundle "$bundle" --install-root "$INSTALL_ROOT" --skip-desktop-config --no-launch-agent
+          bash "$BUNDLE_DIR/install.sh" --manifest "$manifest" --bundle "$bundle" --install-root "$INSTALL_ROOT" --skip-desktop-config --skip-client-provision --no-launch-agent
           test "$(cat "$INSTALL_ROOT/.data/mac-ci-marker.txt")" = "mac-persistence-marker"
           curl -fsS http://127.0.0.1:8082/admin >/dev/null
+
+      - name: Uninstall isolated bundle smoke target
+        run: |
+          OPENAI_CC_HOME="$INSTALL_ROOT" OPENAI_CC_ALLOW_CUSTOM_UNINSTALL_ROOT=1 "$INSTALL_ROOT/uninstall.command"
+          test ! -e "$INSTALL_ROOT"
+          ! curl -fsS --max-time 2 http://127.0.0.1:8082/healthz
+
+      - name: End-to-end public installer on bare client path
+        run: |
+          root="$RUNNER_TEMP/OpenAI-CC-public-target"
+          mkdir -p "$HOME/.claude"
+          printf '%s\n' '{"unrelatedSetting":"preserve-me"}' > "$HOME/.claude/settings.json"
+          OPENAI_CC_CLIENT_INSTALL_ROOT="$root" OPENAI_CC_CLIENT_NO_OPEN_ADMIN=1 OPENAI_CC_CLIENT_NO_OPEN_CLAUDE=1 /bin/bash "$PUBLIC_INSTALLER"
+          test -x "$root/toolchain/node/bin/node"
+          test -f "$root/install-state.json"
+          test -d "$HOME/Applications/Claude.app"
+          test -x "$HOME/.local/bin/claude"
+          "$HOME/.local/bin/claude" --version
+          test -f "$HOME/Library/Application Support/Claude-3p/configLibrary/00000000-0000-4000-8000-000000008082.json"
+          node -e 'const s=require(process.argv[1]); if(!s.managedDependencies?.claudeDesktop?.installedByOpenAICC||!s.managedDependencies?.claudeCode?.installedByOpenAICC) process.exit(1)' "$root/install-state.json"
+          OPENAI_CC_HOME="$root" OPENAI_CC_ALLOW_CUSTOM_UNINSTALL_ROOT=1 "$root/uninstall.command"
+          test ! -e "$root"
+          test ! -e "$HOME/Applications/Claude.app"
+          test ! -e "$HOME/.local/bin/claude"
+          node -e 'const s=require(process.argv[1]); if(s.unrelatedSetting!=="preserve-me") process.exit(1)' "$HOME/.claude/settings.json"
+
+      - name: Upload public macOS installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenAI-CC-Mac-Installer
+          path: ${{ env.PUBLIC_INSTALLER }}
+          if-no-files-found: error
+          retention-days: 7

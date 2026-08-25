@@ -1,5 +1,5 @@
 #!/bin/bash
-set -uo pipefail
+set -euo pipefail
 
 GATEWAY_BASE_URL="http://127.0.0.1:8082"
 INSTALL_ROOT="${OPENAI_CC_HOME:-$HOME/Library/Application Support/OpenAI-CC}"
@@ -19,6 +19,21 @@ if [[ -z "$NODE_BIN" ]]; then
 fi
 [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] || { echo "Node.js 20+ is required and was not found." >&2; exit 1; }
 
+SUPERVISOR_PID_FILE="$INSTALL_ROOT/.gateway-supervisor.pid"
+STOP_REQUESTED=0
+CHILD_PID=""
+cleanup_supervisor() {
+  if [[ -f "$SUPERVISOR_PID_FILE" && "$(cat "$SUPERVISOR_PID_FILE" 2>/dev/null || true)" == "$$" ]]; then
+    rm -f "$SUPERVISOR_PID_FILE"
+  fi
+}
+stop_supervisor() {
+  STOP_REQUESTED=1
+  if [[ -n "$CHILD_PID" ]]; then kill -TERM "$CHILD_PID" 2>/dev/null || true; fi
+}
+trap cleanup_supervisor EXIT
+trap stop_supervisor TERM INT HUP
+
 existing_pid="$(/usr/sbin/lsof -nP -tiTCP:8082 -sTCP:LISTEN 2>/dev/null | head -n 1 || true)"
 if [[ -n "$existing_pid" ]]; then
   health="$(/usr/bin/curl -fsS --max-time 2 "$GATEWAY_BASE_URL/healthz" 2>/dev/null || true)"
@@ -30,6 +45,9 @@ process.stdout.write(h.ok && Number(h.pid)===Number(process.argv[3]) && p.resolv
   echo "Port 8082 is already occupied by PID $existing_pid and is not this managed OpenAI-CC runtime." >&2
   exit 1
 fi
+
+umask 077
+printf '%s\n' "$$" > "$SUPERVISOR_PID_FILE"
 
 while true; do
   RUNTIME_ROOT="$INSTALL_ROOT/current"
@@ -43,8 +61,14 @@ while true; do
   export OPENAI_CC_WATCH_RUNTIME_SWAP="1"
   export DATA_DIR="$INSTALL_ROOT/.data"
   cd "$INSTALL_ROOT"
-  "$NODE_BIN" "$ENTRYPOINT"
+  "$NODE_BIN" "$ENTRYPOINT" &
+  CHILD_PID=$!
+  set +e
+  wait "$CHILD_PID"
   exit_code=$?
+  set -e
+  CHILD_PID=""
+  if [[ "$STOP_REQUESTED" == "1" ]]; then exit 0; fi
   if [[ "${OPENAI_CC_GATEWAY_ONESHOT:-0}" == "1" ]]; then exit "$exit_code"; fi
   /bin/sleep 0.5
 done

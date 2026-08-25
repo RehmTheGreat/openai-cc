@@ -34,6 +34,12 @@ modelConfig.on("event", (event: any) => {
 const dispatcher = new Dispatcher(store, modelConfig, { bindHost: host, providerRegistry: providers });
 const server = http.createServer((req, res) => {
   const pathname = safePath(req.url, req.headers.host);
+  if (req.method === "GET" && pathname === "/" && (isLoopback(host) || process.env.OPENAI_CC_UNSAFE_REMOTE_ADMIN === "1")) {
+    res.statusCode = 302;
+    res.setHeader("Location", "/admin");
+    res.end();
+    return;
+  }
   if (req.method === "GET" && pathname === "/healthz") {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json; charset=utf-8");
