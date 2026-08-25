@@ -23,3 +23,14 @@ test("macOS uninstall is ownership-aware and preserves unrelated Claude state", 
   assert.doesNotMatch(uninstall, /rm\s+-rf\s+["']?\$HOME\/\.claude|Application Support\/Claude["']?\s*\)/);
   assert.match(launcher, /uninstall-macos\.mjs/);
 });
+
+test("macOS gateway supervisor is tracked and stopped during uninstall", async () => {
+  const gateway = await readMaybe("run-gateway.sh");
+  const uninstall = await readMaybe("uninstall-macos.mjs");
+  assert.match(gateway, /\.gateway-supervisor\.pid/);
+  assert.match(gateway, /(?:echo|printf)[^\n]*"\$\$"/);
+  assert.match(gateway, /trap cleanup_supervisor EXIT/);
+  assert.match(uninstall, /gateway-supervisor\.pid/);
+  assert.match(uninstall, /run-gateway\.sh/);
+  assert.match(uninstall, /-TERM/);
+});
