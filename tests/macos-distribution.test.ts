@@ -69,6 +69,7 @@ test("public macOS installer is durable, self-contained, and provisions verified
   assert.match(builder, /shasum\s+-a\s+256/);
   assert.match(builder, /install-macos\.mjs/);
   assert.match(builder, /openai-cc-runtime-manifest-darwin-arm64\.json/);
+  assert.match(builder, /\/usr\/bin\/open[^\n]*Claude\.app/);
   assert.doesNotMatch(builder, /B2_(?:ISSUER|PUBLISH|DIST)|applicationKey|expirationTimestamp|TtlSeconds/);
 });
 
