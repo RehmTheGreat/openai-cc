@@ -48,6 +48,9 @@ test("macOS client generator reuses the existing short-lived B2 grant contract",
   assert.match(generator, /openai-cc-runtime-manifest-darwin-arm64\.json/);
   assert.match(generator, /installerSha256/);
   assert.match(generator, /\.command/);
+  assert.match(generator, /--input-type=module/);
+  assert.match(generator, /import \{ createHash \} from "node:crypto"/);
+  assert.doesNotMatch(generator, /require\("node:/);
   assert.match(generator, /revoke-grant\.mjs/);
   assert.match(generator, /\.openai-cc-private\\b2-issuer-credentials\.json/);
   assert.match(generator, /Automatic cleanup could not revoke failed client grant/);

@@ -70,12 +70,12 @@ export OPENAI_CC_MAC_KEY_B64='@@KEY_B64@@'
 export OPENAI_CC_MAC_BUCKET_ID_B64='@@BUCKET_ID_B64@@'
 export OPENAI_CC_MAC_PREFIX_B64='@@RELEASE_PREFIX_B64@@'
 export OPENAI_CC_MAC_EXPIRY='@@EXPIRATION_TIMESTAMP@@'
-"$NODE_BIN" <<'NODE'
-const { createHash } = require("node:crypto");
-const { mkdirSync, writeFileSync, readFileSync } = require("node:fs");
-const { join } = require("node:path");
-const { spawnSync } = require("node:child_process");
-const { tmpdir } = require("node:os");
+"$NODE_BIN" --input-type=module <<'NODE'
+import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 const dec=(n)=>Buffer.from(process.env[n],"base64").toString("utf8");
 const keyId=dec("OPENAI_CC_MAC_KEY_ID_B64"), key=dec("OPENAI_CC_MAC_KEY_B64"), bucketId=dec("OPENAI_CC_MAC_BUCKET_ID_B64"), prefix=dec("OPENAI_CC_MAC_PREFIX_B64");
 const expiry=Number(process.env.OPENAI_CC_MAC_EXPIRY), now=Date.now();
