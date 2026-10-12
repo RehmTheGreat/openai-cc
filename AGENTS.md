@@ -4,7 +4,7 @@ This is the canonical architecture briefing for humans and coding agents. Start 
 
 ## Purpose
 
-OpenAI-CC is a minimal local Anthropic-compatible router/proxy for Claude Code and Claude Desktop. Its job is routing, credential selection, protocol translation, and a small Admin configuration surface. Avoid turning it into a model-policy database, telemetry product, process supervisor, or general-purpose inference framework.
+OpenAI-CC is a minimal local Anthropic-compatible router/proxy primarily for ZCode, with Claude Code and Claude Desktop compatibility. Its job is routing, credential selection, protocol translation, and a small Admin configuration surface. Avoid turning it into a model-policy database, telemetry product, process supervisor, or general-purpose inference framework.
 
 ```text
 Claude Code / Claude Desktop
@@ -28,11 +28,8 @@ Claude Code / Claude Desktop
 
 ## Fresh routing
 
-- Default -> ChatGPT OAuth / `gpt-5.6-luna`
-- Fable -> ChatGPT OAuth / `gpt-5.6-luna`
-- Opus -> OpenCode Zen / `deepseek-v4-flash-free`
-- Sonnet -> Google AI Studio / `gemini-3.5-flash-lite`
-- Haiku -> Google AI Studio / `gemini-3.5-flash-lite`
+- All five internal routes -> ChatGPT OAuth / `gpt-5.6-luna`
+- ZCode model discovery exposes Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 as versioned Anthropic-compatible IDs.
 
 The fresh **Claude context window** is 1,050,000 tokens. It is a user-editable configuration default, not an OpenAI-CC claim about any upstream model. Existing persisted routing and context configuration wins on upgrade.
 
@@ -58,9 +55,7 @@ Route capability overrides remain useful for protocol behavior where provider di
 
 ## Claude-facing identity
 
-Claude-facing public model IDs are exactly the five logical routes:
-
-`default`, `fable`, `opus`, `sonnet`, `haiku`.
+ZCode model discovery exposes exactly four versioned IDs: `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`. The internal `default` route is never advertised.
 
 Do not expose upstream model IDs, `[1m]` variants, or private `openai-cc-*` carrier IDs as additional picker rows. Old carrier IDs may remain accepted internally only to keep already-open sessions routable.
 
@@ -152,7 +147,8 @@ Protect at least:
 - exactly five public Claude route IDs;
 - real Claude Code context display and auto-compaction using the Admin value while compaction remains enabled;
 - provider-authoritative model discovery with no hardcoded model catalog;
-- FCC/raw ChatGPT transport and multimodal tool-result conversion;
+- FCC/raw ChatGPT transport, images/PDFs, structured output, mid-conversation system messages, and multimodal tool-result conversion;
+- ZCode model discovery, reasoning effort levels, and latest public model IDs;
 - no heuristic inference context rejection;
 - real upstream usage propagation and explicit empty-upstream response handling;
 - provider-local rotation, pins, `401`, `429`, Retry, and redaction;
