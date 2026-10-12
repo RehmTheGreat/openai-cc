@@ -87,6 +87,9 @@ test("custom API style selects Chat Completions or Responses without special mod
 test("production Gemini Sonnet path carries vision, tools, multi-turn tool results, streaming and output cap", async () => {
   const f = await fixture();
   await f.store.createApiKey({ id: "g1", provider: "google", apiKey: "secret" });
+  const routeConfig = f.models.snapshot();
+  routeConfig.routes.sonnet = { provider: "google", model: GEMINI_MODEL, maxOutputTokens: 65536 };
+  await f.models.update(routeConfig);
   let captured: any;
   const server = createReplicatedServer(f.store, f.models, { bindHost: "127.0.0.1", providerRegistry: f.providers, clientFactory: () => ({ chat: { completions: { create: async (req: any) => {
     captured = req;
@@ -148,6 +151,9 @@ test("large requests are not rejected by a local heuristic context estimator", a
 
 test("legacy private transport ids remain routable but are not part of public discovery", async () => {
   const f = await fixture(); await f.store.createApiKey({ id: "g1", provider: "google", apiKey: "secret" });
+  const routeConfig = f.models.snapshot();
+  routeConfig.routes.sonnet = { provider: "google", model: GEMINI_MODEL, maxOutputTokens: 65536 };
+  await f.models.update(routeConfig);
   const seen: string[] = [];
   const server = createReplicatedServer(f.store, f.models, { bindHost: "127.0.0.1", providerRegistry: f.providers, clientFactory: () => ({ chat: { completions: { create: async (req: any) => {
     seen.push(req.model); return { id: "ok", choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
@@ -158,7 +164,7 @@ test("legacy private transport ids remain routable but are not part of public di
     assert.equal(response.status, 200);
     response = await fetch(base + "/v1/models");
     const ids = (await response.json() as any).data.map((m: any) => m.id);
-    assert.deepEqual(ids, ["fable", "opus", "sonnet", "haiku"]);
+    assert.deepEqual(ids, ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
     assert.deepEqual(seen, [GEMINI_MODEL]);
     assert.equal(f.models.slotForRequestedModel("claude-sonnet-5"), "sonnet");
   } finally { await close(server); }
