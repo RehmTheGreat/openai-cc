@@ -21,9 +21,9 @@ export const CLAUDE_DESKTOP_PROFILE_NAME = "OpenAI-CC";
 // Claude Desktop managed config or model discovery.
 const DESKTOP_SLOTS: ClaudeDesktopSlot[] = ["fable", "opus", "sonnet", "haiku"];
 const DESKTOP_PROFILE_SLOTS: ClaudeDesktopProfileSlot[] = [...DESKTOP_SLOTS];
-// Claude Desktop validates managed 3P gateway model names against Anthropic's
-// provider catalog. These are current real Claude API model aliases used only as
-// transport carriers; labelOverride keeps the OpenAI-CC route names visible.
+// Advertise current model IDs so clients such as ZCode can identify their
+// capabilities. The gateway maps these public IDs to the configured provider
+// model; these IDs are not sent through as upstream model selections.
 const DESKTOP_PROFILE_MODEL_IDS: Record<ClaudeDesktopProfileSlot, string> = {
   fable: "claude-fable-5-1",
   opus: "claude-opus-5-5",
@@ -199,6 +199,8 @@ function routeCapabilities(route: ModelRoute, providers?: ProviderRegistry): Rec
     },
     effort: {
       supported: capabilities.reasoning,
+      none: { supported: capabilities.reasoning },
+      minimal: { supported: capabilities.reasoning },
       low: { supported: capabilities.reasoning },
       medium: { supported: capabilities.reasoning },
       high: { supported: capabilities.reasoning },
@@ -262,6 +264,3 @@ function normalizeBaseUrl(value: string): string {
   return String(value || "").trim().replace(/\/+$/, "");
 }
 
-function title(value: string): string {
-  return value.charAt(0).toUpperCase() + value.slice(1);
-}
