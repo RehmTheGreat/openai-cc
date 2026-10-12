@@ -225,7 +225,7 @@ function documentPart(block: AnthropicBlock | Record<string, unknown>): Record<s
     return { type: "input_file", filename, file_data: `data:application/pdf;base64,${source.data}` };
   }
   if (source.type === "url" && typeof source.url === "string" && source.url) return { type: "input_file", file_url: source.url };
-  if (source.type === "file_id" && typeof source.file_id === "string" && source.file_id) return { type: "input_file", file_id: source.file_id };
+  if ((source.type === "file" || source.type === "file_id") && typeof source.file_id === "string" && source.file_id) return { type: "input_file", file_id: source.file_id };
   throw new ResponsesConversionError("PDF source must be base64 data, a URL, or a file ID.");
 }
 
