@@ -133,10 +133,12 @@ try {
   if (!modelsResponse.ok) throw new Error("Gateway /v1/models failed with HTTP " + modelsResponse.status);
   const catalog = await modelsResponse.json();
   const byName = new Map((catalog.data ?? []).map((model) => [String(model.display_name || "").toLowerCase(), model]));
+  const displayNames = { fable: "Fable 5.1", opus: "Opus 5.5", sonnet: "Sonnet 5.5", haiku: "Haiku 5.5" };
   const routeTargets = {};
   for (const slot of expectedAvailableModels) {
-    const model = byName.get(slot);
-    if (!model) throw new Error("Gateway catalog is missing display_name " + slot);
+    const displayName = displayNames[slot];
+    const model = byName.get(displayName.toLowerCase());
+    if (!model) throw new Error("Gateway catalog is missing display_name " + displayName);
     const target = Number(model.max_input_tokens);
     if (!Number.isSafeInteger(target) || target < 1) throw new Error(slot + " has invalid max_input_tokens=" + model.max_input_tokens);
     routeTargets[slot] = target;
