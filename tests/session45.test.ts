@@ -91,6 +91,7 @@ test("production Gemini Sonnet path carries vision, tools, multi-turn tool resul
   routeConfig.routes.sonnet.provider = "google";
   routeConfig.routes.sonnet.model = GEMINI_MODEL;
   await f.models.update(routeConfig);
+  assert.equal(f.models.routeForRequestedModel("sonnet").provider, "google");
   let captured: any;
   const server = createReplicatedServer(f.store, f.models, { bindHost: "127.0.0.1", providerRegistry: f.providers, clientFactory: () => ({ chat: { completions: { create: async (req: any) => {
     captured = req;
