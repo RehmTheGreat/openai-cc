@@ -17,7 +17,7 @@ export interface AnthropicRequest {
 }
 
 export interface AnthropicMessage {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system" | "developer";
   content: string | AnthropicBlock[];
 }
 
@@ -44,6 +44,7 @@ export interface ResponsesRequest {
   tool_choice?: unknown;
   parallel_tool_calls?: boolean;
   reasoning?: { effort?: string; summary?: "auto" };
+  text?: { format?: { type: "json_schema"; name: string; schema: Record<string, unknown>; strict: boolean } };
   store?: boolean;
   include?: string[];
   stream: boolean;
