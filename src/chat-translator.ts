@@ -23,6 +23,13 @@ export function anthropicToChatCompletions(req: AnthropicRequest, model: string)
       ? [{ type: "text", text: message.content }]
       : message.content;
 
+    if (message.role === "system" || message.role === "developer") {
+      const text = blocks.filter((block) => block.type === "text")
+        .map((block) => String((block as AnthropicTextBlock).text ?? "")).join("\n");
+      if (text) messages.push({ role: "system", content: text });
+      continue;
+    }
+
     if (message.role === "assistant") {
       const text: string[] = [];
       const toolCalls: any[] = [];
