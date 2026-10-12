@@ -192,7 +192,7 @@ test("fresh-install verification enforces current provider/model defaults withou
   assert.doesNotMatch(install, /context = (?:200000|850000|1000000|1050000)/);
   assert.match(install, /model\.max_input_tokens -ne \[int64\]\$routeHealth\.contextWindow/);
   assert.match(install, /model\.max_tokens -ne \[int64\]\$route\.maxOutputTokens/);
-  assert.match(install, /aliasModel\.display_name -ne \$title/);
+  assert.match(install, /aliasModel\.display_name -ne \$modelTitle/);
   assert.match(install, /v1\/models\/\$encodedAlias/);
   assert.match(install, /gateway did not expose exactly four Claude Desktop-facing routes/);
   assert.match(install, /Admin endpoint did not return HTTP 200/);
