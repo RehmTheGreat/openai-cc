@@ -592,6 +592,7 @@ function Verify-Installation([object]$Distribution, [object]$InternalManifest, [
     $title = $slot.Substring(0, 1).ToUpperInvariant() + $slot.Substring(1)
     $modelTitles = @{ fable = "Fable 5.1"; opus = "Opus 5.5"; sonnet = "Sonnet 5.5"; haiku = "Haiku 5.5" }
     $modelTitle = $modelTitles[$slot]
+    if (-not $modelTitle) { $modelTitle = $title }
     $route = $state.modelConfig.routes.PSObject.Properties[$slot].Value
     $routeHealth = $state.routeHealth.PSObject.Properties[$slot].Value
     if ($slot -ne "default") {
