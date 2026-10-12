@@ -508,9 +508,10 @@ function imageToResponsesPart(block: AnthropicBlock | Record<string, unknown>): 
   throw new Error("Unsupported image source.");
 }
 
-function flushMessage(role: "user" | "assistant", parts: unknown[], input: unknown[]): void {
+function flushMessage(role: AnthropicMessage["role"], parts: unknown[], input: unknown[]): void {
   if (!parts.length) return;
-  input.push({ type: "message", role, content: parts.splice(0, parts.length) });
+  const responsesRole = role === "system" || role === "developer" ? "developer" : role;
+  input.push({ type: "message", role: responsesRole, content: parts.splice(0, parts.length) });
 }
 
 function systemToString(system: AnthropicRequest["system"]): string {
