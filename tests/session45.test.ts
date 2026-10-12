@@ -92,6 +92,7 @@ test("production Gemini Sonnet path carries vision, tools, multi-turn tool resul
   routeConfig.routes.sonnet.model = GEMINI_MODEL;
   await f.models.update(routeConfig);
   assert.equal(f.models.routeForRequestedModel("sonnet").provider, "google");
+  assert.equal(f.models.credentialForRequestedModel("sonnet")?.provider, "google");
   let captured: any;
   const server = createReplicatedServer(f.store, f.models, { bindHost: "127.0.0.1", providerRegistry: f.providers, clientFactory: () => ({ chat: { completions: { create: async (req: any) => {
     captured = req;
@@ -105,7 +106,8 @@ test("production Gemini Sonnet path carries vision, tools, multi-turn tool resul
       { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "lookup", input: {} }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "done" }] },
     ] }) });
-    assert.equal(response.status, 200);
+    const responseBody = await response.text();
+    assert.equal(response.status, 200, responseBody);
     assert.equal(captured.model, GEMINI_MODEL);
     assert.equal(captured.max_tokens, 65536);
     assert.equal(captured.messages[0].content[1].type, "image_url");
