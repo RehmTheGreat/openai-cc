@@ -90,6 +90,8 @@ test("production Gemini Sonnet path carries vision, tools, multi-turn tool resul
   const routeConfig = f.models.snapshot();
   routeConfig.routes.sonnet.provider = "google";
   routeConfig.routes.sonnet.model = GEMINI_MODEL;
+  routeConfig.routes.haiku.provider = "google";
+  routeConfig.routes.haiku.model = GEMINI_MODEL;
   await f.models.update(routeConfig);
   assert.equal(f.models.routeForRequestedModel("sonnet").provider, "google");
   assert.equal(f.models.credentialForRequestedModel("sonnet")?.provider, "google");
