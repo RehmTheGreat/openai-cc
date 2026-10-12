@@ -296,9 +296,9 @@ try {
     const expected = {
       default:{provider:"chatgpt",model:"gpt-5.6-luna"},
       fable:{provider:"chatgpt",model:"gpt-5.6-luna"},
-      opus:{provider:"zen",model:"deepseek-v4-flash-free"},
-      sonnet:{provider:"google",model:"gemini-3.5-flash-lite"},
-      haiku:{provider:"google",model:"gemini-3.5-flash-lite"},
+      opus:{provider:"chatgpt",model:"gpt-5.6-luna"},
+      sonnet:{provider:"chatgpt",model:"gpt-5.6-luna"},
+      haiku:{provider:"chatgpt",model:"gpt-5.6-luna"},
     };
     for (const [slot, contract] of Object.entries(expected)) {
       const route = adminState.modelConfig.routes[slot];
