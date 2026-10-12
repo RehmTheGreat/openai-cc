@@ -88,7 +88,8 @@ test("production Gemini Sonnet path carries vision, tools, multi-turn tool resul
   const f = await fixture();
   await f.store.createApiKey({ id: "g1", provider: "google", apiKey: "secret" });
   const routeConfig = f.models.snapshot();
-  routeConfig.routes.sonnet = { provider: "google", model: GEMINI_MODEL, maxOutputTokens: 65536 };
+  routeConfig.routes.sonnet.provider = "google";
+  routeConfig.routes.sonnet.model = GEMINI_MODEL;
   await f.models.update(routeConfig);
   let captured: any;
   const server = createReplicatedServer(f.store, f.models, { bindHost: "127.0.0.1", providerRegistry: f.providers, clientFactory: () => ({ chat: { completions: { create: async (req: any) => {
@@ -152,7 +153,8 @@ test("large requests are not rejected by a local heuristic context estimator", a
 test("legacy private transport ids remain routable but are not part of public discovery", async () => {
   const f = await fixture(); await f.store.createApiKey({ id: "g1", provider: "google", apiKey: "secret" });
   const routeConfig = f.models.snapshot();
-  routeConfig.routes.sonnet = { provider: "google", model: GEMINI_MODEL, maxOutputTokens: 65536 };
+  routeConfig.routes.sonnet.provider = "google";
+  routeConfig.routes.sonnet.model = GEMINI_MODEL;
   await f.models.update(routeConfig);
   const seen: string[] = [];
   const server = createReplicatedServer(f.store, f.models, { bindHost: "127.0.0.1", providerRegistry: f.providers, clientFactory: () => ({ chat: { completions: { create: async (req: any) => {
