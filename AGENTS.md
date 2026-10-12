@@ -144,7 +144,7 @@ Protect at least:
 
 - Luna fresh defaults and preservation of existing routes;
 - one arbitrary positive Admin context setting without an OpenAI-CC 1M cap;
-- exactly five public Claude route IDs;
+- exactly four versioned ZCode model IDs with reasoning effort metadata;
 - real Claude Code context display and auto-compaction using the Admin value while compaction remains enabled;
 - provider-authoritative model discovery with no hardcoded model catalog;
 - FCC/raw ChatGPT transport, images/PDFs, structured output, mid-conversation system messages, and multimodal tool-result conversion;
