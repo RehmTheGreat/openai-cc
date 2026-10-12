@@ -75,29 +75,26 @@ export const DEFAULT_CONTEXT_WINDOWS: Record<ModelSlot, number> = {
 // ids for the four user-facing routes, with [1m] only when that route is >200K.
 const CLAUDE_STANDARD_MODEL_IDS: Record<ModelSlot, string> = {
   default: "default",
-  fable: "claude-fable-5",
-  opus: "claude-opus-4-8",
-  sonnet: "claude-sonnet-5",
-  haiku: "claude-haiku-4-5",
+  fable: "claude-fable-5-1",
+  opus: "claude-opus-5-5",
+  sonnet: "claude-sonnet-5-5",
+  haiku: "claude-haiku-5-5",
 };
 
 const CLAUDE_EXTENDED_MODEL_IDS: Record<ModelSlot, string> = {
   default: "default",
-  fable: "claude-fable-5[1m]",
-  opus: "claude-opus-4-8[1m]",
-  sonnet: "claude-sonnet-5[1m]",
-  // Haiku itself is a 200K family in Claude Code. For a non-Anthropic upstream
-  // configured above 200K, use the previously verified 1M carrier while the
-  // visible route name remains Haiku.
-  haiku: "claude-opus-4-7[1m]",
+  fable: "claude-fable-5-1[1m]",
+  opus: "claude-opus-5-5[1m]",
+  sonnet: "claude-sonnet-5-5[1m]",
+  haiku: "claude-haiku-5-5[1m]",
 };
 
 const DEFAULT_ROUTES: Record<ModelSlot, ModelRoute> = {
   default: { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: DEFAULT_CONTEXT_WINDOWS.default, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.default },
   fable: { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: DEFAULT_CONTEXT_WINDOWS.fable, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.fable },
-  opus: { provider: "zen", model: "deepseek-v4-flash-free", contextWindow: DEFAULT_CONTEXT_WINDOWS.opus, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.opus },
-  sonnet: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, contextWindow: DEFAULT_CONTEXT_WINDOWS.sonnet, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.sonnet },
-  haiku: { provider: "google", model: GEMINI_FLASH_LITE_MODEL, contextWindow: DEFAULT_CONTEXT_WINDOWS.haiku, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.haiku },
+  opus: { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: DEFAULT_CONTEXT_WINDOWS.opus, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.opus },
+  sonnet: { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: DEFAULT_CONTEXT_WINDOWS.sonnet, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.sonnet },
+  haiku: { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: DEFAULT_CONTEXT_WINDOWS.haiku, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS.haiku },
 };
 
 const DEFAULTS: ModelConfig = {
