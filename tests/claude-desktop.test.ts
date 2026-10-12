@@ -25,12 +25,20 @@ const config: ModelConfig = {
 
 test("Claude model discovery uses recognized carriers while labels and context remain route-specific", () => {
   const response = claudeDesktopModelList(config);
-  assert.deepEqual(response.data.map((model) => model.display_name), ["Fable", "Opus", "Sonnet", "Haiku"]);
+  assert.deepEqual(response.data.map((model) => model.display_name), ["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5"]);
   assert.deepEqual(response.data.map((model) => model.max_input_tokens), [850000, 200000, 700000, 600000]);
-  assert.deepEqual(response.data.map((model) => model.id), ["fable", "opus", "sonnet", "haiku"]);
-  assert.equal(response.data.find((model) => model.display_name === "Opus")?.max_tokens, 96000);
-  assert.equal((response.data.find((model) => model.display_name === "Sonnet")?.capabilities.image_input as any).supported, true);
-  assert.equal((response.data.find((model) => model.display_name === "Haiku")?.capabilities.image_input as any).supported, false);
+  assert.deepEqual(response.data.map((model) => model.id), ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
+  assert.equal(response.data.find((model) => model.display_name === "Opus 5.5")?.max_tokens, 96000);
+  assert.equal((response.data.find((model) => model.display_name === "Sonnet 5.5")?.capabilities.image_input as any).supported, true);
+  assert.equal((response.data.find((model) => model.display_name === "Haiku 5.5")?.capabilities.image_input as any).supported, false);
+  assert.equal((response.data.find((model) => model.display_name === "Fable 5.1")?.capabilities.effort as any).supported, true);
+  const fable = response.data.find((model) => model.display_name === "Fable 5.1")!;
+  for (const level of ["none", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+    assert.equal((fable.capabilities.effort as any)[level].supported, true, `${level} effort is discoverable`);
+  }
+  assert.equal((fable.capabilities.image_input as any).supported, true);
+  assert.equal((response.data.find((model) => model.display_name === "Fable 5.1")?.capabilities.pdf_input as any).supported, true);
+  assert.equal((response.data.find((model) => model.display_name === "Fable 5.1")?.capabilities.structured_outputs as any).supported, true);
   assert.equal(response.has_more, false);
   const publicJson = JSON.stringify(response.data);
   assert.doesNotMatch(publicJson, /provider-default|provider-opus|provider-sonnet|openai-cc-/i);
@@ -41,15 +49,17 @@ test("route capability overrides change Claude-facing metadata without changing 
   overridden.routes.sonnet.vision = false;
   overridden.routes.sonnet.tools = false;
   overridden.routes.sonnet.reasoning = false;
-  const sonnet = claudeDesktopModelList(overridden).data.find((model) => model.display_name === "Sonnet")!;
+  const sonnet = claudeDesktopModelList(overridden).data.find((model) => model.display_name === "Sonnet 5.5")!;
   assert.equal((sonnet.capabilities.image_input as any).supported, false);
   assert.equal((sonnet.capabilities.thinking as any).supported, false);
   assert.equal(overridden.routes.sonnet.model, "provider-sonnet");
 });
 
 test("model retrieval accepts carrier ids but never upstream provider model ids", () => {
-  assert.equal(claudeDesktopModel(config, "claude-opus-4-8")?.max_tokens, 96000);
-  assert.equal(claudeDesktopModel(config, "claude-sonnet-5%5B1m%5D")?.display_name, "Sonnet");
+  assert.equal(claudeDesktopModel(config, "claude-opus-5-5")?.max_tokens, 96000);
+  assert.equal(claudeDesktopModel(config, "claude-fable-5-1")?.display_name, "Fable 5.1");
+  assert.equal(claudeDesktopModel(config, "claude-haiku-5-5")?.display_name, "Haiku 5.5");
+  assert.equal(claudeDesktopModel(config, "claude-sonnet-5-5%5B1m%5D")?.display_name, "Sonnet 5.5");
   assert.equal(claudeDesktopModel(config, "provider-opus"), undefined);
   assert.equal(claudeDesktopModel(config, "openai-cc-sonnet"), undefined);
 });
@@ -77,12 +87,12 @@ test("Claude Desktop 3P profile exposes exactly four validated Claude carriers a
   assert.equal(profile.inferenceGatewayBaseUrl, "http://127.0.0.1:8082");
   assert.equal(profile.inferenceGatewayAuthScheme, "bearer");
   assert.deepEqual(profile.inferenceModels.map((model: any) => model.name), [
-    "claude-fable-5",
-    "claude-opus-4-8",
-    "claude-sonnet-5",
-    "claude-haiku-4-5",
+    "claude-fable-5-1",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
   ]);
-  assert.deepEqual(profile.inferenceModels.map((model: any) => model.labelOverride), ["Fable", "Opus", "Sonnet", "Haiku"]);
+  assert.deepEqual(profile.inferenceModels.map((model: any) => model.labelOverride), ["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5"]);
   assert.equal(profile.inferenceModels.some((model: any) => model.name === "default" || model.labelOverride === "Default"), false);
   assert.equal(profile.inferenceModels.some((model: any) => "supports1m" in model), false);
   assert.equal(meta.appliedId, CLAUDE_DESKTOP_PROFILE_ID);

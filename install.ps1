@@ -590,11 +590,14 @@ function Verify-Installation([object]$Distribution, [object]$InternalManifest, [
   }
   foreach ($slot in $envKeys.Keys) {
     $title = $slot.Substring(0, 1).ToUpperInvariant() + $slot.Substring(1)
+    $modelTitles = @{ fable = "Fable 5.1"; opus = "Opus 5.5"; sonnet = "Sonnet 5.5"; haiku = "Haiku 5.5" }
+    $modelTitle = $modelTitles[$slot]
+    if (-not $modelTitle) { $modelTitle = $title }
     $route = $state.modelConfig.routes.PSObject.Properties[$slot].Value
     $routeHealth = $state.routeHealth.PSObject.Properties[$slot].Value
     if ($slot -ne "default") {
-      $model = @($models.data | Where-Object { [string]$_.display_name -eq $title }) | Select-Object -First 1
-      if (-not $model) { throw "Verification failed: model discovery is missing $title." }
+      $model = @($models.data | Where-Object { [string]$_.display_name -eq $modelTitle }) | Select-Object -First 1
+      if (-not $model) { throw "Verification failed: model discovery is missing $modelTitle." }
       if ([int64]$model.max_input_tokens -ne [int64]$routeHealth.contextWindow) { throw "Verification failed: $title context metadata disagrees with effective route context." }
       if ([int64]$model.max_tokens -ne [int64]$route.maxOutputTokens) { throw "Verification failed: $title output metadata disagrees with route configuration." }
     }
@@ -603,7 +606,7 @@ function Verify-Installation([object]$Distribution, [object]$InternalManifest, [
     if (-not $configuredAlias) { throw "Verification failed: Claude alias for $title is missing." }
     $encodedAlias = [Uri]::EscapeDataString($configuredAlias)
     $aliasModel = Invoke-RestMethod -Uri "$GatewayBaseUrl/v1/models/$encodedAlias" -TimeoutSec 5
-    if ([string]$aliasModel.display_name -ne $title) { throw "Verification failed: Claude alias for $title does not resolve back to the expected logical route." }
+    if ([string]$aliasModel.display_name -ne $modelTitle) { throw "Verification failed: Claude alias for $title does not resolve back to the expected logical route." }
     if ([int64]$aliasModel.max_input_tokens -ne [int64]$routeHealth.contextWindow -or [int64]$aliasModel.max_tokens -ne [int64]$route.maxOutputTokens) { throw "Verification failed: Claude alias for $title resolves with inconsistent route metadata." }
   }
 
@@ -611,9 +614,9 @@ function Verify-Installation([object]$Distribution, [object]$InternalManifest, [
     $expected = @{
       default = @{ provider = "chatgpt"; model = "gpt-5.6-luna" }
       fable = @{ provider = "chatgpt"; model = "gpt-5.6-luna" }
-      opus = @{ provider = "zen"; model = "deepseek-v4-flash-free" }
-      sonnet = @{ provider = "google"; model = "gemini-3.5-flash-lite" }
-      haiku = @{ provider = "google"; model = "gemini-3.5-flash-lite" }
+      opus = @{ provider = "chatgpt"; model = "gpt-5.6-luna" }
+      sonnet = @{ provider = "chatgpt"; model = "gpt-5.6-luna" }
+      haiku = @{ provider = "chatgpt"; model = "gpt-5.6-luna" }
     }
     foreach ($slot in $expected.Keys) {
       $route = $state.modelConfig.routes.PSObject.Properties[$slot].Value

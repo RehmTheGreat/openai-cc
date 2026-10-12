@@ -30,9 +30,9 @@ test("fresh routing uses Luna with route-specific context windows", async () => 
   const config = models.snapshot();
   assert.deepEqual(config.routes.default, { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: 1_000_000, maxOutputTokens: 128000 });
   assert.deepEqual(config.routes.fable, { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: 1_000_000, maxOutputTokens: 128000 });
-  assert.deepEqual(config.routes.opus, { provider: "zen", model: "deepseek-v4-flash-free", contextWindow: 200_000, maxOutputTokens: 128000 });
-  assert.deepEqual(config.routes.sonnet, { provider: "google", model: "gemini-3.5-flash-lite", contextWindow: 1_000_000, maxOutputTokens: 65536 });
-  assert.deepEqual(config.routes.haiku, { provider: "google", model: "gemini-3.5-flash-lite", contextWindow: 1_000_000, maxOutputTokens: 65536 });
+  assert.deepEqual(config.routes.opus, { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: 200_000, maxOutputTokens: 128000 });
+  assert.deepEqual(config.routes.sonnet, { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: 1_000_000, maxOutputTokens: 65536 });
+  assert.deepEqual(config.routes.haiku, { provider: "chatgpt", model: "gpt-5.6-luna", contextWindow: 1_000_000, maxOutputTokens: 65536 });
   assert.equal(config.contextWindow, 1_000_000, "compatibility ceiling is derived from the largest route");
   accounts.close();
 });
@@ -104,16 +104,16 @@ test("each Admin route context is authoritative and Claude carriers resolve to l
   assert.equal(contextWindowForRoute(config, "opus"), 180_000);
   assert.equal(contextWindowForRoute(config, "sonnet"), 800_000);
   assert.equal(contextWindowForRoute(config, "haiku"), 700_000);
-  assert.match(claudeCodeModelAlias(config, "fable"), /^claude-fable-5\[1m\]$/);
-  assert.equal(claudeCodeModelAlias(config, "opus"), "claude-opus-4-8");
-  assert.match(claudeCodeModelAlias(config, "sonnet"), /^claude-sonnet-5\[1m\]$/);
+  assert.match(claudeCodeModelAlias(config, "fable"), /^claude-fable-5-1\[1m\]$/);
+  assert.equal(claudeCodeModelAlias(config, "opus"), "claude-opus-5-5");
+  assert.match(claudeCodeModelAlias(config, "sonnet"), /^claude-sonnet-5-5\[1m\]$/);
   assert.equal(claudeCodeTransportAlias(config, "sonnet"), claudeCodeModelAlias(config, "sonnet"));
   assert.equal(models.slotForRequestedModel("fable"), "fable");
   assert.equal(models.slotForRequestedModel("openai-cc-fable"), "fable", "old sessions remain routable");
-  assert.equal(models.slotForRequestedModel("claude-fable-5[1m]"), "fable");
+  assert.equal(models.slotForRequestedModel("claude-fable-5-1[1m]"), "fable");
   assert.equal(models.slotForRequestedModel("claude-opus-4-8"), "opus");
-  assert.equal(models.slotForRequestedModel("claude-sonnet-5[1m]"), "sonnet");
-  assert.equal(models.slotForRequestedModel("claude-opus-4-7[1m]"), "haiku");
+  assert.equal(models.slotForRequestedModel("claude-sonnet-5-5[1m]"), "sonnet");
+  assert.equal(models.slotForRequestedModel("claude-haiku-5-5[1m]"), "haiku");
   accounts.close();
 });
 

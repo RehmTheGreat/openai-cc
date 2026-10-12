@@ -21,16 +21,28 @@ export const CLAUDE_DESKTOP_PROFILE_NAME = "OpenAI-CC";
 // Claude Desktop managed config or model discovery.
 const DESKTOP_SLOTS: ClaudeDesktopSlot[] = ["fable", "opus", "sonnet", "haiku"];
 const DESKTOP_PROFILE_SLOTS: ClaudeDesktopProfileSlot[] = [...DESKTOP_SLOTS];
-// Claude Desktop validates managed 3P gateway model names against Anthropic's
-// provider catalog. These are current real Claude API model aliases used only as
-// transport carriers; labelOverride keeps the OpenAI-CC route names visible.
+// Advertise current model IDs so clients such as ZCode can identify their
+// capabilities. The gateway maps these public IDs to the configured provider
+// model; these IDs are not sent through as upstream model selections.
 const DESKTOP_PROFILE_MODEL_IDS: Record<ClaudeDesktopProfileSlot, string> = {
-  fable: "claude-fable-5",
-  opus: "claude-opus-4-8",
-  sonnet: "claude-sonnet-5",
-  haiku: "claude-haiku-4-5",
+  fable: "claude-fable-5-1",
+  opus: "claude-opus-5-5",
+  sonnet: "claude-sonnet-5-5",
+  haiku: "claude-haiku-5-5",
 };
 const UNKNOWN_CREATED_AT = "1970-01-01T00:00:00Z";
+const DISPLAY_NAMES: Record<ClaudeDesktopSlot, string> = {
+  fable: "Fable 5.1",
+  opus: "Opus 5.5",
+  sonnet: "Sonnet 5.5",
+  haiku: "Haiku 5.5",
+};
+const LEGACY_PROFILE_MODEL_IDS: Record<ClaudeDesktopSlot, string[]> = {
+  fable: ["claude-fable-5", "claude-fable-5[1m]"],
+  opus: ["claude-opus-4-8", "claude-opus-4-8[1m]", "claude-opus-5", "claude-opus-5[1m]"],
+  sonnet: ["claude-sonnet-5", "claude-sonnet-5[1m]"],
+  haiku: ["claude-haiku-4-5", "claude-haiku-4-5-20251001", "claude-opus-4-7[1m]"],
+};
 
 export interface ClaudeDesktopPaths {
   normalConfigFile: string;
@@ -66,7 +78,8 @@ export function claudeDesktopModel(config: ModelConfig, modelId: string, provide
   if (direct) return direct;
   for (const slot of DESKTOP_SLOTS) {
     if (normalized === claudeCodeModelAlias(config, slot, providers).toLowerCase()) return modelInfo(slot, config, providers);
-    if (normalized === DESKTOP_PROFILE_MODEL_IDS[slot].toLowerCase()) return modelInfo(slot, config, providers);
+    if (normalized === DESKTOP_PROFILE_MODEL_IDS[slot].toLowerCase()
+      || LEGACY_PROFILE_MODEL_IDS[slot].some((id) => id.toLowerCase() === normalized)) return modelInfo(slot, config, providers);
   }
   // Internal Default remains addressable for Claude Code metadata lookups, but is never advertised.
   if (normalized === "default") return modelInfo("default", config, providers);
@@ -161,9 +174,9 @@ export async function currentPlatformPaths(): Promise<ClaudeDesktopPaths | undef
 function modelInfo(slot: ModelSlot, config: ModelConfig, providers?: ProviderRegistry): ClaudeModelInfo {
   const route = config.routes[slot];
   return {
-    id: slot,
+    id: slot === "default" ? "default" : DESKTOP_PROFILE_MODEL_IDS[slot],
     type: "model",
-    display_name: title(slot),
+    display_name: slot === "default" ? "Default" : DISPLAY_NAMES[slot],
     created_at: UNKNOWN_CREATED_AT,
     max_input_tokens: contextWindowForRoute(config, slot, providers),
     max_tokens: route.maxOutputTokens,
@@ -185,16 +198,19 @@ function routeCapabilities(route: ModelRoute, providers?: ProviderRegistry): Rec
       compact_20260112: unsupported,
     },
     effort: {
-      supported: false,
-      low: unsupported,
-      medium: unsupported,
-      high: unsupported,
-      xhigh: unsupported,
-      max: unsupported,
+      supported: capabilities.reasoning,
+      none: { supported: capabilities.reasoning },
+      minimal: { supported: capabilities.reasoning },
+      low: { supported: capabilities.reasoning },
+      medium: { supported: capabilities.reasoning },
+      high: { supported: capabilities.reasoning },
+      xhigh: { supported: capabilities.reasoning },
+      max: { supported: capabilities.reasoning },
     },
     image_input: { supported: capabilities.image },
-    pdf_input: unsupported,
-    structured_outputs: unsupported,
+    pdf_input: { supported: route.provider === "chatgpt" },
+    structured_outputs: { supported: route.provider === "chatgpt" },
+    system_messages: { supported: route.provider === "chatgpt" },
     thinking: {
       supported: capabilities.reasoning,
       types: {
@@ -248,6 +264,3 @@ function normalizeBaseUrl(value: string): string {
   return String(value || "").trim().replace(/\/+$/, "");
 }
 
-function title(value: string): string {
-  return value.charAt(0).toUpperCase() + value.slice(1);
-}

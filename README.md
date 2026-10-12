@@ -1,6 +1,6 @@
 # OpenAI-CC
 
-OpenAI-CC is a small local Node/TypeScript Anthropic-compatible routing gateway for Claude Code and Claude Desktop.
+OpenAI-CC is a local Node/TypeScript Anthropic-compatible gateway for ZCode and other compatible coding clients. It routes requests through ChatGPT/Codex OAuth by default. Claude Code and Claude Desktop integrations remain available.
 
 ```text
 Claude Code / Claude Desktop
@@ -17,7 +17,7 @@ The Admin UI at `http://127.0.0.1:8082/admin` is the normal configuration surfac
 
 OpenAI-CC deliberately keeps model policy simple:
 
-- Claude sees exactly five logical routes: `default`, `fable`, `opus`, `sonnet`, `haiku`.
+- The gateway exposes four versioned model IDs to ZCode and retains five internal logical routes, including the private `default` fallback.
 - Admin has one Claude context-window number. The same value drives Claude's displayed context, `/v1/models`, and auto-compaction.
 - The fresh context default is 1,050,000 tokens, with no arbitrary OpenAI-CC 1M ceiling.
 - If a selected upstream supports less than the configured request, that upstream returns its own error; OpenAI-CC does not maintain a per-model clamp database.
@@ -28,15 +28,16 @@ OpenAI-CC deliberately keeps model policy simple:
 - Responses tool-result images remain structured multimodal content rather than being converted to base64 text.
 - Auto routes use the preferred ready credential for that provider and can rotate only within that provider. Pinned routes never silently fall back.
 
-Fresh routing defaults are:
+Fresh routing defaults send every route through ChatGPT OAuth / Codex using `gpt-5.6-luna`:
 
-| Route | Provider | Model |
+| ZCode model ID | Display name | Gateway route |
 | --- | --- | --- |
-| Default | ChatGPT OAuth | `gpt-5.6-luna` |
-| Fable | ChatGPT OAuth | `gpt-5.6-luna` |
-| Opus | OpenCode Zen | `deepseek-v4-flash-free` |
-| Sonnet | Google AI Studio | `gemini-3.5-flash-lite` |
-| Haiku | Google AI Studio | `gemini-3.5-flash-lite` |
+| `claude-fable-5-1` | Fable 5.1 | Fable |
+| `claude-opus-5-5` | Opus 5.5 | Opus |
+| `claude-sonnet-5-5` | Sonnet 5.5 | Sonnet |
+| `claude-haiku-5-5` | Haiku 5.5 | Haiku |
+
+In ZCode, add a custom Anthropic-compatible provider with base URL `http://127.0.0.1:8082` and any placeholder API key. Add the four model IDs above once. The gateway advertises image, PDF, structured-output, and reasoning-effort capabilities for its ChatGPT OAuth routes; ZCode can show its effort selector without creating separate model entries for each effort level. Existing saved routes and credentials remain unchanged on upgrade.
 
 The 1,050,000-token fresh context value is configuration, not a claim by OpenAI-CC about any model's upstream capability. Existing user routing and context configuration survive upgrades.
 

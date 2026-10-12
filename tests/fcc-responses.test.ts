@@ -90,3 +90,52 @@ test("FCC port rejects Anthropic fields Responses cannot represent", () => {
   req.output_config = { effort: "high", extra: true };
   assert.throws(() => anthropicToFccResponses(req), /output_config\.extra/);
 });
+
+test("FCC port preserves PDF input, structured output, and mid-conversation system messages", () => {
+  const req = request() as any;
+  req.output_config = {
+    effort: "high",
+    format: {
+      type: "json_schema",
+      name: "task_result",
+      schema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false },
+    },
+  };
+  req.messages.push(
+    { role: "system", content: "Never expose secrets." },
+    { role: "user", content: [
+      { type: "document", source: { type: "base64", media_type: "application/pdf", data: "JVBERi0xLjQ=" } },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "aW1hZ2U=" } },
+      { type: "text", text: "Summarize this PDF." },
+    ] },
+  );
+
+  const converted = anthropicToFccResponses(req) as any;
+  assert.deepEqual(converted.text.format, {
+    type: "json_schema",
+    name: "task_result",
+    schema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false },
+    strict: true,
+  });
+  assert.ok(converted.input.some((item: any) => item.type === "message" && item.role === "developer"
+    && item.content.some((part: any) => part.text === "Never expose secrets.")));
+  assert.ok(converted.input.some((item: any) => item.type === "message"
+    && item.content.some((part: any) => part.type === "input_file"
+      && part.filename === "document.pdf"
+      && part.file_data === "data:application/pdf;base64,JVBERi0xLjQ=")));
+  assert.ok(converted.input.some((item: any) => item.type === "message"
+    && item.content.some((part: any) => part.type === "input_image"
+      && part.image_url === "data:image/png;base64,aW1hZ2U=")));
+});
+
+test("FCC port rejects malformed structured output and unsupported document formats", () => {
+  const malformed = request() as any;
+  malformed.output_config = { format: { type: "json_schema", schema: "not-an-object" } };
+  assert.throws(() => anthropicToFccResponses(malformed), /output_config\.format/);
+
+  const unsupported = request() as any;
+  unsupported.messages = [{ role: "user", content: [
+    { type: "document", source: { type: "base64", media_type: "application/msword", data: "AA==" } },
+  ] }];
+  assert.throws(() => anthropicToFccResponses(unsupported), /PDF documents/);
+});

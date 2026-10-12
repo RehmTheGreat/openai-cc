@@ -181,8 +181,8 @@ test("Admin route context and capability overrides persist while Claude-facing n
     assert.equal(state.modelConfig.routes.fable.model, "gpt-5.6-luna");
     assert.equal(state.modelConfig.routes.fable.contextWindow, 1_000_000);
     assert.equal(state.modelConfig.routes.opus.contextWindow, 200_000);
-    assert.equal(state.modelConfig.routes.sonnet.provider, "google");
-    assert.equal(state.modelConfig.routes.sonnet.model, "gemini-3.5-flash-lite");
+    assert.equal(state.modelConfig.routes.sonnet.provider, "chatgpt");
+    assert.equal(state.modelConfig.routes.sonnet.model, "gpt-5.6-luna");
     assert.equal(typeof state.routeHealth.fable.contextWindow, "number");
 
     const next = structuredClone(state.modelConfig);
@@ -205,8 +205,8 @@ test("Admin route context and capability overrides persist while Claude-facing n
     assert.equal(state.modelConfig.routes.sonnet.reasoning, false);
 
     const publicModels = await (await fetch(`${f.base}/v1/models`)).json() as any;
-    assert.deepEqual(publicModels.data.map((model: any) => model.display_name), ["Fable", "Opus", "Sonnet", "Haiku"]);
-    const sonnet = publicModels.data.find((model: any) => model.display_name === "Sonnet");
+    assert.deepEqual(publicModels.data.map((model: any) => model.display_name), ["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5"]);
+    const sonnet = publicModels.data.find((model: any) => model.display_name === "Sonnet 5.5");
     assert.equal(sonnet.max_input_tokens, 360000);
     assert.equal(sonnet.capabilities.image_input.supported, false);
     assert.equal(sonnet.capabilities.thinking.supported, false);
