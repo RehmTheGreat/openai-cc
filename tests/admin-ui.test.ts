@@ -181,8 +181,8 @@ test("Admin route context and capability overrides persist while Claude-facing n
     assert.equal(state.modelConfig.routes.fable.model, "gpt-5.6-luna");
     assert.equal(state.modelConfig.routes.fable.contextWindow, 1_000_000);
     assert.equal(state.modelConfig.routes.opus.contextWindow, 200_000);
-    assert.equal(state.modelConfig.routes.sonnet.provider, "google");
-    assert.equal(state.modelConfig.routes.sonnet.model, "gemini-3.5-flash-lite");
+    assert.equal(state.modelConfig.routes.sonnet.provider, "chatgpt");
+    assert.equal(state.modelConfig.routes.sonnet.model, "gpt-5.6-luna");
     assert.equal(typeof state.routeHealth.fable.contextWindow, "number");
 
     const next = structuredClone(state.modelConfig);
