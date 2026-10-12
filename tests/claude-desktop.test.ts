@@ -32,6 +32,11 @@ test("Claude model discovery uses recognized carriers while labels and context r
   assert.equal((response.data.find((model) => model.display_name === "Sonnet 5.5")?.capabilities.image_input as any).supported, true);
   assert.equal((response.data.find((model) => model.display_name === "Haiku 5.5")?.capabilities.image_input as any).supported, false);
   assert.equal((response.data.find((model) => model.display_name === "Fable 5.1")?.capabilities.effort as any).supported, true);
+  const fable = response.data.find((model) => model.display_name === "Fable 5.1")!;
+  for (const level of ["none", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+    assert.equal((fable.capabilities.effort as any)[level].supported, true, `${level} effort is discoverable`);
+  }
+  assert.equal((fable.capabilities.image_input as any).supported, true);
   assert.equal((response.data.find((model) => model.display_name === "Fable 5.1")?.capabilities.pdf_input as any).supported, true);
   assert.equal((response.data.find((model) => model.display_name === "Fable 5.1")?.capabilities.structured_outputs as any).supported, true);
   assert.equal(response.has_more, false);
