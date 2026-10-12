@@ -27,6 +27,7 @@ export function anthropicToFccResponses(
 
   for (const message of req.messages ?? []) {
     if (message.role === "assistant") input.push(...assistantItems(message.content, toolNames));
+    else if (message.role === "system" || message.role === "developer") input.push(...developerItems(message.content));
     else input.push(...userItems(message.content, toolNames));
   }
 
@@ -45,6 +46,8 @@ export function anthropicToFccResponses(
   if (req.max_tokens !== undefined) body.max_output_tokens = req.max_tokens;
   if (req.temperature !== undefined) body.temperature = req.temperature;
   if (req.top_p !== undefined) body.top_p = req.top_p;
+  const format = structuredOutputFormat((req as any).output_config?.format);
+  if (format) body.text = { format };
 
   if (req.tools?.length) {
     body.tools = req.tools.map((tool) => ({
@@ -80,7 +83,8 @@ function validateSupportedRequest(req: AnthropicRequest): void {
   if (!isNoopContextManagement(raw.context_management)) unsupported.push("context_management");
 
   if (raw.output_config && typeof raw.output_config === "object" && !Array.isArray(raw.output_config)) {
-    for (const key of Object.keys(raw.output_config).sort()) if (key !== "effort") unsupported.push(`output_config.${key}`);
+    for (const key of Object.keys(raw.output_config).sort()) if (key !== "effort" && key !== "format") unsupported.push(`output_config.${key}`);
+    if (raw.output_config.format !== undefined) structuredOutputFormat(raw.output_config.format);
   }
   if (Array.isArray(raw.mcp_servers) && raw.mcp_servers.length) unsupported.push("mcp_servers");
   if (raw.extra_body && typeof raw.extra_body === "object" && Object.keys(raw.extra_body).length) unsupported.push("extra_body");
@@ -88,6 +92,27 @@ function validateSupportedRequest(req: AnthropicRequest): void {
   if (unsupported.length) {
     throw new ResponsesConversionError(`OpenAI Responses cannot represent these fields without data loss: ${unsupported.join(", ")}.`);
   }
+}
+
+function structuredOutputFormat(value: unknown): { type: "json_schema"; name: string; schema: Record<string, unknown>; strict: boolean } | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value) || value.type !== "json_schema" || !isRecord(value.schema)) {
+    throw new ResponsesConversionError("output_config.format must contain a JSON Schema object.");
+  }
+  const name = typeof value.name === "string" && value.name.trim() ? value.name.trim() : "response";
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(name)) throw new ResponsesConversionError("output_config.format.name must be 1-64 letters, numbers, underscores, or hyphens.");
+  if (value.strict !== undefined && typeof value.strict !== "boolean") throw new ResponsesConversionError("output_config.format.strict must be a boolean.");
+  return { type: "json_schema", name, schema: value.schema, strict: value.strict !== false };
+}
+
+function developerItems(content: string | AnthropicBlock[]): unknown[] {
+  const blocks = typeof content === "string" ? [{ type: "text", text: content }] : content;
+  if (!Array.isArray(blocks)) throw new ResponsesConversionError("System content must be text or content blocks.");
+  const text = blocks.filter((block) => blockType(block) === "text").map((block) => String((block as any).text ?? "")).join("\n");
+  if (blocks.some((block) => blockType(block) !== "text")) {
+    throw new ResponsesConversionError("Mid-conversation system messages support text blocks only.");
+  }
+  return text ? [{ type: "message", role: "developer", content: [{ type: "input_text", text }] }] : [];
 }
 
 function isNoopContextManagement(value: unknown): boolean {
@@ -176,13 +201,32 @@ function userItems(content: string | AnthropicBlock[], _toolNames: OpenAIToolNam
         output: toolResultOutput((block as any).content),
       });
     } else if (type === "document") {
-      throw new ResponsesConversionError("OpenAI Responses provider does not support Anthropic document blocks.");
+      messageParts.push(documentPart(block));
     } else {
       throw new ResponsesConversionError(`OpenAI Responses cannot represent user content block ${JSON.stringify(type)}.`);
     }
   }
   flushMessage();
   return items;
+}
+
+function documentPart(block: AnthropicBlock | Record<string, unknown>): Record<string, unknown> {
+  const source = (block as any).source;
+  if (!isRecord(source)) throw new ResponsesConversionError("PDF source is required.");
+  const filename = typeof source.filename === "string" && source.filename.trim()
+    ? source.filename.trim()
+    : typeof (block as any).title === "string" && String((block as any).title).trim()
+      ? `${String((block as any).title).trim()}.pdf`
+      : "document.pdf";
+  if (source.type === "base64") {
+    if (source.media_type !== "application/pdf" || typeof source.data !== "string") {
+      throw new ResponsesConversionError("Only base64 PDF documents with application/pdf media type are supported.");
+    }
+    return { type: "input_file", filename, file_data: `data:application/pdf;base64,${source.data}` };
+  }
+  if (source.type === "url" && typeof source.url === "string" && source.url) return { type: "input_file", file_url: source.url };
+  if (source.type === "file_id" && typeof source.file_id === "string" && source.file_id) return { type: "input_file", file_id: source.file_id };
+  throw new ResponsesConversionError("PDF source must be base64 data, a URL, or a file ID.");
 }
 
 function imagePart(block: AnthropicBlock | Record<string, unknown>): Record<string, unknown> {
