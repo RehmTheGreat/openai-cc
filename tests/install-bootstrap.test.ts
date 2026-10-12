@@ -186,9 +186,9 @@ test("fresh-install verification enforces current provider/model defaults withou
 
   assert.match(install, /default = @\{ provider = "chatgpt"; model = "gpt-5\.6-luna" \}/);
   assert.match(install, /fable = @\{ provider = "chatgpt"; model = "gpt-5\.6-luna" \}/);
-  assert.match(install, /opus = @\{ provider = "zen"; model = "deepseek-v4-flash-free" \}/);
-  assert.match(install, /sonnet = @\{ provider = "google"; model = "gemini-3\.5-flash-lite" \}/);
-  assert.match(install, /haiku = @\{ provider = "google"; model = "gemini-3\.5-flash-lite" \}/);
+  assert.match(install, /opus = @\{ provider = "chatgpt"; model = "gpt-5\.6-luna" \}/);
+  assert.match(install, /sonnet = @\{ provider = "chatgpt"; model = "gpt-5\.6-luna" \}/);
+  assert.match(install, /haiku = @\{ provider = "chatgpt"; model = "gpt-5\.6-luna" \}/);
   assert.doesNotMatch(install, /context = (?:200000|850000|1000000|1050000)/);
   assert.match(install, /model\.max_input_tokens -ne \[int64\]\$routeHealth\.contextWindow/);
   assert.match(install, /model\.max_tokens -ne \[int64\]\$route\.maxOutputTokens/);
