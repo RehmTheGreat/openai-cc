@@ -205,8 +205,8 @@ test("Admin route context and capability overrides persist while Claude-facing n
     assert.equal(state.modelConfig.routes.sonnet.reasoning, false);
 
     const publicModels = await (await fetch(`${f.base}/v1/models`)).json() as any;
-    assert.deepEqual(publicModels.data.map((model: any) => model.display_name), ["Fable", "Opus", "Sonnet", "Haiku"]);
-    const sonnet = publicModels.data.find((model: any) => model.display_name === "Sonnet");
+    assert.deepEqual(publicModels.data.map((model: any) => model.display_name), ["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5"]);
+    const sonnet = publicModels.data.find((model: any) => model.display_name === "Sonnet 5.5");
     assert.equal(sonnet.max_input_tokens, 360000);
     assert.equal(sonnet.capabilities.image_input.supported, false);
     assert.equal(sonnet.capabilities.thinking.supported, false);
