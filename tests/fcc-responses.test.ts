@@ -105,6 +105,7 @@ test("FCC port preserves PDF input, structured output, and mid-conversation syst
     { role: "system", content: "Never expose secrets." },
     { role: "user", content: [
       { type: "document", source: { type: "base64", media_type: "application/pdf", data: "JVBERi0xLjQ=" } },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "aW1hZ2U=" } },
       { type: "text", text: "Summarize this PDF." },
     ] },
   );
@@ -122,6 +123,9 @@ test("FCC port preserves PDF input, structured output, and mid-conversation syst
     && item.content.some((part: any) => part.type === "input_file"
       && part.filename === "document.pdf"
       && part.file_data === "data:application/pdf;base64,JVBERi0xLjQ=")));
+  assert.ok(converted.input.some((item: any) => item.type === "message"
+    && item.content.some((part: any) => part.type === "input_image"
+      && part.image_url === "data:image/png;base64,aW1hZ2U=")));
 });
 
 test("FCC port rejects malformed structured output and unsupported document formats", () => {
