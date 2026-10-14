@@ -175,6 +175,7 @@ async function assertPortOwnership() {
 }
 
 async function waitForPreviousGateway(previousPid, expectedBuildSha) {
+  console.log(`Waiting for previous managed gateway PID ${previousPid} to release port 8082.`);
   const deadline = Date.now() + 20000;
   while (Date.now() < deadline) {
     const pid = listenerPid();
