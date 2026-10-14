@@ -166,15 +166,34 @@ function listenerPid() {
 }
 async function assertPortOwnership() {
   const pid = listenerPid();
-  if (!pid) return;
+  if (!pid) return "";
   const state = await health();
   if (!state?.ok || Number(state.pid) !== Number(pid) || resolve(String(state.installRoot || "")) !== installRoot) {
     fail(`Port 8082 is occupied by unrelated PID ${pid}. Refusing to replace or terminate it.`);
   }
+  return pid;
+}
+
+async function waitForPreviousGateway(previousPid, expectedBuildSha) {
+  console.log(`Waiting for previous managed gateway PID ${previousPid} to release port 8082.`);
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    const pid = listenerPid();
+    if (!pid) return undefined;
+    const state = await health();
+    if (state?.ok && Number(state.pid) === Number(pid) &&
+        resolve(String(state.installRoot || "")) === installRoot &&
+        String(state.buildSha).toLowerCase() === String(expectedBuildSha).toLowerCase()) return state;
+    if (Number(pid) !== Number(previousPid)) {
+      fail(`Port 8082 changed owners during runtime update (PID ${pid}). Refusing to replace or terminate it.`);
+    }
+    await new Promise((done) => setTimeout(done, 250));
+  }
+  fail(`Previously managed gateway PID ${previousPid} did not release port 8082 after the runtime update.`);
 }
 
 const freshModelConfig = !(await exists(join(dataDir, "model-config.json")));
-await assertPortOwnership();
+const previousGatewayPid = await assertPortOwnership();
 let internal;
 let staged = "";
 let rollback = "";
@@ -237,7 +256,14 @@ try {
   }
 
   let state = await health();
-  if (!state?.ok || resolve(String(state.installRoot || "")) !== installRoot) {
+  const runningTargetBuild = state?.ok &&
+    String(state.buildSha).toLowerCase() === String(distribution.sourceCommit).toLowerCase() &&
+    resolve(String(state.installRoot || "")) === installRoot;
+  if (!runningTargetBuild && previousGatewayPid && listenerPid() === previousGatewayPid) {
+    state = await waitForPreviousGateway(previousGatewayPid, distribution.sourceCommit);
+  }
+  if (!(state?.ok && String(state.buildSha).toLowerCase() === String(distribution.sourceCommit).toLowerCase() &&
+        resolve(String(state.installRoot || "")) === installRoot)) {
     const stdout = openSync(join(logDir, "gateway.log"), "a");
     const stderr = openSync(join(logDir, "gateway.err.log"), "a");
     const child = spawn("/bin/bash", [join(current, "run-gateway.sh"), "--install-root", installRoot], {
