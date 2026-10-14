@@ -105,7 +105,7 @@ jobs:
               if (!closing && (active.dev !== initial.dev || active.ino !== initial.ino)) {
                 closing=true;
                 clearInterval(timer);
-                setTimeout(() => server.close(() => process.exit(0)), 3000);
+                setTimeout(() => server.close(() => process.exit(0)), 15000);
               }
             } catch {}
           }, 25);
