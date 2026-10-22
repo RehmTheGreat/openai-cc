@@ -263,4 +263,3 @@ async function writeJson(file: string, value: unknown): Promise<void> {
 function normalizeBaseUrl(value: string): string {
   return String(value || "").trim().replace(/\/+$/, "");
 }
-

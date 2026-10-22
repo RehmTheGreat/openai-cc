@@ -61,6 +61,7 @@ const files = platform === "darwin-arm64"
   ? [
       ["install.sh", installerPath],
       ["install-macos.mjs", join(artifactRoot, "install-macos.mjs")],
+      ["macos-provision-clients.mjs", join(artifactRoot, "macos-provision-clients.mjs")],
       [manifestName, manifestPath],
       [bundleName, bundlePath],
     ]

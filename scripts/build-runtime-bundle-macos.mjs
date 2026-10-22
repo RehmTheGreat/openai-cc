@@ -85,6 +85,7 @@ async function copyItem(rel) {
 for (const rel of [
   "dist/src", "dist/build-info.json", "dist/scripts/configure-clients.js", "dist/scripts/codex-doctor.js",
   "dist/scripts/migrate-data.js", "node_modules", "package.json", "run-gateway.sh", "run-claude.sh",
+  "uninstall-macos.mjs", "uninstall.command",
 ]) await copyItem(rel);
 
 for (const forbidden of [".data", ".git", "src", "tests", "setup.ps1", "install.ps1", "package-lock.json"]) {
@@ -121,10 +122,13 @@ if (zipped.status !== 0) fail(`zip failed: ${zipped.stderr || zipped.stdout || "
 
 const installSource = join(repoRoot, "install.sh");
 const installerSource = join(repoRoot, "install-macos.mjs");
+const provisionerSource = join(repoRoot, "macos-provision-clients.mjs");
 const installOutput = join(outputDirectory, "install.sh");
 const installerOutput = join(outputDirectory, "install-macos.mjs");
+const provisionerOutput = join(outputDirectory, "macos-provision-clients.mjs");
 await cp(installSource, installOutput, { force: false });
 await cp(installerSource, installerOutput, { force: false });
+await cp(provisionerSource, provisionerOutput, { force: false });
 
 const externalManifest = {
   schemaVersion:1,
@@ -138,6 +142,7 @@ const externalManifest = {
   contentSha256:digest,
   bootstrapSha256:await sha256File(installOutput),
   installerSha256:await sha256File(installerOutput),
+  provisionerSha256:await sha256File(provisionerOutput),
 };
 const manifestPath = join(outputDirectory, "openai-cc-runtime-manifest-darwin-arm64.json");
 if (await exists(manifestPath)) fail(`Refusing to overwrite existing manifest: ${manifestPath}`);

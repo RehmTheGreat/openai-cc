@@ -63,7 +63,7 @@ try {
 #!/bin/bash
 set -euo pipefail
 NODE_BIN="${OPENAI_CC_NODE:-$(command -v node 2>/dev/null || true)}"
-[[ -n "$NODE_BIN" ]] || { echo "Node.js 20+ is required. Install Node.js, then rerun this installer." >&2; exit 1; }
+[[ -n "$NODE_BIN" ]] || { echo "Node.js 20+ is required. Install Node.js, then rerun this legacy installer." >&2; exit 1; }
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] || { echo "This installer supports Apple Silicon macOS only." >&2; exit 1; }
 export OPENAI_CC_MAC_KEY_ID_B64='@@KEY_ID_B64@@'
 export OPENAI_CC_MAC_KEY_B64='@@KEY_B64@@'
@@ -101,10 +101,11 @@ const manifest=JSON.parse(readFileSync(manifestPath,"utf8"));
 if(manifest.schemaVersion!==1||manifest.platform!=="darwin-arm64")throw new Error("Invalid macOS distribution manifest.");
 if(!prefix.toLowerCase().endsWith(`-${String(manifest.sourceCommit).toLowerCase()}/`))throw new Error("Release prefix/source SHA mismatch.");
 const leaf=String(manifest.bundleUrl||"");if(!leaf||/[\\/]/.test(leaf))throw new Error("Unsafe bundle filename.");
-const install=await download("install.sh"), installer=await download("install-macos.mjs"), bundle=await download(leaf);
+const install=await download("install.sh"), installer=await download("install-macos.mjs"), provisioner=await download("macos-provision-clients.mjs"), bundle=await download(leaf);
 const sha=(p)=>createHash("sha256").update(readFileSync(p)).digest("hex");
 if(sha(install)!==String(manifest.bootstrapSha256).toLowerCase())throw new Error("install.sh integrity check failed.");
 if(sha(installer)!==String(manifest.installerSha256).toLowerCase())throw new Error("install-macos.mjs integrity check failed.");
+if(sha(provisioner)!==String(manifest.provisionerSha256).toLowerCase())throw new Error("macos-provision-clients.mjs integrity check failed.");
 if(sha(bundle)!==String(manifest.bundleSha256).toLowerCase())throw new Error("Runtime bundle integrity check failed.");
 const env={...process.env};for(const n of ["OPENAI_CC_MAC_KEY_ID_B64","OPENAI_CC_MAC_KEY_B64","OPENAI_CC_MAC_BUCKET_ID_B64","OPENAI_CC_MAC_PREFIX_B64","OPENAI_CC_MAC_EXPIRY"])delete env[n];
 const args=[install,"--manifest",manifestPath,"--bundle",bundle];
