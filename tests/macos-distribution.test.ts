@@ -40,6 +40,16 @@ test("macOS runtime bundle is manifest-driven and contains no target state", asy
   assert.doesNotMatch(builder, /copyItem\("\.data/);
 });
 
+test("macOS installer verification matches the current versioned model contract", async () => {
+  const install = await read("install-macos.mjs");
+  const compact = install.replace(/\s+/g, "");
+
+  assert.match(install, /fable:\s*"Fable 5\.1",\s*opus:\s*"Opus 5\.5",\s*sonnet:\s*"Sonnet 5\.5",\s*haiku:\s*"Haiku 5\.5"/);
+  for (const slot of ["default", "fable", "opus", "sonnet", "haiku"]) {
+    assert.ok(compact.includes(`${slot}:{provider:"chatgpt",model:"gpt-5.6-luna"}`), `${slot} must use the current fresh-install route`);
+  }
+});
+
 test("legacy gated macOS generator stays scoped and uses unambiguous ESM stdin", async () => {
   const generator = await read("distribution/b2/new-mac-client-installer.ps1");
   const publisher = await read("distribution/b2/publish-release.mjs");
@@ -50,6 +60,9 @@ test("legacy gated macOS generator stays scoped and uses unambiguous ESM stdin",
   assert.match(generator, /openai-cc-runtime-manifest-darwin-arm64\.json/);
   assert.match(generator, /installerSha256/);
   assert.match(generator, /\.command/);
+  assert.match(generator, /--input-type=module/);
+  assert.match(generator, /import \{ createHash \} from "node:crypto"/);
+  assert.doesNotMatch(generator, /require\("node:/);
   assert.match(generator, /revoke-grant\.mjs/);
   assert.match(generator, /\.openai-cc-private\\b2-issuer-credentials\.json/);
   assert.match(generator, /Automatic cleanup could not revoke failed client grant/);

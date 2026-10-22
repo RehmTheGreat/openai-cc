@@ -77,8 +77,8 @@ test("Claude Desktop-facing discovery exposes four routes with the one Admin con
   const configs = new ModelConfigStore(root, store); await configs.init();
   await configs.update({ contextWindow: 1_234_567 });
   const list = claudeDesktopModelList(configs.snapshot());
-  assert.deepEqual(list.data.map((model) => model.id), ["fable", "opus", "sonnet", "haiku"]);
-  assert.deepEqual(list.data.map((model) => model.display_name), ["Fable", "Opus", "Sonnet", "Haiku"]);
+  assert.deepEqual(list.data.map((model) => model.id), ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
+  assert.deepEqual(list.data.map((model) => model.display_name), ["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5"]);
   assert.deepEqual(list.data.map((model) => model.max_input_tokens), [1_234_567, 1_234_567, 1_234_567, 1_234_567]);
   const visible = JSON.stringify(list.data.map(({ id, display_name }) => ({ id, display_name })));
   assert.doesNotMatch(visible, /gpt-|deepseek|gemini|cloudflare|\[1m\]|openai-cc-/i);
@@ -146,7 +146,7 @@ test("production Cloudflare route sends the configured model, output cap, tools 
   try {
     const discovery = await fetch(`${base}/v1/models`);
     const modelList = await discovery.json() as any;
-    const sonnet = modelList.data.find((model: any) => model.id === "sonnet");
+    const sonnet = modelList.data.find((model: any) => model.id === "claude-sonnet-5-5");
     assert.equal(sonnet.max_input_tokens, 1_000_000);
     assert.equal(sonnet.max_tokens, 16384);
 

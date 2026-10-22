@@ -138,6 +138,7 @@ test("client distribution is 48-hour, link-first, bare-PC resilient, and optiona
 test("Windows startup repairs disabled state and has independent PowerShell logon paths", async () => {
   const install = await readFile(path.join(process.cwd(), "install.ps1"), "utf8");
   const launcher = await readFile(path.join(process.cwd(), "run-gateway.ps1"), "utf8");
+  const silent = await readFile(path.join(process.cwd(), "run-gateway-silent.vbs"), "utf8");
   const uninstall = await readFile(path.join(process.cwd(), "uninstall.ps1"), "utf8");
   const builder = await readFile(path.join(process.cwd(), "scripts", "build-runtime-bundle.ps1"), "utf8");
 
@@ -149,8 +150,9 @@ test("Windows startup repairs disabled state and has independent PowerShell logo
   assert.match(install, /PT15S/);
   assert.match(install, /Remove-OpenAiCcStartupRegistrations/);
   assert.match(install, /automatic startup disabled by installer option/);
-  assert.doesNotMatch(install, /run-gateway\.vbs/);
-  assert.doesNotMatch(install, /wscript\.exe/i);
+  assert.match(install, /run-gateway-silent\.vbs/);
+  assert.match(install, /wscript\.exe/i);
+  assert.match(install, /Register-LogonTaskBestEffort \$wscript/);
 
   assert.match(launcher, /\[string\]\$NodePath/);
   assert.match(launcher, /function Resolve-NodeCommand/);
@@ -160,7 +162,11 @@ test("Windows startup repairs disabled state and has independent PowerShell logo
 
   assert.match(uninstall, /Unregister-ScheduledTask/);
   assert.match(uninstall, /Explorer\\StartupApproved\\Run/);
-  assert.doesNotMatch(builder, /Copy-RuntimeItem "run-gateway\.vbs"/);
+  assert.match(builder, /Copy-RuntimeItem "run-gateway-silent\.vbs"/);
+  assert.match(silent, /WScript\.Shell/);
+  assert.match(silent, /run-gateway\.ps1/);
+  assert.match(silent, /-InstallRoot/);
+  assert.match(silent, /0, False/);
 });
 
 test("B2 bootstrap bytes are canonical across Windows and Unix working-tree line endings", async () => {
@@ -180,13 +186,13 @@ test("fresh-install verification enforces current provider/model defaults withou
 
   assert.match(install, /default = @\{ provider = "chatgpt"; model = "gpt-5\.6-luna" \}/);
   assert.match(install, /fable = @\{ provider = "chatgpt"; model = "gpt-5\.6-luna" \}/);
-  assert.match(install, /opus = @\{ provider = "zen"; model = "deepseek-v4-flash-free" \}/);
-  assert.match(install, /sonnet = @\{ provider = "google"; model = "gemini-3\.5-flash-lite" \}/);
-  assert.match(install, /haiku = @\{ provider = "google"; model = "gemini-3\.5-flash-lite" \}/);
+  assert.match(install, /opus = @\{ provider = "chatgpt"; model = "gpt-5\.6-luna" \}/);
+  assert.match(install, /sonnet = @\{ provider = "chatgpt"; model = "gpt-5\.6-luna" \}/);
+  assert.match(install, /haiku = @\{ provider = "chatgpt"; model = "gpt-5\.6-luna" \}/);
   assert.doesNotMatch(install, /context = (?:200000|850000|1000000|1050000)/);
   assert.match(install, /model\.max_input_tokens -ne \[int64\]\$routeHealth\.contextWindow/);
   assert.match(install, /model\.max_tokens -ne \[int64\]\$route\.maxOutputTokens/);
-  assert.match(install, /aliasModel\.display_name -ne \$title/);
+  assert.match(install, /aliasModel\.display_name -ne \$modelTitle/);
   assert.match(install, /v1\/models\/\$encodedAlias/);
   assert.match(install, /gateway did not expose exactly four Claude Desktop-facing routes/);
   assert.match(install, /Admin endpoint did not return HTTP 200/);

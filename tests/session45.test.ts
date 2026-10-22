@@ -87,6 +87,14 @@ test("custom API style selects Chat Completions or Responses without special mod
 test("production Gemini Sonnet path carries vision, tools, multi-turn tool results, streaming and output cap", async () => {
   const f = await fixture();
   await f.store.createApiKey({ id: "g1", provider: "google", apiKey: "secret" });
+  const routeConfig = f.models.snapshot();
+  routeConfig.routes.sonnet.provider = "google";
+  routeConfig.routes.sonnet.model = GEMINI_MODEL;
+  routeConfig.routes.haiku.provider = "google";
+  routeConfig.routes.haiku.model = GEMINI_MODEL;
+  await f.models.update(routeConfig);
+  assert.equal(f.models.routeForRequestedModel("sonnet").provider, "google");
+  assert.equal(f.models.credentialForRequestedModel("sonnet")?.provider, "google");
   let captured: any;
   const server = createReplicatedServer(f.store, f.models, { bindHost: "127.0.0.1", providerRegistry: f.providers, clientFactory: () => ({ chat: { completions: { create: async (req: any) => {
     captured = req;
@@ -100,7 +108,8 @@ test("production Gemini Sonnet path carries vision, tools, multi-turn tool resul
       { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "lookup", input: {} }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "done" }] },
     ] }) });
-    assert.equal(response.status, 200);
+    const responseBody = await response.text();
+    assert.equal(response.status, 200, responseBody);
     assert.equal(captured.model, GEMINI_MODEL);
     assert.equal(captured.max_tokens, 65536);
     assert.equal(captured.messages[0].content[1].type, "image_url");
@@ -148,6 +157,10 @@ test("large requests are not rejected by a local heuristic context estimator", a
 
 test("legacy private transport ids remain routable but are not part of public discovery", async () => {
   const f = await fixture(); await f.store.createApiKey({ id: "g1", provider: "google", apiKey: "secret" });
+  const routeConfig = f.models.snapshot();
+  routeConfig.routes.sonnet.provider = "google";
+  routeConfig.routes.sonnet.model = GEMINI_MODEL;
+  await f.models.update(routeConfig);
   const seen: string[] = [];
   const server = createReplicatedServer(f.store, f.models, { bindHost: "127.0.0.1", providerRegistry: f.providers, clientFactory: () => ({ chat: { completions: { create: async (req: any) => {
     seen.push(req.model); return { id: "ok", choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
@@ -158,7 +171,7 @@ test("legacy private transport ids remain routable but are not part of public di
     assert.equal(response.status, 200);
     response = await fetch(base + "/v1/models");
     const ids = (await response.json() as any).data.map((m: any) => m.id);
-    assert.deepEqual(ids, ["fable", "opus", "sonnet", "haiku"]);
+    assert.deepEqual(ids, ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
     assert.deepEqual(seen, [GEMINI_MODEL]);
     assert.equal(f.models.slotForRequestedModel("claude-sonnet-5"), "sonnet");
   } finally { await close(server); }
