@@ -50,6 +50,13 @@ test("macOS installer verification matches the current versioned model contract"
   }
 });
 
+test("macOS upgrade CI stops the gateway supervisor before waiting for port release", async () => {
+  const workflow = await read(".github/workflows/macos-runtime-ci.yml");
+  assert.match(workflow, /supervisor_pid_file="\$INSTALL_ROOT\/\.gateway-supervisor\.pid"/);
+  assert.match(workflow, /kill -TERM "\$supervisor_pid"/);
+  assert.doesNotMatch(workflow, /kill -TERM "\$old_pid"/);
+});
+
 test("legacy gated macOS generator stays scoped and uses unambiguous ESM stdin", async () => {
   const generator = await read("distribution/b2/new-mac-client-installer.ps1");
   const publisher = await read("distribution/b2/publish-release.mjs");

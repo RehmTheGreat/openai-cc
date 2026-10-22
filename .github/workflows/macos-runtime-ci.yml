@@ -87,8 +87,13 @@ jobs:
         run: |
           old_health="$(curl -fsS http://127.0.0.1:8082/healthz)"
           old_sha="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).buildSha)' "$old_health")"
-          old_pid="$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).pid))' "$old_health")"
-          kill -TERM "$old_pid"
+          supervisor_pid_file="$INSTALL_ROOT/.gateway-supervisor.pid"
+          test -s "$supervisor_pid_file"
+          supervisor_pid="$(cat "$supervisor_pid_file")"
+          case "$supervisor_pid" in
+            ""|*[!0-9]*) echo "Invalid managed gateway supervisor PID" >&2; exit 1 ;;
+          esac
+          kill -TERM "$supervisor_pid"
           for _ in $(seq 1 100); do
             if ! lsof -nP -tiTCP:8082 -sTCP:LISTEN >/dev/null 2>&1; then break; fi
             sleep 0.05
